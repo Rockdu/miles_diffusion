@@ -347,6 +347,7 @@ class RolloutManager:
             "truncated": [1 if sample.status == Sample.Status.TRUNCATED else 0 for sample in samples],
             "sample_indices": [sample.index for sample in samples],
         }
+        train_data["prompt"] = [sample.prompt for sample in samples]
 
         # loss mask
         # TODO: compress the loss mask
@@ -426,6 +427,7 @@ class RolloutManager:
                 "rollout_log_probs",
                 "rollout_routed_experts",
                 "prompt",
+                "metadata",
                 "teacher_log_probs",
             ]:
                 if key not in data:

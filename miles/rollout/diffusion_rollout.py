@@ -97,6 +97,7 @@ def _fill_sample_metadata(
         if prev_latents_mean_cpu is not None:
             metadata["prev_latents_mean"] = prev_latents_mean_cpu[i].clone()
         sample.metadata.update(metadata)
+        sample.train_metadata = metadata
 
         errors = validate_rollout_metadata(sample.metadata)
         if errors:

@@ -15,6 +15,7 @@ except ImportError as e:
 
 if _FSDP_AVAILABLE:
     from .actor import FSDPTrainRayActor
+    from .diffusion_actor import DiffusionFSDPTrainRayActor
     from .arguments import load_fsdp_args
 else:
 
@@ -26,8 +27,9 @@ else:
         )
 
     FSDPTrainRayActor = _raise_import_error
+    DiffusionFSDPTrainRayActor = _raise_import_error
     load_fsdp_args = _raise_import_error
 
-__all__ = ["load_fsdp_args", "FSDPTrainRayActor"]
+__all__ = ["load_fsdp_args", "FSDPTrainRayActor", "DiffusionFSDPTrainRayActor"]
 
 logging.getLogger().setLevel(logging.WARNING)

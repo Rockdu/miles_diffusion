@@ -118,6 +118,42 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="The backend for training.",
             )
             parser.add_argument(
+                "--diffusion-train",
+                action="store_true",
+                default=False,
+                help="Use diffusion GRPO training actor instead of text RL.",
+            )
+            parser.add_argument(
+                "--diffusion-train-batch-size",
+                type=int,
+                default=None,
+                help="Micro batch size for diffusion training. Defaults to full batch.",
+            )
+            parser.add_argument(
+                "--diffusion-clip-range",
+                type=float,
+                default=0.2,
+                help="Clip range for diffusion GRPO ratio.",
+            )
+            parser.add_argument(
+                "--diffusion-adv-clip-max",
+                type=float,
+                default=5.0,
+                help="Max absolute value for advantage clipping in diffusion training.",
+            )
+            parser.add_argument(
+                "--diffusion-beta",
+                type=float,
+                default=0.0,
+                help="KL coefficient for diffusion training (0 disables KL).",
+            )
+            parser.add_argument(
+                "--diffusion-cfg",
+                action="store_true",
+                default=False,
+                help="Enable classifier-free guidance during diffusion training.",
+            )
+            parser.add_argument(
                 "--qkv-format",
                 type=str,
                 choices=["thd", "bshd"],
@@ -214,6 +250,78 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "and within the output sample, you should at least set `tokens`, `response_length`, `reward` "
                     "and `truncated`."
                 ),
+            )
+            parser.add_argument(
+                "--diffusion-model",
+                type=str,
+                default="stabilityai/stable-diffusion-3.5-medium",
+                help="HuggingFace model id for diffusion rollout.",
+            )
+            parser.add_argument(
+                "--diffusion-device",
+                type=str,
+                default=None,
+                help="Device for diffusion rollout, e.g. cuda or cpu. Defaults to auto.",
+            )
+            parser.add_argument(
+                "--diffusion-dtype",
+                type=str,
+                default="fp16",
+                choices=["fp16", "fp32"],
+                help="dtype for diffusion pipeline weights.",
+            )
+            parser.add_argument(
+                "--diffusion-num-steps",
+                type=int,
+                default=10,
+                help="Number of diffusion inference steps for rollout.",
+            )
+            parser.add_argument(
+                "--diffusion-eval-num-steps",
+                type=int,
+                default=None,
+                help="Number of diffusion inference steps for eval rollout. Defaults to diffusion-num-steps.",
+            )
+            parser.add_argument(
+                "--diffusion-guidance-scale",
+                type=float,
+                default=4.5,
+                help="Guidance scale for diffusion rollout.",
+            )
+            parser.add_argument(
+                "--diffusion-noise-level",
+                type=float,
+                default=0.7,
+                help="Noise level for diffusion rollout.",
+            )
+            parser.add_argument(
+                "--diffusion-height",
+                type=int,
+                default=512,
+                help="Output image height for diffusion rollout.",
+            )
+            parser.add_argument(
+                "--diffusion-width",
+                type=int,
+                default=512,
+                help="Output image width for diffusion rollout.",
+            )
+            parser.add_argument(
+                "--diffusion-return-prev-latents-mean",
+                action="store_true",
+                help="Whether to store prev_latents_mean for KL regularization.",
+            )
+            parser.add_argument(
+                "--diffusion-reward",
+                type=str,
+                default="pickscore",
+                help="Reward function name for diffusion rollout.",
+            )
+            parser.add_argument(
+                "--diffusion-reward-device",
+                type=str,
+                default=None,
+                help="Device for diffusion reward model, defaults to diffusion-device.",
             )
             parser.add_argument(
                 "--rollout-temperature",
