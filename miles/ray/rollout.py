@@ -347,6 +347,7 @@ class RolloutManager:
             "truncated": [1 if sample.status == Sample.Status.TRUNCATED else 0 for sample in samples],
             "sample_indices": [sample.index for sample in samples],
         }
+        # Pass prompt text for diffusion training to recompute embeddings.
         train_data["prompt"] = [sample.prompt for sample in samples]
 
         # loss mask
@@ -427,6 +428,7 @@ class RolloutManager:
                 "rollout_log_probs",
                 "rollout_routed_experts",
                 "prompt",
+                # Propagate rollout metadata (e.g., diffusion trajectories) to training.
                 "metadata",
                 "teacher_log_probs",
             ]:

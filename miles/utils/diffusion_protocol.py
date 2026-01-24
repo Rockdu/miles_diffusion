@@ -8,7 +8,11 @@ import torch
 
 @dataclass(frozen=True)
 class DiffusionRolloutSpec:
+    # Required rollout keys to reconstruct per-step log_prob_new and PPO ratio in training.
+    #latents and next latents for log_prob_new in training, log_prob_old used with log_prob_new (in training) to get ratio.
     required_keys: tuple[str, ...] = ("timesteps", "latents", "next_latents", "log_prob_old")
+    # Optional rollout keys for KL regularization or debugging.
+    #mean of distribution p(x_{t+1} | x_t), for KL
     optional_keys: tuple[str, ...] = ("prev_latents_mean",)
 
 
@@ -44,6 +48,7 @@ def _normalize_latents(tensor: torch.Tensor) -> tuple[int, int]:
 
 
 def validate_rollout_metadata(metadata: dict) -> list[str]:
+    # Validate that rollout metadata contains required tensors and aligned shapes.
     errors: list[str] = []
     spec = DiffusionRolloutSpec()
 

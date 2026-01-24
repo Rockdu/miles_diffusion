@@ -117,6 +117,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default="megatron",
                 help="The backend for training.",
             )
+            # Diffusion GRPO training knobs (used by DiffusionFSDPTrainRayActor).
             parser.add_argument(
                 "--diffusion-train",
                 action="store_true",

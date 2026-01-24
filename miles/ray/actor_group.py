@@ -84,6 +84,7 @@ class RayTrainGroup:
 
         else:
             if self.args.diffusion_train:
+                # Use diffusion-specific FSDP actor when running GRPO for diffusion.
                 from miles.backends.fsdp_utils import DiffusionFSDPTrainRayActor
 
                 actor_impl = DiffusionFSDPTrainRayActor

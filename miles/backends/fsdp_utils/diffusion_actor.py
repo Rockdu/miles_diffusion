@@ -19,6 +19,7 @@ from miles.utils.timer import Timer, timer
 from .actor import apply_fsdp2
 from .lr_scheduler import get_lr_scheduler
 from .parallel import create_fsdp_parallel_state
+from ..training_utils.log_utils import gather_log_data
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +42,11 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
             args.diffusion_model,
             torch_dtype=torch.float16 if args.diffusion_dtype == "fp16" else torch.float32,
         )
+        # Keep the full pipeline for scheduler/encoding, but only train the transformer.
         self.pipeline.to(torch.cuda.current_device())
         self.pipeline.transformer.train()
 
+        # Wrap the transformer with FSDP to enable data-parallel training.
         self.pipeline.transformer = apply_fsdp2(
             self.pipeline.transformer,
             mesh=self.parallel_state.dp_mesh,
@@ -69,6 +72,7 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
         return int(getattr(self.args, "start_rollout_id", 0))
 
     def _encode_prompt(self, prompts: list[str]):
+        # Encode prompts into embeddings on the training device.
         prompt_embeds, neg_prompt_embeds, pooled_prompt_embeds, neg_pooled_prompt_embeds = self.pipeline.encode_prompt(
             prompt=prompts,
             prompt_2=None,
@@ -88,6 +92,7 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
             lora_scale=None,
         )
         if self.args.diffusion_cfg:
+            # Concatenate negative/positive embeds for classifier-free guidance.
             prompt_embeds = torch.cat([neg_prompt_embeds, prompt_embeds], dim=0)
             pooled_prompt_embeds = torch.cat([neg_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
         return prompt_embeds, pooled_prompt_embeds
@@ -100,9 +105,11 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
         prompt_embeds: torch.Tensor,
         pooled_prompt_embeds: torch.Tensor,
     ) -> torch.Tensor:
+        # Recompute per-step log_prob under the current model parameters.
         log_probs = []
         for j in range(timesteps.shape[1]):
             if self.args.diffusion_cfg:
+                # CFG: duplicate batch for uncond/cond pass, then combine.
                 latent_model_input = torch.cat([latents[:, j]] * 2)
                 timestep = torch.cat([timesteps[:, j]] * 2)
                 noise_pred = self.model(
@@ -125,6 +132,7 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
                     return_dict=False,
                 )[0]
 
+            # Use the same SDE step as rollout to compute log_prob_new.
             _, log_prob, _, _ = sde_step_with_logprob(
                 self.pipeline.scheduler,
                 noise_pred.float(),
@@ -142,6 +150,7 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
             self.wake_up()
 
         with timer("train"):
+            # Fetch rollout data for this DP rank; metadata carries diffusion trajectories.
             rollout_data = process_rollout_data(
                 self.args,
                 rollout_data_ref,
@@ -159,6 +168,15 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
             micro_batch = self.args.diffusion_train_batch_size
             if micro_batch is None or micro_batch <= 0:
                 micro_batch = batch_size
+
+            log_stats = {
+                "loss": [],
+                "approx_kl": [],
+                "clipfrac": [],
+                "clipfrac_gt_one": [],
+                "clipfrac_lt_one": [],
+                "reward_mean": [],
+            }
 
             for start in range(0, batch_size, micro_batch):
                 end = min(batch_size, start + micro_batch)
@@ -179,6 +197,7 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
                     torch.cuda.current_device(), dtype=torch.float32
                 )
 
+                # Broadcast per-sample reward into per-timestep advantage.
                 advantage = broadcast_advantage(batch_rewards, timesteps)
                 prompt_embeds, pooled_prompt_embeds = self._encode_prompt(batch_prompts)
 
@@ -201,6 +220,7 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
                     -self.args.diffusion_adv_clip_max,
                     self.args.diffusion_adv_clip_max,
                 )
+                # PPO/GRPO ratio and clipped objective.
                 ratio = torch.exp(log_prob_new - log_prob_old)
                 unclipped = -advantages * ratio
                 clipped = -advantages * torch.clamp(
@@ -213,8 +233,29 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
                 self.optimizer.step()
                 self.lr_scheduler.step()
 
-                if dist.get_rank() == 0:
-                    logger.info("diffusion_train loss=%.6f", loss.item())
+                log_stats["loss"].append(loss.detach().float())
+                log_stats["approx_kl"].append(0.5 * torch.mean((log_prob_new - log_prob_old) ** 2).detach().float())
+                log_stats["clipfrac"].append(
+                    torch.mean((torch.abs(ratio - 1.0) > self.args.diffusion_clip_range).float()).detach().float()
+                )
+                log_stats["clipfrac_gt_one"].append(
+                    torch.mean((ratio - 1.0 > self.args.diffusion_clip_range).float()).detach().float()
+                )
+                log_stats["clipfrac_lt_one"].append(
+                    torch.mean((1.0 - ratio > self.args.diffusion_clip_range).float()).detach().float()
+                )
+                log_stats["reward_mean"].append(batch_rewards.mean().detach().float())
+
+            if log_stats["loss"]:
+                # Reduce and log diffusion training metrics on DP source rank.
+                reduced = {k: torch.stack(v).mean().item() for k, v in log_stats.items()}
+                gather_log_data(
+                    metric_name="diffusion_train",
+                    args=self.args,
+                    rollout_id=rollout_id,
+                    log_dict=reduced,
+                    parallel_state=self.parallel_state,
+                )
 
         if self.args.offload_train:
             self.sleep()

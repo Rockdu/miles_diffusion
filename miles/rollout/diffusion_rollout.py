@@ -41,6 +41,7 @@ def _get_pipeline(args: Namespace) -> StableDiffusion3Pipeline:
     if _PIPELINE is not None:
         return _PIPELINE
 
+    # Load SD3 pipeline once and reuse across rollout calls.
     model_id = getattr(args, "diffusion_model", "stabilityai/stable-diffusion-3.5-medium")
     dtype = _get_dtype(args)
     device = _get_device(args)
@@ -54,6 +55,7 @@ def _get_reward_fn(args: Namespace):
     if _REWARD_FN is not None:
         return _REWARD_FN
 
+    # Reward selection is minimal for now; default to PickScore.
     reward_name = getattr(args, "diffusion_reward", "pickscore")
     device = getattr(args, "diffusion_reward_device", None) or str(_get_device(args))
     if reward_name == "pickscore":
@@ -67,6 +69,7 @@ def _make_generators(prompts: list[str], base_seed: int, seed_offset: int) -> li
     generators = []
     for idx, prompt in enumerate(prompts):
         del prompt
+        # Per-sample generator ensures diverse images within the same prompt group.
         seed = (base_seed + seed_offset + idx) % (2**31)
         generator = torch.Generator().manual_seed(seed)
         generators.append(generator)
@@ -81,6 +84,7 @@ def _fill_sample_metadata(
     log_prob_old: torch.Tensor,
     prev_latents_mean: torch.Tensor | None,
 ) -> None:
+    # Move large rollout tensors to CPU and store per-sample slices in metadata.
     timesteps_cpu = timesteps.cpu()
     latents_cpu = latents.cpu()
     next_latents_cpu = next_latents.cpu()
@@ -99,6 +103,7 @@ def _fill_sample_metadata(
         sample.metadata.update(metadata)
         sample.train_metadata = metadata
 
+        # Sanity check required keys and shape alignment.
         errors = validate_rollout_metadata(sample.metadata)
         if errors:
             raise ValueError(f"Invalid diffusion rollout metadata: {errors}")
@@ -110,11 +115,13 @@ def _run_rollout_group(
     pipeline = _get_pipeline(args)
     device = _get_device(args)
 
+    # Each group is multiple samples of the same prompt.
     prompts = [sample.prompt for sample in group]
     num_steps = getattr(args, "diffusion_num_steps", 10)
     if evaluation and getattr(args, "diffusion_eval_num_steps", None) is not None:
         num_steps = args.diffusion_eval_num_steps
 
+    # Deterministic seeding per rollout/group/sample.
     seed_offset = getattr(group[0], "group_index", 0) or 0
     seed_offset += rollout_id * 1000
     generators = _make_generators(prompts, getattr(args, "rollout_seed", 0), seed_offset)
@@ -124,6 +131,7 @@ def _run_rollout_group(
     width = getattr(args, "diffusion_width", 512)
     return_prev_latents_mean = getattr(args, "diffusion_return_prev_latents_mean", False)
 
+    # Run patched pipeline to get images + trajectory + per-step log-prob.
     output = pipeline_with_logprob(
         pipeline,
         prompt=prompts,
@@ -143,8 +151,10 @@ def _run_rollout_group(
         images, all_latents, all_log_probs = output
         all_prev_latents_mean = None
 
+    # Reconstruct timesteps from scheduler so training can recompute log_prob_new.
     timesteps, _ = retrieve_timesteps(pipeline.scheduler, num_steps, device)
 
+    # Convert list trajectories into (B, T, C, H, W) tensors.
     latents = torch.stack(all_latents[:-1], dim=1)
     next_latents = torch.stack(all_latents[1:], dim=1)
     log_prob_old = torch.stack(all_log_probs, dim=1)
