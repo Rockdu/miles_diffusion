@@ -335,6 +335,8 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
                 micro_batch = batch_size
 
             advantages_1d, per_prompt_stats = self._compute_per_prompt_advantages(prompts, rewards)
+            accum_steps = max(1, int(getattr(self.args, "diffusion_grad_accum_steps", 1)))
+            accum_counter = 0
 
             log_stats = {
                 "loss": [],
@@ -390,42 +392,63 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
                     -self.args.diffusion_adv_clip_max,
                     self.args.diffusion_adv_clip_max,
                 )
-                # PPO/GRPO ratio and clipped objective.
-                ratio = torch.exp(log_prob_new - log_prob_old)
-                unclipped = -advantages * ratio
-                clipped = -advantages * torch.clamp(
-                    ratio, 1.0 - self.args.diffusion_clip_range, 1.0 + self.args.diffusion_clip_range
-                )
-                policy_loss = torch.mean(torch.maximum(unclipped, clipped))
-                kl_loss = torch.zeros((), device=policy_loss.device)
-                loss = policy_loss + kl_loss
 
+                # Accumulate gradients over timesteps (flow_grpo-style).
+                num_timesteps = timesteps.shape[1]
                 self.optimizer.zero_grad(set_to_none=True)
-                loss.backward()
+                effective_accum = accum_steps * num_timesteps
+                for j in range(num_timesteps):
+                    ratio = torch.exp(log_prob_new[:, j] - log_prob_old[:, j])
+                    unclipped = -advantages[:, j] * ratio
+                    clipped = -advantages[:, j] * torch.clamp(
+                        ratio, 1.0 - self.args.diffusion_clip_range, 1.0 + self.args.diffusion_clip_range
+                    )
+                    policy_loss = torch.mean(torch.maximum(unclipped, clipped))
+                    kl_loss = torch.zeros((), device=policy_loss.device)
+                    loss = policy_loss + kl_loss
+
+                    loss.backward()
+                    accum_counter += 1
+
+                    log_stats["loss"].append(loss.detach().float())
+                    log_stats["policy_loss"].append(policy_loss.detach().float())
+                    log_stats["kl_loss"].append(kl_loss.detach().float())
+                    log_stats["approx_kl"].append(
+                        0.5 * torch.mean((log_prob_new[:, j] - log_prob_old[:, j]) ** 2).detach().float()
+                    )
+                    log_stats["clipfrac"].append(
+                        torch.mean((torch.abs(ratio - 1.0) > self.args.diffusion_clip_range).float()).detach().float()
+                    )
+                    log_stats["clipfrac_gt_one"].append(
+                        torch.mean((ratio - 1.0 > self.args.diffusion_clip_range).float()).detach().float()
+                    )
+                    log_stats["clipfrac_lt_one"].append(
+                        torch.mean((1.0 - ratio > self.args.diffusion_clip_range).float()).detach().float()
+                    )
+                    log_stats["reward_avg"].append(batch_rewards.mean().detach().float())
+
+                    if accum_counter % effective_accum == 0:
+                        self.optimizer.step()
+                        self.lr_scheduler.step()
+                        self.global_step += 1
+                        self.optimizer.zero_grad(set_to_none=True)
+
+                        reduced = {k: torch.stack(v).mean().item() for k, v in log_stats.items()}
+                        reduced.update(per_prompt_stats)
+                        self._gather_and_log_metrics(rollout_id, reduced, step=self.global_step)
+                        log_stats = {k: [] for k in log_stats}
+
+            # Flush remaining gradients/logs if the rollout ended mid-accumulation.
+            if accum_counter % max(1, accum_steps * timesteps.shape[1]) != 0:
                 self.optimizer.step()
                 self.lr_scheduler.step()
                 self.global_step += 1
+                self.optimizer.zero_grad(set_to_none=True)
 
-                log_stats["loss"].append(loss.detach().float())
-                log_stats["policy_loss"].append(policy_loss.detach().float())
-                log_stats["kl_loss"].append(kl_loss.detach().float())
-                log_stats["approx_kl"].append(0.5 * torch.mean((log_prob_new - log_prob_old) ** 2).detach().float())
-                log_stats["clipfrac"].append(
-                    torch.mean((torch.abs(ratio - 1.0) > self.args.diffusion_clip_range).float()).detach().float()
-                )
-                log_stats["clipfrac_gt_one"].append(
-                    torch.mean((ratio - 1.0 > self.args.diffusion_clip_range).float()).detach().float()
-                )
-                log_stats["clipfrac_lt_one"].append(
-                    torch.mean((1.0 - ratio > self.args.diffusion_clip_range).float()).detach().float()
-                )
-                log_stats["reward_avg"].append(batch_rewards.mean().detach().float())
-
-            if log_stats["loss"]:
-                reduced = {k: torch.stack(v).mean().item() for k, v in log_stats.items()}
-                reduced.update(per_prompt_stats)
-                # Log with Flow-GRPO-aligned keys (no diffusion_train/ prefix).
-                self._gather_and_log_metrics(rollout_id, reduced, step=self.global_step)
+                if log_stats["loss"]:
+                    reduced = {k: torch.stack(v).mean().item() for k, v in log_stats.items()}
+                    reduced.update(per_prompt_stats)
+                    self._gather_and_log_metrics(rollout_id, reduced, step=self.global_step)
 
         if self.args.offload_train:
             self.sleep()

@@ -143,6 +143,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Max absolute value for advantage clipping in diffusion training.",
             )
             parser.add_argument(
+                "--diffusion-grad-accum-steps",
+                type=int,
+                default=1,
+                help="Gradient accumulation steps for diffusion training (multiplied by num_timesteps).",
+            )
+            parser.add_argument(
                 "--diffusion-disable-per-prompt-stat-tracking",
                 action="store_true",
                 default=False,
