@@ -238,6 +238,7 @@ class SGLangDiffusionEngine(RayActor):
         self,
         serialized_named_tensors: list[str],
         load_format: str | None = None,
+        flush_cache: bool = False,
         weight_version: str | None = None,
     ):
         """
@@ -249,7 +250,8 @@ class SGLangDiffusionEngine(RayActor):
         # SGL-D TODO: SGLang-Diffusion support update weights from tensor
         payload = {
             "serialized_named_tensors": serialized_named_tensors,
-            "load_format": load_format
+            "load_format": load_format,
+            "flush_cache": flush_cache,
         }
         if weight_version is not None:
             payload["weight_version"] = weight_version
