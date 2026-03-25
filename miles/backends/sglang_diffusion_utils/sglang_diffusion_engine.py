@@ -100,22 +100,6 @@ class SGLangDiffusionEngine(RayActor):
         # remove PD Disaggregation
         self.base_gpu_id = base_gpu_id
 
-    def compute_reward(self, rm_type: str, response: str, prompt: str) -> float:
-        """Compute a reward on the engine's GPU.
-
-        Called via ``.remote()`` from ``RolloutManager``.  Reward models are
-        loaded lazily on the first request and reused afterwards.
-        """
-        if not hasattr(self, "_reward_models"):
-            self._reward_models = {}
-        if rm_type == "ocr":
-            if "ocr" not in self._reward_models:
-                from miles.rollout.rm_hub.ocr import create_ocr_scorer
-
-                self._reward_models["ocr"] = create_ocr_scorer(use_gpu=True)
-            return self._reward_models["ocr"](response, prompt)
-        raise NotImplementedError(f"Reward type '{rm_type}' is not supported on engine")
-
     def init(self, dist_init_addr, port, nccl_port, host=None, disaggregation_bootstrap_port=None):
         self.router_ip = self.args.sglang_router_ip
         self.router_port = self.args.sglang_router_port

@@ -84,14 +84,6 @@ class RolloutManager:
         self.rollout_engine_lock = Lock.options(num_cpus=1, num_gpus=0).remote()
         self.rollout_id = -1
 
-        # Expose engine handles so that async_rm can dispatch GPU-heavy reward
-        # computation (e.g. OCR) to the rollout engines instead of running
-        # locally on the CPU-only RolloutManager.
-        live_engines = [e for e in self.all_rollout_engines if e is not None]
-        if live_engines:
-            args._reward_engines = live_engines
-            logger.info("Registered %d rollout engines as reward workers", len(live_engines))
-
         self._metric_checker = MetricChecker.maybe_create(args)
         self._health_monitor = None
         if self.args.use_fault_tolerance:
