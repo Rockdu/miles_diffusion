@@ -8,19 +8,16 @@ from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
-import pybase64
-import sglang_router
-from packaging.version import parse
 from tqdm import tqdm
 
 from miles.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput
 from miles.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
 from miles.utils.async_utils import run
-from miles.utils.data import Dataset
+from miles.utils.diffusion_data import Dataset as DiffusionDataset
+from miles.utils.diffusion_rollout_response import apply_rollout_image_response
 from miles.utils.eval_config import EvalDatasetConfig
-from miles.utils.http_utils import get, post
+from miles.utils.http_utils import post
 from miles.utils.misc import SingletonMeta, load_function
-from miles.utils.processing_utils import encode_image_for_rollout_engine, load_processor, load_tokenizer
 from miles.utils.types import Sample
 
 from .rm_hub import async_rm, batched_async_rm
@@ -30,40 +27,73 @@ __all__ = ["generate_rollout"]
 logger = logging.getLogger(__name__)
 
 
+def build_rollout_images_payload(
+    args: Namespace,
+    prompt: str,
+    *,
+    seed: int,
+    num_outputs_per_prompt: int = 1,
+    extra_sampling_params: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build JSON body for ``POST /rollout/images`` (``RolloutImageRequest``). Omits keys with ``None`` values
+    except boolean return flags, which are always sent explicitly.
+    """
+    neg = getattr(args, "diffusion_negative_prompt", None)
+    if neg is None:
+        neg = [" "] * len(prompt)  # FlowGRPO default
+    num_steps = args.diffusion_num_steps
+
+    payload: dict[str, Any] = {
+        "prompt": prompt,
+        "seed": int(seed),
+        "generator_device": getattr(args, "rollout_generator_device", "cuda"),
+        "rollout_sde_type": getattr(args, "rollout_sde_type", "sde"),
+        "rollout_noise_level": float(getattr(args, "diffusion_noise_level", 0.7)),
+        "rollout_log_prob_no_const": bool(getattr(args, "rollout_log_prob_no_const", False)),
+        "rollout_debug_mode": bool(getattr(args, "rollout_debug_mode", False)),
+        "rollout_return_dit_env": True,
+        "rollout_return_dit_trajectory": True,
+        "num_outputs_per_prompt": num_outputs_per_prompt,
+    }
+
+    optional: dict[str, Any] = {
+        "negative_prompt": neg,
+        "width": getattr(args, "diffusion_width", None),
+        "height": getattr(args, "diffusion_height", None),
+        "num_inference_steps": num_steps,
+        "guidance_scale": getattr(args, "diffusion_guidance_scale", None),
+        "true_cfg_scale": getattr(args, "diffusion_true_cfg_scale", None),
+    }
+
+    for k, v in optional.items():
+        if v is not None:
+            payload[k] = v
+
+    if extra_sampling_params:
+        payload["extra_sampling_params"] = extra_sampling_params
+
+    return payload
+
+
 class GenerateState(metaclass=SingletonMeta):
-    """
-    The global state for the generation process.
-    """
+    """Global state for sglang-diffusion image rollout."""
 
     def __init__(self, args: Namespace) -> None:
-        # persistent state for the generation process
         self.args = args
 
         self.semaphore = asyncio.Semaphore(
             args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
         )
-        self.sampling_params: dict[str, Any] = dict(
-            # TODO: Diffusion sampling params
-            rollout=True,
+        # Merged into request ``extra_sampling_params``; may include per-call ``seed`` (stripped in ``generate``).
+        self.extra_sampling_params: dict[str, Any] = {}
+        sampling_seed_base = args.rollout_seed
+        self.group_sampling_seeds = [sampling_seed_base + i for i in range(args.rollout_num_outputs_per_prompt)]
 
-            # temperature=args.rollout_temperature,
-            # top_p=args.rollout_top_p,
-            # top_k=args.rollout_top_k,
-            # max_new_tokens=args.rollout_max_response_len,
-            # stop=args.rollout_stop,
-            # stop_token_ids=args.rollout_stop_token_ids,
-            # skip_special_tokens=args.rollout_skip_special_tokens,
-            # no_stop_trim=True,
-            # spaces_between_special_tokens=False,
-        )
-
-        # dp rank balancing
         self.dp_counts = [0] * (args.sglang_dp_size or 1)
         self.dp_rank = 0
 
         self.reset()
 
-    ## mini router
     @contextmanager
     def dp_rank_context(self):
         candidates = [i for i, count in enumerate(self.dp_counts) if count == min(self.dp_counts)]
@@ -85,11 +115,10 @@ class GenerateState(metaclass=SingletonMeta):
         for group in samples:
             self.pendings.add(
                 asyncio.create_task(
-                    # submit a group of samples as a single task.
                     generate_and_rm_group(
                         self.args,
                         group,
-                        sampling_params=self.sampling_params.copy(),
+                        extra_sampling_params=self.extra_sampling_params.copy(),
                         evaluation=False,
                     )
                 )
@@ -97,7 +126,7 @@ class GenerateState(metaclass=SingletonMeta):
         self.remaining_batch_size += len(samples)
 
 
-async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, Any]) -> Sample:
+async def generate_microgroup(args: Namespace, sample: Sample, sampling_params: dict[str, Any]) -> Sample:
     """Generate using traditional SGLang router with token-based workflow"""
     # if args.ci_test:
     #     assert isinstance(sample.prompt, str)
@@ -105,19 +134,9 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     state = GenerateState(args)
     url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
 
-    # assert (
-    #     sample.status == Sample.Status.PENDING or sample.status == Sample.Status.ABORTED
-    # ), f"Sample status is {sample.status}"
+    # Prepare payload for sglang server
+    payload = build_rollout_images_payload(args, sample, seed=sampling_params["seed"], num_outputs_per_prompt=sampling_params["num_outputs_per_prompt"])
 
-    #####################################
-    # Prepare payload for sglang server #
-    payload = {
-        "sampling_params": sampling_params,
-        "return_logprob": True,
-    }
-    payload["prompt"] = sample.prompt
-    #                                   #
-    #####################################
 
     output = await post(url, payload)
 
@@ -141,15 +160,12 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     return sample
 
 
-async def generate_and_rm(
+async def generate_and_rm_microgroup(
     args: Namespace,
-    sample: Sample | list[Sample],
+    microgroup: list[Sample],
     sampling_params: dict[str, Any],
     evaluation: bool = False,
-) -> Sample | list[Sample]:
-    # mask previous off-policy generation for partial rollout
-    if args.partial_rollout and args.mask_offpolicy_in_partial_rollout and sample.response_length > 0:
-        sample.loss_mask = [0] * sample.response_length
+) -> list[Sample]:
 
     # For samples with existing response, check if they're complete
     if sample.status == Sample.Status.COMPLETED or sample.status == Sample.Status.TRUNCATED:
@@ -175,7 +191,7 @@ async def generate_and_rm(
                 else:
                     sample = await custom_generate_func(args, sample, sampling_params)
             else:
-                sample = await generate(args, sample, sampling_params)
+                sample = await generate_microgroup(args, sample, sampling_params)
 
     # for the rm that need the whole group, we will not do the rm here
     if args.group_rm:
@@ -212,10 +228,11 @@ async def generate_and_rm_group(
         return group
 
     tasks = []
-    for idx, sample in enumerate(group):
+    for idx in range(0, len(group), args.diffusion_microgroup_size):
+        microgroup = group[idx:idx + args.diffusion_microgroup_size]
         current_sampling_params = sampling_params.copy()
         tasks.append(
-            asyncio.create_task(generate_and_rm(args, sample, current_sampling_params, evaluation=evaluation))
+            asyncio.create_task(generate_and_rm_microgroup(args, microgroup, current_sampling_params, evaluation=evaluation))
         )
 
     group = await asyncio.gather(*tasks)

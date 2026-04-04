@@ -325,6 +325,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Number of rollout batches to aggregate per epoch (matches Flow-GRPO sampling cadence).",
             )
             parser.add_argument(
+                "--diffusion-microgroup-size",
+                type=int,
+                default=1,
+                help="Diffusion rollout microgroup size (sub-batch of samples per prompt). Defaults to 1.",
+            )
+            parser.add_argument(
                 "--diffusion-eval-num-steps",
                 type=int,
                 default=None,
@@ -353,6 +359,36 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=int,
                 default=512,
                 help="Output image width for diffusion rollout.",
+            )
+            parser.add_argument(
+                "--diffusion-negative-prompt",
+                type=str,
+                default=None,
+                help="Negative prompt for sglang-diffusion POST /rollout/images.",
+            )
+            parser.add_argument(
+                "--diffusion-true-cfg-scale",
+                type=float,
+                default=None,
+                help="Optional true_cfg_scale for sglang-diffusion POST /rollout/images.",
+            )
+            parser.add_argument(
+                "--rollout-generator-device",
+                type=str,
+                default="cuda",
+                help="generator_device field for POST /rollout/images.",
+            )
+            parser.add_argument(
+                "--rollout-sde-type",
+                type=str,
+                default="sde",
+                help="rollout_sde_type for POST /rollout/images.",
+            )
+            parser.add_argument(
+                "--rollout-log-prob-no-const",
+                action="store_true",
+                default=False,
+                help="Set rollout_log_prob_no_const=true on POST /rollout/images.",
             )
             parser.add_argument(
                 "--diffusion-return-prev-latents-mean",

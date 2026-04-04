@@ -70,7 +70,7 @@ class CondKwargs:
 
 
 @dataclass
-class DenoisingStatic:
+class DenoisingEnv:
     image_kwargs: Any | None = None
     pos_cond_kwargs: CondKwargs | None = None
     neg_cond_kwargs: CondKwargs | None = None
@@ -78,17 +78,9 @@ class DenoisingStatic:
 
 
 @dataclass
-class DenoisingTrajectory:
+class DiTTrajectory:
     latent_model_inputs: RolloutTensorRef | None = None
     timesteps: RolloutTensorRef | None = None
-
-
-@dataclass
-class DenoisingEnv:
-    """Matches ``denoising_env`` in ``POST /rollout/images`` (``static`` + ``trajectory``)."""
-
-    static: DenoisingStatic | None = None
-    trajectory: DenoisingTrajectory | None = None
 
 
 @dataclass
@@ -98,6 +90,9 @@ class Sample:
     Diffusion image rollout: fill from sglang-diffusion ``POST /rollout/images`` via
     :meth:`from_rollout_image_response` or :meth:`apply_rollout_image_response` (see
     :mod:`miles.utils.diffusion_rollout_response`).
+
+    Rollout tensors (``generated_output``, trajectory, log-probs, etc.) are **per-sample** shapes
+    ``[T, ...]`` as serialized by the engine (no leading batch dimension).
     """
 
     group_index: int | None = None
@@ -108,11 +103,12 @@ class Sample:
     prompt: str = ""
     # reproducibility
     seed: int | None = None
-    # Lazy: :class:`SafetensorsBase64LazyTensor` (safetensors+b64 ``str``); eager: :class:`torch.Tensor`
+    # Lazy: :class:`SafetensorsBase64LazyTensor` (safetensors+b64 ``str``); eager: :class:`torch.Tensor` (shape ``[T, ...]``)
     generated_output: RolloutTensorRef | None = None
     rollout_log_probs: RolloutTensorRef | None = None
     rollout_debug_tensors: RolloutDebugTensors | None = None
     denoising_env: DenoisingEnv | None = None
+    dit_trajectory: DiTTrajectory | None = None
 
     inference_time_s: float | None = None
     peak_memory_mb: float | None = None
@@ -126,7 +122,7 @@ class Sample:
         TRUNCATED = "truncated"
         ABORTED = "aborted"
         # Indicates a recoverable or non-critical failure during generation (e.g., tool call failure,
-        # external API error, parsing error). Unlike ABORTED, FAILED samples may still contain partial
+        # external API error, parsing err"""  """or). Unlike ABORTED, FAILED samples may still contain partial
         # valid output and can be retried or handled gracefully.
         FAILED = "failed"
 
