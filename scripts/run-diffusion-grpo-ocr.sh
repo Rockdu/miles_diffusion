@@ -7,7 +7,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=1,2,3,4
 # WandB: enable if WANDB_API_KEY is present.
 RUN_NAME="diffusion_grpo_$(date +%Y%m%d_%H%M%S)"
 WANDB_ARGS=()
@@ -40,12 +40,12 @@ python -u "${ROOT_DIR}/train.py" \
   --num-rollout 100000 \
   --diffusion-train-batch-size 2 \
   --actor-num-gpus-per-node 4 \
-  --rollout-num-gpus 0 \
-  --rollout-num-gpus-per-engine 0 \
+  --rollout-num-gpus 4 \
+  --rollout-num-gpus-per-engine 1 \
   --num-gpus-per-node 4 \
   --colocate \
   --offload-rollout \
-  --diffusion-model stabilityai/stable-diffusion-3.5-medium \
+  --diffusion-model Qwen/Qwen-Image \
   --diffusion-reward ocr:1.0 \
   --reward-key avg \
   --diffusion-dtype fp32 \
@@ -55,7 +55,6 @@ python -u "${ROOT_DIR}/train.py" \
   --diffusion-rollout-noise-level 0.7 \
   --diffusion-height 512 \
   --diffusion-width 512 \
-  --sglang-disable-cuda-graph \
   --sglang-mem-fraction-static 0.7 \
   --sglang-cuda-graph-max-bs 16 \
   --global-batch-size 128 \
