@@ -37,15 +37,6 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
-def _is_ocr_rm_type(rm_type: str | None) -> bool:
-    if rm_type is None:
-        return False
-    value = rm_type.strip()
-    if value.startswith("boxed_"):
-        value = value[len("boxed_") :]
-    return value == "ocr"
-
-
 @ray.remote
 class RolloutManager:
     """The class to run rollout and convert rollout data to training data."""
@@ -92,13 +83,6 @@ class RolloutManager:
         self.nodes_per_engine = max(1, args.rollout_num_gpus_per_engine // args.num_gpus_per_node)
         self.rollout_engine_lock = Lock.options(num_cpus=1, num_gpus=0).remote()
         self.rollout_id = -1
-
-        if _is_ocr_rm_type(getattr(self.args, "rm_type", None)):
-            from miles.rollout.rm_hub.ocr import init_ocr_pool
-
-            init_ocr_pool(self.args)
-            logger.info("Pre-initialized OCR reward actor pool in RolloutManager.")
-
         self._metric_checker = MetricChecker.maybe_create(args)
         self._health_monitor = None
         if self.args.use_fault_tolerance:

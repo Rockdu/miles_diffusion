@@ -52,7 +52,7 @@ python -u "${ROOT_DIR}/train.py" \
   --diffusion-num-steps 10 \
   --diffusion-num-batches-per-epoch 8 \
   --diffusion-guidance-scale 4.5 \
-  --diffusion-noise-level 0.7 \
+  --diffusion-rollout-noise-level 0.7 \
   --diffusion-height 512 \
   --diffusion-width 512 \
   --sglang-disable-cuda-graph \

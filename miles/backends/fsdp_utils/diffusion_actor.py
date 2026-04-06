@@ -398,7 +398,7 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
 
         num_steps = int(getattr(self.args, "diffusion_num_steps", 10))
         guidance_scale = float(getattr(self.args, "diffusion_guidance_scale", 4.5))
-        noise_level = float(getattr(self.args, "diffusion_noise_level", 0.7))
+        noise_level = float(getattr(self.args, "diffusion_rollout_noise_level", 0.7))
         height = int(getattr(self.args, "diffusion_height", 512))
         width = int(getattr(self.args, "diffusion_width", 512))
         generators = self._make_generators(prompts, rollout_id)
@@ -683,7 +683,7 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
                         timesteps[:, j],
                         latents[:, j].float(),
                         prev_sample=next_latents[:, j].float(),
-                        noise_level=self.args.diffusion_noise_level,
+                        noise_level=self.args.diffusion_rollout_noise_level,
                     )
 
                     ratio = torch.exp(log_prob_new_j - log_prob_old[:, j])

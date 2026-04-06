@@ -1,52 +1,22 @@
-"""Parse sglang-diffusion ``POST /rollout/images`` JSON into :class:`~miles.utils.types.Sample`."""
+"""Parse sglang-diffusion ``POST /rollout/generate`` JSON into :class:`~miles.utils.types.Sample`."""
 
 from __future__ import annotations
 
-import base64
 from typing import Any
-from safetensors.torch import load, save
-import torch
 from miles.utils.types import (
     CondKwargs,
     DenoisingEnv,
     DiTTrajectory,
-    LazyTensor,
     RolloutDebugTensors,
     Sample,
-    SafetensorsBase64LazyTensor,
 )
 
 __all__ = [
     "apply_rollout_image_response",
-    "as_lazy_tensor",
-    "coerce_rollout_images_http_response",
-    "decode_tensor_base64",
-    "tensor_to_base64",
 ]
 
 # Prefer these keys for mapping dict ``rollout_log_probs`` → ``Sample.rollout_log_probs``.
 _ROLLOUT_LOG_PROB_PRIMARY_KEYS = ("log_prob", "log_probs", "total", "per_step")
-
-
-def decode_tensor_base64(b64: str) -> torch.Tensor:
-    """Deserialize base64 to CPU tensor (same wire format as inference: safetensors ``[\"t\"]``, else ``torch.load``)."""
-    raw = base64.b64decode(b64.encode("ascii") if isinstance(b64, str) else b64)
-    return load(raw)["t"]
-
-def tensor_to_base64(tensor: torch.Tensor) -> str:
-    """Encode a CPU tensor as base64 safetensors (single key ``tensor_key``, default ``t``)."""
-    tensor = tensor.detach().cpu()
-    raw = save({"t": tensor})
-    return base64.b64encode(raw).decode("ascii")
-
-
-def as_lazy_tensor(value: Any) -> LazyTensor | None:
-    """If ``value`` is a base64 string from JSON, wrap as lazy tensor; else pass through (HTTP bodies never contain ``torch.Tensor``)."""
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return SafetensorsBase64LazyTensor(b64=value)
-    raise TypeError(f"Cannot convert {type(value)} to LazyTensor")
 
 
 def _parse_cond_kwargs(data: dict[str, Any] | None) -> CondKwargs | None:

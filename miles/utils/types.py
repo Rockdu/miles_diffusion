@@ -4,14 +4,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
-from miles.utils.diffusion_rollout_response import decode_tensor_base64
-
-
 import torch
-
+import base64
+from safetensors.torch import load, save
 
 class LazyTensor(ABC):
-    """Deferred load: **base64 ``str``** matching :func:`~miles.utils.diffusion_rollout_response.tensor_to_base64`.
+    """Deferred load: **base64 ``str``** matching :func:`tensor_to_base64`.
 
     Public API: :meth:`resolve` → **CPU** :class:`torch.Tensor` (idempotent: decodes at most once, then returns cache).
     """
@@ -21,7 +19,7 @@ class LazyTensor(ABC):
 
     def resolve(self) -> torch.Tensor:
         """Materialize to a CPU tensor; repeated calls return the same tensor."""
-        if self.tensor is not None:
+        if self.tensor is None:
             self.tensor = self._resolve_tensor()
         return self.tensor
     
@@ -29,6 +27,13 @@ class LazyTensor(ABC):
     def _resolve_tensor(self) -> torch.Tensor:
         raise NotImplementedError
 
+class LazyTensorFromTensor(LazyTensor):
+    def __init__(self, tensor: torch.Tensor) -> None:
+        super().__init__()
+        self.tensor = tensor
+
+    def _resolve_tensor(self) -> torch.Tensor:
+        return self.tensor
 
 class SafetensorsBase64LazyTensor(LazyTensor):
     """Lazy tensor from rollout wire: base64-encoded safetensors blob (default tensor key ``\"t\"`` in :func:`~miles.utils.diffusion_rollout_response.decode_tensor_base64`)."""
@@ -42,8 +47,28 @@ class SafetensorsBase64LazyTensor(LazyTensor):
             raise ValueError("SafetensorsBase64LazyTensor: b64 must be a non-empty str")
         return decode_tensor_base64(self.b64).detach().cpu()
 
+def decode_tensor_base64(b64: str) -> torch.Tensor:
+    """Deserialize base64 to CPU tensor (same wire format as inference: safetensors ``[\"t\"]``, else ``torch.load``)."""
+    raw = base64.b64decode(b64.encode("ascii") if isinstance(b64, str) else b64)
+    return load(raw)["t"]
+
+def tensor_to_base64(tensor: torch.Tensor) -> str:
+    """Encode a CPU tensor as base64 safetensors (single key ``tensor_key``, default ``t``)."""
+    tensor = tensor.detach().cpu()
+    raw = save({"t": tensor})
+    return base64.b64encode(raw).decode("ascii")
+
+
+def as_lazy_tensor(value: Any) -> LazyTensor | None:
+    """If ``value`` is a base64 string from JSON, wrap as lazy tensor; else pass through (HTTP bodies never contain ``torch.Tensor``)."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return SafetensorsBase64LazyTensor(b64=value)
+    raise TypeError(f"Cannot convert {type(value)} to LazyTensor")
+
 # Tensor field: either deferred safetensors+b64 or already materialized (e.g. after ``resolve()``).
-RolloutTensorRef = LazyTensor | torch.Tensor
+RolloutTensorRef = LazyTensor
 
 @dataclass
 class RolloutDebugTensors:
@@ -79,12 +104,8 @@ class DiTTrajectory:
 class Sample:
     """The sample generated.
 
-    Diffusion image rollout: fill from sglang-diffusion ``POST /rollout/images`` via
-    :meth:`from_rollout_image_response` or :meth:`apply_rollout_image_response` (see
-    :mod:`miles.utils.diffusion_rollout_response`).
-
-    Rollout tensors (``generated_output``, trajectory, log-probs, etc.) are **per-sample** shapes
-    ``[T, ...]`` as serialized by the engine (no leading batch dimension).
+    Diffusion image rollout: fill from sglang-diffusion ``POST /rollout/generate`` via
+    `apply_rollout_image_response`
     """
 
     group_index: int | None = None
@@ -95,7 +116,7 @@ class Sample:
     prompt: str = ""
     # reproducibility
     seed: int | None = None
-    # Lazy: :class:`SafetensorsBase64LazyTensor` (safetensors+b64 ``str``); eager: :class:`torch.Tensor` (shape ``[T, ...]``)
+    # Lazy: :class:`SafetensorsBase64LazyTensor`; eager: :class:`torch.Tensor`. Image rollout: ``[C, T, H, W]`` (``T==1`` typical).
     generated_output: RolloutTensorRef | None = None
     rollout_log_probs: RolloutTensorRef | None = None
     rollout_debug_tensors: RolloutDebugTensors | None = None
@@ -113,7 +134,7 @@ class Sample:
         COMPLETED = "completed"
         ABORTED = "aborted"
         # Indicates a recoverable or non-critical failure during generation (e.g., tool call failure,
-        # external API error, parsing err"""  """or). Unlike ABORTED, FAILED samples may still contain partial
+        # external API error, parsing error). Unlike ABORTED, FAILED samples may still contain partial
         # valid output and can be retried or handled gracefully.
         FAILED = "failed"
 

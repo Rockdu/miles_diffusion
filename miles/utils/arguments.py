@@ -343,10 +343,10 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Guidance scale for diffusion rollout.",
             )
             parser.add_argument(
-                "--diffusion-noise-level",
+                "--diffusion-rollout-noise-level",
                 type=float,
                 default=0.7,
-                help="Noise level for diffusion rollout.",
+                help="Noise level for diffusion rollout (rollout_noise_level on POST /rollout/generate).",
             )
             parser.add_argument(
                 "--diffusion-height",
@@ -364,31 +364,37 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "--diffusion-negative-prompt",
                 type=str,
                 default=None,
-                help="Negative prompt for sglang-diffusion POST /rollout/images.",
+                help="Negative prompt for sglang-diffusion POST /rollout/generate.",
             )
             parser.add_argument(
                 "--diffusion-true-cfg-scale",
                 type=float,
                 default=None,
-                help="Optional true_cfg_scale for sglang-diffusion POST /rollout/images.",
+                help="Optional true_cfg_scale for sglang-diffusion POST /rollout/generate.",
             )
             parser.add_argument(
-                "--rollout-generator-device",
+                "--diffusion-rollout-generator-device",
                 type=str,
                 default="cuda",
-                help="generator_device field for POST /rollout/images.",
+                help="generator_device field for POST /rollout/generate.",
             )
             parser.add_argument(
-                "--rollout-sde-type",
+                "--diffusion-rollout-sde-type",
                 type=str,
                 default="sde",
-                help="rollout_sde_type for POST /rollout/images.",
+                help="rollout_sde_type for POST /rollout/generate.",
             )
             parser.add_argument(
-                "--rollout-log-prob-no-const",
+                "--diffusion-rollout-log-prob-no-const",
                 action="store_true",
                 default=False,
-                help="Set rollout_log_prob_no_const=true on POST /rollout/images.",
+                help="Set rollout_log_prob_no_const=true on POST /rollout/generate.",
+            )
+            parser.add_argument(
+                "--diffusion-rollout-debug-mode",
+                action="store_true",
+                default=False,
+                help="Set rollout_debug_mode=true on POST /rollout/generate.",
             )
             parser.add_argument(
                 "--diffusion-return-prev-latents-mean",
@@ -1653,9 +1659,6 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
             raise ValueError("--eval-config does not define any datasets under `eval.datasets`.")
     elif args.eval_prompt_data:
         values = list(args.eval_prompt_data)
-        if len(values) == 1:
-            logger.info("[legacy] only one eval_prompt_data detected, will assume it is data for aime")
-            values = ["aime", values[0]]
         if len(values) % 2 != 0:
             raise ValueError("eval prompt data must be provided as name/path pairs.")
         datasets_config = [{"name": values[i], "path": values[i + 1]} for i in range(0, len(values), 2)]
