@@ -9,7 +9,7 @@ from Levenshtein import distance
 from PIL import Image
 from typing import List, Union
 from miles.utils.misc import SingletonMeta
-from miles.utils.types import Sample, LazyTensorFromTensor
+from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +109,9 @@ class AsyncOcrPool(metaclass=SingletonMeta):
 
 def _rgb_hwc_from_generated(sample: Sample) -> np.ndarray:
     """``generated_output``: ``[C, F, H, W]``; use time index 0 (``F==1`` for still images)."""
-    t = sample.generated_output.resolve()
+    t = sample.generated_output
+    if t is None:
+        raise ValueError("generated_output is None")
     if t.ndim != 4:
         raise ValueError(f"generated_output must be 4D [C, F, H, W], got {tuple(t.shape)}")
     frame_chw = t[:, 0, :, :]
@@ -128,9 +130,11 @@ async def ocr_rm(args, sample: Sample):
 
 if __name__ == "__main__":
     args = argparse.Namespace(ocr_num_workers=4)
+    pil_image = Image.open("imgs/miles_logo.png").convert("RGB")
+    image_tensor = torch.from_numpy(np.array(pil_image)).permute(2, 0, 1).unsqueeze(1).float()
     sample = Sample(
         prompt="A logo of Miles saying \"Miles\"",
-        generated_output=LazyTensorFromTensor(Image.open("imgs/miles_logo.png")),
+        generated_output=image_tensor,
     )
-    img = np.array(sample.generated_output.resolve())
+    img = np.array(pil_image)
     print(OcrScorer()([img], [sample.prompt])[0])

@@ -47,15 +47,23 @@ class RolloutManager:
         logger.info("RolloutManager init start")
         self.args = args
         self.pg = pg
+        logger.info("RolloutManager: starting router...")
         _start_router(args)
+        logger.info("RolloutManager: router started, init tracking...")
         # TODO make args immutable
         init_tracking(args, primary=False, router_addr=f"http://{args.sglang_router_ip}:{args.sglang_router_port}")
+        logger.info("RolloutManager: init http client...")
         init_http_client(args)
+        logger.info("RolloutManager: loading data source...")
 
         data_source_cls = load_function(self.args.data_source_path)
         self.data_source = data_source_cls(args)
+        logger.info("RolloutManager: data source loaded, loading rollout functions...")
 
+        import sys
+        print("[DEBUG] RolloutManager: loading generate_rollout...", flush=True)
         self.generate_rollout = load_function(self.args.rollout_function_path)
+        print("[DEBUG] RolloutManager: loading eval_generate_rollout...", flush=True)
         self.eval_generate_rollout = load_function(self.args.eval_function_path)
         self.custom_reward_post_process_func = None
         if self.args.custom_reward_post_process_path is not None:
@@ -65,9 +73,11 @@ class RolloutManager:
             self.custom_convert_samples_to_train_data_func = load_function(
                 self.args.custom_convert_samples_to_train_data_path
             )
+        print(f"[DEBUG] RolloutManager: import {self.args.rollout_function_path} done", flush=True)
         logger.info(f"import {self.args.rollout_function_path} as generate_rollout function.")
         logger.info(f"import {self.args.eval_function_path} as eval_generate_rollout function.")
 
+        print(f"[DEBUG] RolloutManager rollout_num_gpus={getattr(self.args, 'rollout_num_gpus', None)}", flush=True)
         logger.info("RolloutManager rollout_num_gpus=%s", getattr(self.args, "rollout_num_gpus", None))
 
         if self.args.debug_train_only:
@@ -78,11 +88,18 @@ class RolloutManager:
             num_gpu_per_engine = min(args.rollout_num_gpus_per_engine, args.num_gpus_per_node)
             num_engines = args.rollout_num_gpus // num_gpu_per_engine
             self.all_rollout_engines = [None] * num_engines
+            print(f"[DEBUG] RolloutManager: calling init_rollout_engines with {num_engines} engines...", flush=True)
             self.num_new_engines = init_rollout_engines(args, pg, self.all_rollout_engines)
+            print(f"[DEBUG] RolloutManager: init_rollout_engines returned, started {len(self.all_rollout_engines)}", flush=True)
             logger.info("RolloutManager started %s rollout engines", len(self.all_rollout_engines))
+        print("[DEBUG] RolloutManager: creating lock...", flush=True)
+        logger.info("RolloutManager: creating lock...")
         self.nodes_per_engine = max(1, args.rollout_num_gpus_per_engine // args.num_gpus_per_node)
         self.rollout_engine_lock = Lock.options(num_cpus=1, num_gpus=0).remote()
         self.rollout_id = -1
+        self.use_diffusion_rollout = getattr(args, "diffusion_train", False)
+        self._diffusion_offload_fn = None
+        self._diffusion_onload_fn = None
         self._metric_checker = MetricChecker.maybe_create(args)
         self._health_monitor = None
         if self.args.use_fault_tolerance:
@@ -177,10 +194,6 @@ class RolloutManager:
         )
 
     def onload(self, tags: list[str] | None = None):
-        if self.use_diffusion_rollout:
-            if self._diffusion_onload_fn is not None:
-                return self._diffusion_onload_fn(self.args)
-            return None
         return ray.get(
             [
                 engine.resume_memory_occupation.remote(tags=tags)
@@ -191,9 +204,6 @@ class RolloutManager:
 
     def onload_weights(self):
         self.onload(tags=[GPU_MEMORY_TYPE_WEIGHTS])
-
-    def onload_kv(self):
-        self.onload(tags=[GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_CUDA_GRAPH])
 
     def recover_rollout_engines(self):
         """Restart any dead rollout engines and update num_new_engines for update_weights detection."""
@@ -540,6 +550,7 @@ def init_rollout_engines(args, pg, all_rollout_engines):
     #     ), f"num_engines {num_engines} should be larger than prefill_num_servers {prefill_num_servers}"
 
     pg, reordered_bundle_indices, reordered_gpu_ids = pg
+    print(f"[DEBUG] init_rollout_engines: reordered_bundle_indices={reordered_bundle_indices}, reordered_gpu_ids={reordered_gpu_ids}", flush=True)
 
     # use diffusion SGLang rollout engines for miles diffusion
     RolloutRayActor = ray.remote(SGLangDiffusionEngine)
@@ -554,6 +565,7 @@ def init_rollout_engines(args, pg, all_rollout_engines):
 
         # Get the base GPU ID from placement group
         base_gpu_id = int(reordered_gpu_ids[i * num_gpu_per_engine])
+        print(f"[DEBUG] Engine {i}: base_gpu_id={base_gpu_id}, bundle_index={reordered_bundle_indices[i * num_gpu_per_engine]}", flush=True)
 
         scheduling_strategy = PlacementGroupSchedulingStrategy(
             placement_group=pg,

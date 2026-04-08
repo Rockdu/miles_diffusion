@@ -8,13 +8,15 @@ from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
+import ray
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from tqdm import tqdm
 
 from miles.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput
 from miles.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
 from miles.utils.async_utils import run
 from miles.utils.diffusion_data import Dataset as DiffusionDataset
-from miles.utils.diffusion_rollout_response import apply_rollout_image_response
+from miles.utils.diffusion_rollout_response import RolloutImageResponseParserActor
 from miles.utils.eval_config import EvalDatasetConfig
 from miles.utils.http_utils import post
 from miles.utils.misc import SingletonMeta, load_function
@@ -98,6 +100,10 @@ class GenerateState(metaclass=SingletonMeta):
 
         self.dp_counts = [0] * (args.sglang_dp_size or 1)
         self.dp_rank = 0
+        self.node_id = ray.get_runtime_context().get_node_id()
+        self.response_parser_actor = RolloutImageResponseParserActor.options(
+            scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=self.node_id, soft=False)
+        ).remote()
 
         self.reset()
 
@@ -151,9 +157,11 @@ async def generate_microgroup(
     )
 
     output = await post(url, payload)
-
-    for sample, response in zip(microgroup, output, strict=True):
-        apply_rollout_image_response(sample, response)
+    refs = [
+        state.response_parser_actor.apply.remote(sample, response)
+        for sample, response in zip(microgroup, output, strict=True)
+    ]
+    microgroup = await asyncio.to_thread(ray.get, refs)
 
     if not evaluation:
         # TODO: get real seeds from SGL-D

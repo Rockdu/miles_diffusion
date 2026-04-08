@@ -59,12 +59,12 @@ def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
     p = multiprocessing.Process(target=launch_server, args=(server_args,))
     p.start()
 
-    if server_args.node_rank != 0:
+    if getattr(server_args, "node_rank", 0) != 0:
         return
 
     _wait_server_healthy(
         base_url=server_args.url(),
-        api_key=server_args.api_key,
+        api_key=getattr(server_args, "api_key", None),
         is_process_alive=lambda: p.is_alive(),
     )
 
@@ -93,12 +93,13 @@ def _wait_server_healthy(base_url, api_key, is_process_alive):
             time.sleep(2)
 
 class SGLangDiffusionEngine(RayActor):
-    def __init__(self, args, rank: int, base_gpu_id: int | None = None):
+    def __init__(self, args, rank: int, base_gpu_id: int | None = None, worker_type: str = "regular"):
         self.args = args
         # rank: the global rank of this engine among all rollout engines
         self.rank = rank
         # remove PD Disaggregation
         self.base_gpu_id = base_gpu_id
+        self.worker_type = worker_type
 
     def init(self, dist_init_addr, port, nccl_port, host=None, disaggregation_bootstrap_port=None):
         self.router_ip = self.args.sglang_router_ip
@@ -132,7 +133,7 @@ class SGLangDiffusionEngine(RayActor):
             base_gpu_id=self.base_gpu_id,
         )
 
-        self.node_rank = server_args_dict["node_rank"]
+        self.node_rank = server_args_dict.get("node_rank", 0)
         self.server_host = server_args_dict["host"]  # with [] if ipv6
         self.server_port = server_args_dict["port"]
 
@@ -161,7 +162,17 @@ class SGLangDiffusionEngine(RayActor):
 
     def _init_normal(self, server_args_dict):
         logger.info(f"Launch HttpServerEngineAdapter at: {self.server_host}:{self.server_port}")
-        self.process = launch_server_process(ServerArgs(**server_args_dict))
+        # Pin each sglang-diffusion engine to its assigned GPU.
+        # base_gpu_id is a physical GPU ID; convert to local index.
+        physical_id = self.base_gpu_id
+        cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        if cvd and physical_id is not None:
+            visible = [x.strip() for x in cvd.split(",") if x.strip()]
+            local_idx = _to_local_gpu_id(physical_id)
+            if 0 <= local_idx < len(visible):
+                os.environ["CUDA_VISIBLE_DEVICES"] = visible[local_idx]
+                logger.info(f"Engine rank={self.rank}: pinned CUDA_VISIBLE_DEVICES={visible[local_idx]} (physical={physical_id}, local={local_idx})")
+        self.process = launch_server_process(ServerArgs.from_kwargs(**server_args_dict))
 
         if self.node_rank == 0 and self.router_ip and self.router_port:
             if self.args.use_miles_router:
@@ -283,10 +294,12 @@ class SGLangDiffusionEngine(RayActor):
     def resume_memory_occupation(self, tags: list[str] = None):
         # SGL-D TODO: SGLang-Diffusion support release/resume memory occupation
         # This function is used by offload/recover
-        return self._make_request(
-            "resume_memory_occupation",
-            {"tags": tags},
-        )
+        logger.warning(f"Now doesn't support resume memory occupation...")
+        # uncomment this when resume memory occupation is supported
+        # return self._make_request(
+        #     "resume_memory_occupation",
+        #     {"tags": tags},
+        # )
 
     def check_weights(self, action: str):
         # SGL-D TODO: SGLang-Diffusion support weights checker
@@ -383,12 +396,8 @@ def _compute_server_args(
     base = base_gpu_id if base_gpu_id is not None else get_base_gpu_id(args, rank)
     base = _to_local_gpu_id(base)
     kwargs = {
-        "model_path": args.hf_checkpoint,
+        "model_path": args.diffusion_model,
         "trust_remote_code": True,
-        "random_seed": args.seed + rank,
-        # diffusion doesn't support memory saver
-        "enable_memory_saver": False,
-        # distributed
         "host": host,
         "port": port,
         "nccl_port": nccl_port,

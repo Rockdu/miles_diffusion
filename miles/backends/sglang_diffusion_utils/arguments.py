@@ -97,5 +97,13 @@ def validate_args(args):
     args.sglang_sp_size = 1 if args.sglang_sp_degree is None else args.sglang_sp_degree
     args.sglang_cfgp_size = 2 if args.sglang_enable_cfg_parallel else 1
 
+    # dp_size doesn't exist in diffusion ServerArgs; default to 1.
+    if not hasattr(args, "sglang_dp_size"):
+        args.sglang_dp_size = 1
+
+    if not hasattr(args, "sglang_router_ip"):
+        args.sglang_router_ip = None
+    if not hasattr(args, "sglang_router_port"):
+        args.sglang_router_port = None
     if getattr(args, "sglang_router_ip", None):
         args.sglang_router_ip = _wrap_ipv6(args.sglang_router_ip)

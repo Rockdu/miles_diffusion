@@ -8,7 +8,10 @@ import torch.nn.functional as F
 
 from miles.utils.data import get_minimum_num_micro_batch_size
 from miles.utils.seqlen_balancing import get_seqlen_balanced_partitions
-from miles.utils.types import RolloutBatch
+from typing import Any
+
+# Type alias – rollout data is a plain dict of lists/tensors.
+RolloutBatch = dict[str, Any]
 
 from ...utils.data import process_rollout_data
 from ...utils.ray_utils import Box
