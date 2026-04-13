@@ -5,11 +5,10 @@ import os
 from typing import Any
 
 import yaml
-from sglang_router.launch_router import RouterArgs
 from transformers import AutoConfig
 
-from miles.backends.sglang_utils.arguments import add_sglang_arguments
-from miles.backends.sglang_utils.arguments import validate_args as sglang_validate_args
+from miles.backends.sglang_diffusion_utils.arguments import add_sglang_diffusion_arguments
+from miles.backends.sglang_diffusion_utils.arguments import validate_args as sglang_validate_args
 from miles.utils.eval_config import EvalDatasetConfig, build_eval_dataset_configs, ensure_dataset_list
 from miles.utils.logging_utils import configure_logger
 
@@ -326,6 +325,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Number of rollout batches to aggregate per epoch (matches Flow-GRPO sampling cadence).",
             )
             parser.add_argument(
+                "--diffusion-microgroup-size",
+                type=int,
+                default=1,
+                help="Diffusion rollout microgroup size (sub-batch of samples per prompt). Defaults to 1.",
+            )
+            parser.add_argument(
                 "--diffusion-eval-num-steps",
                 type=int,
                 default=None,
@@ -338,10 +343,10 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Guidance scale for diffusion rollout.",
             )
             parser.add_argument(
-                "--diffusion-noise-level",
+                "--diffusion-rollout-noise-level",
                 type=float,
                 default=0.7,
-                help="Noise level for diffusion rollout.",
+                help="Noise level for diffusion rollout (rollout_noise_level on POST /rollout/generate).",
             )
             parser.add_argument(
                 "--diffusion-height",
@@ -354,6 +359,42 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=int,
                 default=512,
                 help="Output image width for diffusion rollout.",
+            )
+            parser.add_argument(
+                "--diffusion-negative-prompt",
+                type=str,
+                default=None,
+                help="Negative prompt for sglang-diffusion POST /rollout/generate.",
+            )
+            parser.add_argument(
+                "--diffusion-true-cfg-scale",
+                type=float,
+                default=None,
+                help="Optional true_cfg_scale for sglang-diffusion POST /rollout/generate.",
+            )
+            parser.add_argument(
+                "--diffusion-rollout-generator-device",
+                type=str,
+                default="cuda",
+                help="generator_device field for POST /rollout/generate.",
+            )
+            parser.add_argument(
+                "--diffusion-rollout-sde-type",
+                type=str,
+                default="sde",
+                help="rollout_sde_type for POST /rollout/generate.",
+            )
+            parser.add_argument(
+                "--diffusion-rollout-log-prob-no-const",
+                action="store_true",
+                default=False,
+                help="Set rollout_log_prob_no_const=true on POST /rollout/generate.",
+            )
+            parser.add_argument(
+                "--diffusion-rollout-debug-mode",
+                action="store_true",
+                default=False,
+                help="Set rollout_debug_mode=true on POST /rollout/generate.",
             )
             parser.add_argument(
                 "--diffusion-return-prev-latents-mean",
@@ -945,11 +986,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=str,
                 choices=[
                     "grpo",
-                    "gspo",
-                    "reinforce_plus_plus",
-                    "reinforce_plus_plus_baseline",
-                    "ppo",
-                    "on_policy_distillation",
                 ],
                 default="grpo",
             )
@@ -999,6 +1035,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 action="store_false",
                 dest="rewards_normalization",
                 help="Disable rewards normalization",
+            )
+            parser.add_argument(
+                "--globalize-reward-norm",
+                action="store_true",
+                default=False,
+                help="Use batch-wide mean/std instead of per-group mean/std for reward normalization (as in flow GRPO).",
             )
             parser.add_argument(
                 "--use-rollout-entropy",
@@ -1122,7 +1164,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=3,
                 help="Number of consecutive failures before marking a worker as unhealthy.",
             )
-            RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
             return parser
 
         # wandb
@@ -1335,6 +1376,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="URL for the reward model service for --rm-type remote_rm, e.g. http://localhost:8000",
             )
             parser.add_argument(
+                "--ocr-num-workers",
+                type=int,
+                default=4,
+                help="Number of Ray OCR actors used when --rm-type ocr.",
+            )
+            parser.add_argument(
                 "--custom-rm-path",
                 type=str,
                 default=None,
@@ -1535,7 +1582,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
         parser = add_tensorboard_arguments(parser)
         parser = add_router_arguments(parser)
         parser = add_debug_arguments(parser)
-        parser = add_sglang_arguments(parser)
+        parser = add_sglang_diffusion_arguments(parser)
         parser = add_network_arguments(parser)
         parser = add_reward_model_arguments(parser)
         parser = add_rollout_buffer_arguments(parser)
@@ -1562,45 +1609,17 @@ def parse_args(add_custom_arguments=None):
     # Users may call `parse_args` very early, thus we ensure logger is configured here
     configure_logger()
 
+    # TODO: Diffusion FSDP
     add_miles_arguments = get_miles_extra_args_provider(add_custom_arguments)
 
     backend = parse_args_train_backend()
-    if backend == "megatron":
-        from miles.backends.megatron_utils.arguments import parse_args as megatron_parse_args
-        from miles.backends.megatron_utils.arguments import set_default_megatron_args
-        from miles.backends.megatron_utils.arguments import validate_args as megatron_validate_args
-
-        args = megatron_parse_args(extra_args_provider=add_miles_arguments)
-        if args.hf_checkpoint:
-            hf_config = AutoConfig.from_pretrained(args.hf_checkpoint, trust_remote_code=True)
-            hf_validate_args(args, hf_config)
-
-        args.rank = 0
-        args.world_size = args.actor_num_nodes * args.actor_num_gpus_per_node
-        args = set_default_megatron_args(args)
-    else:
-        from miles.backends.fsdp_utils.arguments import load_fsdp_args
-
-        args = load_fsdp_args(extra_args_provider=add_miles_arguments)
-        args.rank = 0  # Primary process rank for wandb initialization
-        args.world_size = args.actor_num_nodes * args.actor_num_gpus_per_node
-
-        assert args.context_parallel_size == 1, "Context parallelism is not supported for FSDP backend."
+    from miles.backends.fsdp_utils.arguments import load_fsdp_args
+    args = load_fsdp_args(extra_args_provider=add_miles_arguments)
+    args.rank = 0  # Primary process rank for wandb initialization
+    args.world_size = args.actor_num_nodes * args.actor_num_gpus_per_node
+    assert args.context_parallel_size == 1, "Context parallelism is not supported for FSDP backend."
 
     miles_validate_args(args)
-
-    if backend == "megatron":
-        megatron_validate_args(args)
-
-        # always use varlen
-        args.variable_seq_lengths = True
-        if getattr(args, "moe_token_dispatcher_type", None) == "allgather":
-            logger.info(
-                "--moe-token-dispatcher-type allgather does not support variable sequence length, "
-                "please use alltoall dispatcher instead."
-            )
-            args.moe_token_dispatcher_type = "alltoall"
-
     sglang_validate_args(args)
 
     return args
@@ -1641,9 +1660,6 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
             raise ValueError("--eval-config does not define any datasets under `eval.datasets`.")
     elif args.eval_prompt_data:
         values = list(args.eval_prompt_data)
-        if len(values) == 1:
-            logger.info("[legacy] only one eval_prompt_data detected, will assume it is data for aime")
-            values = ["aime", values[0]]
         if len(values) % 2 != 0:
             raise ValueError("eval prompt data must be provided as name/path pairs.")
         datasets_config = [{"name": values[i], "path": values[i + 1]} for i in range(0, len(values), 2)]

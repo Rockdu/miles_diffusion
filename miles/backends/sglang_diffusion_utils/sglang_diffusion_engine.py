@@ -4,32 +4,15 @@ import logging
 import multiprocessing
 import os
 import time
-from urllib.parse import quote
 
 import requests
-import sglang_router
-from packaging.version import parse
-from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import kill_process_tree
-from urllib3.exceptions import NewConnectionError
+from sglang.multimodal_gen.runtime.server_args import ServerArgs
+from sglang.multimodal_gen.runtime.launch_server import kill_process_tree
 
 from miles.ray.ray_actor import RayActor
 from miles.utils.http_utils import get_host_info
 
 logger = logging.getLogger(__name__)
-
-
-def get_base_gpu_id(args, rank):
-    num_gpus = min(args.num_gpus_per_node, args.rollout_num_gpus_per_engine)
-    if args.colocate:
-        start_index = (rank * num_gpus) % args.num_gpus_per_node
-    else:
-        num_actor_gpus = 0 if args.debug_rollout_only else args.actor_num_gpus_per_node * args.actor_num_nodes
-        start_index = (num_actor_gpus + rank * num_gpus) % args.num_gpus_per_node
-        if args.use_critic:
-            num_critic_gpus = args.critic_num_gpus_per_node * args.critic_num_nodes
-            start_index = (num_actor_gpus + num_critic_gpus + rank * num_gpus) % args.num_gpus_per_node
-    return start_index
 
 
 def _to_local_gpu_id(physical_gpu_id: int) -> int:
@@ -50,31 +33,36 @@ def _to_local_gpu_id(physical_gpu_id: int) -> int:
     )
 
 
-def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
-    from sglang.multimodal_gen.runtime.launch_server import launch_server
+def _launch_server_target(server_args):
+    # addict.Dict used by SGL-D loses its `__frozen` instance attribute across spawn pickle.
+    # Reconstruct a fresh one from the unpickled (broken) instance
+    import addict
 
+    if server_args.attention_backend_config is not None:
+        server_args.attention_backend_config = addict.Dict(server_args.attention_backend_config)
+
+    from sglang.multimodal_gen.runtime.launch_server import launch_server
+    launch_server(server_args)
+
+
+def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
     # use spawn to avoid potential risks of fork in terms of subthreads or CUDA.
     multiprocessing.set_start_method("spawn", force=True)
     server_args.host = server_args.host.strip("[]")
-    p = multiprocessing.Process(target=launch_server, args=(server_args,))
+    p = multiprocessing.Process(target=_launch_server_target, args=(server_args,))
     p.start()
-
-    if server_args.node_rank != 0:
-        return
 
     _wait_server_healthy(
         base_url=server_args.url(),
-        api_key=server_args.api_key,
         is_process_alive=lambda: p.is_alive(),
     )
 
     return p
 
 
-def _wait_server_healthy(base_url, api_key, is_process_alive):
+def _wait_server_healthy(base_url, is_process_alive):
     headers = {
         "Content-Type": "application/json; charset=utf-8",
-        "Authorization": f"Bearer {api_key}",
     }
 
     with requests.Session() as session:
@@ -97,10 +85,12 @@ class SGLangDiffusionEngine(RayActor):
         self.args = args
         # rank: the global rank of this engine among all rollout engines
         self.rank = rank
-        # remove PD Disaggregation
         self.base_gpu_id = base_gpu_id
 
-    def init(self, dist_init_addr, port, nccl_port, host=None, disaggregation_bootstrap_port=None):
+    def init(self, dist_init_addr, port, nccl_port, host=None):
+        # `dist_init_addr` is a multi-node concept from LLM sglang; SGL-D runs
+        # single-node per engine. Accept it for caller compat, then drop.
+        del dist_init_addr
         self.router_ip = self.args.sglang_router_ip
         self.router_port = self.args.sglang_router_port
 
@@ -117,22 +107,15 @@ class SGLangDiffusionEngine(RayActor):
             return addr
 
         host = _format_v6_uri(host)
-        ip_part, port_part = dist_init_addr.rsplit(":", 1)
-        dist_init_addr = f"{_format_v6_uri(ip_part)}:{port_part}"
 
         server_args_dict, external_engine_need_check_fields = _compute_server_args(
             self.args,
-            self.rank,
-            dist_init_addr,
-            nccl_port,
-            host,
-            port,
-            self.worker_type,
-            disaggregation_bootstrap_port,
-            base_gpu_id=self.base_gpu_id,
+            host=host,
+            port=port,
+            nccl_port=nccl_port,
         )
 
-        self.node_rank = server_args_dict["node_rank"]
+        self.node_rank = server_args_dict.get("node_rank", 0)
         self.server_host = server_args_dict["host"]  # with [] if ipv6
         self.server_port = server_args_dict["port"]
 
@@ -142,53 +125,51 @@ class SGLangDiffusionEngine(RayActor):
         else:
             self._init_normal(server_args_dict)
 
-    def _init_external(self, expect_server_args, external_engine_need_check_fields):
+    def _init_external(self, expect_server_args):
         logger.info(f"Use external SGLang-Diffusion engine (rank={self.rank}, expect_server_args={expect_server_args})")
 
-        # TODO: miles diffusion support sanity check
+        # TODO: miles diffusion support server args sanity check
+        # Now only do healthy check for generate
         # SGL-D TODO: SGLang-D support get actual server args
         # def _get_actual_server_args():
         #     response = requests.get(f"http://{self.server_host}:{self.server_port}/get_server_info")
         #     response.raise_for_status()
         #     return response.json()
 
-        def _sanity_check_server_args(actual_server_args, expect_server_args):
-            for name in external_engine_need_check_fields:
-                expect_value = expect_server_args.get(name)
-                actual_value = actual_server_args.get(name)
-                assert (
-                    actual_value == expect_value
-                ), f"{name=} {expect_value=} {actual_value=} {expect_server_args=} {actual_server_args=}"
-
         _wait_server_healthy(
             base_url=f"http://{self.server_host}:{self.server_port}",
-            api_key=None,
             is_process_alive=lambda: True,
         )
 
-        # TODO: miles diffusion support sanity check
-        # SGL-D TODO: SGLang-D support get actual server args
-        # actual_server_args = _get_actual_server_args()
-        # _sanity_check_server_args(actual_server_args, expect_server_args)
-
     def _init_normal(self, server_args_dict):
         logger.info(f"Launch HttpServerEngineAdapter at: {self.server_host}:{self.server_port}")
-        self.process = launch_server_process(ServerArgs(**server_args_dict))
+        self._pin_to_assigned_gpu()
+        self.process = launch_server_process(ServerArgs.from_kwargs(**server_args_dict))
 
         if self.node_rank == 0 and self.router_ip and self.router_port:
             if self.args.use_miles_router:
-                assert (
-                    self.worker_type == "regular"
-                ), "Miles-diffusion now only support regular worker"
                 response = requests.post(
                     f"http://{self.router_ip}:{self.router_port}/add_worker?url=http://{self.server_host}:{self.server_port}"
                 )
+                response.raise_for_status()
             else:
-                payload = {
-                    "url": f"http://{self.server_host}:{self.server_port}",
-                    "worker_type": self.worker_type,
-                }
-            response.raise_for_status()
+                # SGL-D router TODO: add_worker path for the non-miles router
+                logger.warning("Skipping router add_worker: only miles_router is supported for now")
+
+    def _pin_to_assigned_gpu(self):
+        if self.base_gpu_id is None:
+            return
+        cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        if not cvd:
+            return
+        visible = [x.strip() for x in cvd.split(",") if x.strip()]
+        local_idx = _to_local_gpu_id(self.base_gpu_id)
+        pinned = visible[local_idx]
+        os.environ["CUDA_VISIBLE_DEVICES"] = pinned
+        logger.info(
+            f"Engine rank={self.rank}: pinned CUDA_VISIBLE_DEVICES={pinned} "
+            f"(base_gpu_id={self.base_gpu_id}, local_idx={local_idx})"
+        )
 
     def _make_request(self, endpoint: str, payload: dict | None = None):
         """Make a POST request to the specified endpoint with the given payload.
@@ -268,7 +249,7 @@ class SGLangDiffusionEngine(RayActor):
             response = None
             if self.args.use_miles_router:
                 response = requests.post(
-                    f"http://{self.router_ip}:{self.router_port}/remove_worker?url=http://{self.server_host}:{self.server_port}"
+                    f"http://{self.router_ip}:{self.router_port}/remove_worker?url={worker_url}"
                 )
             else:
                 # SGL-D router TODO: shutdown for sglang-diffusion router
@@ -292,8 +273,8 @@ class SGLangDiffusionEngine(RayActor):
         # This function is used by offload/recover
         return self._make_request("release_memory_occupation")
 
-    def resume_memory_occupation(self, tags: list[str] = None):
-        # SGL-D TODO: SGLang-Diffusion support release/resume memory occupation
+    def resume_memory_occupation(self, tags: list[str] | None = None):
+        # SGL-D TODO: SGLang-Diffusion support resume memory occupation
         # This function is used by offload/recover
         return self._make_request(
             "resume_memory_occupation",
@@ -308,109 +289,8 @@ class SGLangDiffusionEngine(RayActor):
 
     def init_weights_update_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
         # SGL-D TODO: Support weights update group for in-memory weight update
+        del master_address, master_port, rank_offset, world_size, group_name, backend
         raise NotImplementedError("init_weights_update_group is not implemented in SGL-D yet")
-        return self._make_request(
-            "init_weights_update_group",
-            {
-                "master_address": master_address,
-                "master_port": master_port,
-                "rank_offset": rank_offset,
-                "world_size": world_size,
-                "group_name": group_name,
-                "backend": backend,
-            },
-        )
-
-    def destroy_weights_update_group(self, group_name):
-        raise NotImplementedError("destroy_weights_update_group is not implemented in SGL-D yet")
-        # SGL-D TODO: Support weights update group for in-memory weight update
-        try:
-            return self._make_request(
-                "destroy_weights_update_group",
-                {
-                    "group_name": group_name,
-                },
-            )
-        except requests.exceptions.RequestException:
-            # catch the case there the engine is just created and does not have the group.
-            pass
-
-    def update_weights_from_distributed(self, names, dtypes, shapes, group_name, weight_version: str | None = None):
-        payload = {
-            "names": names,
-            "dtypes": [str(dtype).replace("torch.", "") for dtype in dtypes],
-            "shapes": shapes,
-            "group_name": group_name,
-        }
-        if weight_version is not None:
-            payload["weight_version"] = weight_version
-        return self._make_request(
-            "update_weights_from_distributed",
-            payload,
-        )
-
-    def pause_generation(self):
-        response = requests.post(f"http://{self.server_host}:{self.server_port}/pause_generation", json={})
-        response.raise_for_status()
-        return response
-
-    def continue_generation(self):
-        response = requests.post(f"http://{self.server_host}:{self.server_port}/continue_generation", json={})
-        response.raise_for_status()
-        return response
-
-    def post_process_weights(
-        self,
-        restore_weights_before_load: bool = False,
-        post_process_quantization: bool = False,
-    ):
-        """
-        Update model weights from tensor data. The HTTP server will only post meta data, and the real weights will be copied directly from GPUs.
-        Note: The model should be on GPUs rather than CPU for this functionality to work properly.
-        If you encounter issues, ensure your model is loaded on GPU devices rather than CPU.
-        """
-
-        return self._make_request(
-            "post_process_weights",
-            {
-                "restore_weights_before_load": restore_weights_before_load,
-                "post_process_quantization": post_process_quantization,
-            },
-        )
-
-    def start_profile(
-        self,
-        # The output directory
-        output_dir: str | None = None,
-        # If set, it profile as many as this number of steps.
-        # If it is set, profiling is automatically stopped after this step, and
-        # the caller doesn't need to run stop_profile.
-        start_step: int | None = None,
-        num_steps: int | None = None,
-        activities: list[str] | None = None,
-        profile_by_stage: bool = False,
-        with_stack: bool | None = None,
-        record_shapes: bool | None = None,
-    ):
-        response = requests.post(
-            f"http://{self.server_host}:{self.server_port}/start_profile",
-            json={
-                "output_dir": output_dir,
-                "start_step": start_step,
-                "num_steps": num_steps,
-                "activities": activities,
-                "profile_by_stage": profile_by_stage,
-                "with_stack": with_stack,
-                "record_shapes": record_shapes,
-            },
-        )
-        response.raise_for_status()
-        return response
-
-    def stop_profile(self):
-        response = requests.post(f"http://{self.server_host}:{self.server_port}/stop_profile", json={})
-        response.raise_for_status()
-        return response
 
     def simulate_crash(self):
         if self.args.rollout_external or not getattr(self, "process", None):
@@ -424,76 +304,43 @@ class SGLangDiffusionEngine(RayActor):
         self.shutdown()
 
 
-def _compute_server_args(
-    args,
-    rank,
-    dist_init_addr,
-    nccl_port,
-    host,
-    port,
-    worker_type: str = "regular",
-    disaggregation_bootstrap_port: int | None = None,
-    base_gpu_id: int | None = None,
-):
-    nnodes = max(1, args.rollout_num_gpus_per_engine // args.num_gpus_per_node)
-    node_rank = rank % nnodes
-    # if CUDA_VISIBLE_DEVICE="2,3,4,5,6,7"
-    # then cuda:1 = GPU 3, 1 is local_id, 3 is physical_id
-    base = base_gpu_id if base_gpu_id is not None else get_base_gpu_id(args, rank)
-    base = _to_local_gpu_id(base)
+def _compute_server_args(args, host, port, nccl_port):
+    # Only set fields SGL-D's ServerArgs actually accepts. GPU pinning is done
+    # in `_init_normal` via CUDA_VISIBLE_DEVICES — SGL-D has no base_gpu_id arg.
     kwargs = {
-        "model_path": args.hf_checkpoint,
+        "model_path": args.diffusion_model,
         "trust_remote_code": True,
-        "random_seed": args.seed + rank,
-        # diffusion doesn't support memory saver
-        "enable_memory_saver": False,
-        # distributed
         "host": host,
         "port": port,
         "nccl_port": nccl_port,
-        "nnodes": nnodes,
-        "node_rank": node_rank,
-        "dist_init_addr": dist_init_addr,
-        "gpu_id_step": 1,
-        "base_gpu_id": base,
-        # parallel
+        # Each engine needs a distinct master_port starting hint so that
+        # concurrent settle_port() probes don't race on the same default (30005).
+        "master_port": nccl_port + 10000 if nccl_port is not None else None,
+        # parallel — tp_size must match rollout allocation, not user CLI.
         "tp_size": args.rollout_num_gpus_per_engine,
-        "sp_size": args.sglang_sp_size,
-        "cfgp_size": args.sglang_cfgp_size,
-        # always skip warmup to prevent warmup timeout.
-        "skip_server_warmup": True,
-        # always enable draft weights cpu backup so that we run training without mtp weights.
-        "enable_draft_weights_cpu_backup": True,
+        # Sequence-parallel degree (None = disabled, SGL-D decides internally).
+        "sp_degree": args.sglang_sp_degree,
+        # Classifier-free-guidance parallel (splits cond/uncond across GPUs).
+        "enable_cfg_parallel": args.sglang_enable_cfg_parallel,
+        # Force-skip warmup to prevent warmup timeout during RL rollouts.
+        "warmup": False,
     }
+    # TODO: map args.fp16 to SGL-D precision control (ServerArgs has no `dtype`).
 
-    # remove PD disagg
-
-    if args.fp16:
-        kwargs["dtype"] = "float16"
-    external_engine_need_check_fields = [k for k in kwargs.keys() if k not in _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS]
-
-    unused_keys = set(kwargs.keys())
+    # Forward every `args.sglang_<field>` the user set via --sglang-* CLI for
+    # ServerArgs fields not already hardcoded above. Picks up ulysses_degree /
+    # ring_degree / dp_size / etc. without listing each one.
     for attr in dataclasses.fields(ServerArgs):
         if hasattr(args, f"sglang_{attr.name}") and attr.name not in kwargs:
             kwargs[attr.name] = getattr(args, f"sglang_{attr.name}")
-        unused_keys.discard(attr.name)
 
-    # for compatibility with old args
-    if len(unused_keys) > 0:
-        logger.info(f"Warning: The following arguments is not supported in the current sglang: {unused_keys}.")
-        for key in unused_keys:
-            kwargs.pop(key)
-
+    external_engine_need_check_fields = [
+        k for k in kwargs.keys() if k not in _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS
+    ]
     return kwargs, external_engine_need_check_fields
 
 
-_EXTERNAL_ENGINE_SKIP_CHECK_FIELDS = [
-    "model_path",
-    "trust_remote_code",
-    "random_seed",
-    "nccl_port",
-    "dist_init_addr",
-    "skip_server_warmup",
-    "enable_draft_weights_cpu_backup",
-    "mem_fraction_static",
-]
+# Fields to skip when verifying an external SGLang-Diffusion engine's server args
+# against what miles would have computed. Empty for now; add field names here as
+# the external-engine sanity check grows (e.g. ports that legitimately differ).
+_EXTERNAL_ENGINE_SKIP_CHECK_FIELDS: list[str] = []

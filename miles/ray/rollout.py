@@ -13,7 +13,6 @@ import torch
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS
 
-from miles.backends.sglang_utils.sglang_engine import SGLangEngine
 from miles.backends.sglang_diffusion_utils.sglang_diffusion_engine import SGLangDiffusionEngine
 from miles.rollout.base_types import call_rollout_fn
 from miles.utils import tracking_utils
@@ -48,15 +47,23 @@ class RolloutManager:
         logger.info("RolloutManager init start")
         self.args = args
         self.pg = pg
+        logger.info("RolloutManager: starting router...")
         _start_router(args)
+        logger.info("RolloutManager: router started, init tracking...")
         # TODO make args immutable
         init_tracking(args, primary=False, router_addr=f"http://{args.sglang_router_ip}:{args.sglang_router_port}")
+        logger.info("RolloutManager: init http client...")
         init_http_client(args)
+        logger.info("RolloutManager: loading data source...")
 
         data_source_cls = load_function(self.args.data_source_path)
         self.data_source = data_source_cls(args)
+        logger.info("RolloutManager: data source loaded, loading rollout functions...")
 
+        import sys
+        print("[DEBUG] RolloutManager: loading generate_rollout...", flush=True)
         self.generate_rollout = load_function(self.args.rollout_function_path)
+        print("[DEBUG] RolloutManager: loading eval_generate_rollout...", flush=True)
         self.eval_generate_rollout = load_function(self.args.eval_function_path)
         self.custom_reward_post_process_func = None
         if self.args.custom_reward_post_process_path is not None:
@@ -66,9 +73,11 @@ class RolloutManager:
             self.custom_convert_samples_to_train_data_func = load_function(
                 self.args.custom_convert_samples_to_train_data_path
             )
+        print(f"[DEBUG] RolloutManager: import {self.args.rollout_function_path} done", flush=True)
         logger.info(f"import {self.args.rollout_function_path} as generate_rollout function.")
         logger.info(f"import {self.args.eval_function_path} as eval_generate_rollout function.")
 
+        print(f"[DEBUG] RolloutManager rollout_num_gpus={getattr(self.args, 'rollout_num_gpus', None)}", flush=True)
         logger.info("RolloutManager rollout_num_gpus=%s", getattr(self.args, "rollout_num_gpus", None))
 
         if self.args.debug_train_only:
@@ -79,12 +88,18 @@ class RolloutManager:
             num_gpu_per_engine = min(args.rollout_num_gpus_per_engine, args.num_gpus_per_node)
             num_engines = args.rollout_num_gpus // num_gpu_per_engine
             self.all_rollout_engines = [None] * num_engines
+            print(f"[DEBUG] RolloutManager: calling init_rollout_engines with {num_engines} engines...", flush=True)
             self.num_new_engines = init_rollout_engines(args, pg, self.all_rollout_engines)
+            print(f"[DEBUG] RolloutManager: init_rollout_engines returned, started {len(self.all_rollout_engines)}", flush=True)
             logger.info("RolloutManager started %s rollout engines", len(self.all_rollout_engines))
+        print("[DEBUG] RolloutManager: creating lock...", flush=True)
+        logger.info("RolloutManager: creating lock...")
         self.nodes_per_engine = max(1, args.rollout_num_gpus_per_engine // args.num_gpus_per_node)
         self.rollout_engine_lock = Lock.options(num_cpus=1, num_gpus=0).remote()
         self.rollout_id = -1
-
+        self.use_diffusion_rollout = getattr(args, "diffusion_train", False)
+        self._diffusion_offload_fn = None
+        self._diffusion_onload_fn = None
         self._metric_checker = MetricChecker.maybe_create(args)
         self._health_monitor = None
         if self.args.use_fault_tolerance:
@@ -138,12 +153,10 @@ class RolloutManager:
         self.rollout_id = rollout_id
         self.health_monitoring_resume()
         logger.info("RolloutManager generate start: rollout_id=%s", rollout_id)
-        if self.use_diffusion_rollout and self.args.colocate and getattr(self.args, "diffusion_train", False):
-            data = self._get_diffusion_prompt_train_data(rollout_id=rollout_id)
-            logger.info("RolloutManager generate done (prompt-only colocate): rollout_id=%s", rollout_id)
-            return self._split_prompt_data_by_dp(data, self.train_parallel_config["dp_size"])
+
         if self.args.ci_test and self.args.use_fault_tolerance and rollout_id >= 2:
             self._try_ci_fault_injection()
+
         data, metrics = self._get_rollout_data(rollout_id=rollout_id)
         self._save_debug_rollout_data(data, rollout_id=rollout_id, evaluation=False)
         _log_rollout_data(rollout_id, self.args, data, metrics, time.time() - start_time)
@@ -181,10 +194,6 @@ class RolloutManager:
         )
 
     def onload(self, tags: list[str] | None = None):
-        if self.use_diffusion_rollout:
-            if self._diffusion_onload_fn is not None:
-                return self._diffusion_onload_fn(self.args)
-            return None
         return ray.get(
             [
                 engine.resume_memory_occupation.remote(tags=tags)
@@ -195,9 +204,6 @@ class RolloutManager:
 
     def onload_weights(self):
         self.onload(tags=[GPU_MEMORY_TYPE_WEIGHTS])
-
-    def onload_kv(self):
-        self.onload(tags=[GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_CUDA_GRAPH])
 
     def recover_rollout_engines(self):
         """Restart any dead rollout engines and update num_new_engines for update_weights detection."""
@@ -322,31 +328,37 @@ class RolloutManager:
             torch.save(dict(rollout_id=rollout_id, **dump_data), path)
 
     def _post_process_rewards(self, samples: list[Sample] | list[list[Sample]]):
+        # list[list[Sample]] is for custom reward post process function
         if self.custom_reward_post_process_func is not None:
             return self.custom_reward_post_process_func(self.args, samples)
 
         raw_rewards = [sample.get_reward_value(self.args) for sample in samples]
-        if (
-            self.args.advantage_estimator in ["grpo", "gspo", "reinforce_plus_plus_baseline"]
-            and self.args.rewards_normalization
-        ):
-            # group norm
-            rewards = torch.tensor(raw_rewards, dtype=torch.float)
+        if not self.args.rewards_normalization:
+            return raw_rewards, raw_rewards
+
+        rewards = torch.tensor(raw_rewards, dtype=torch.float)
+
+        if self.args.globalize_reward_norm:
+            # global norm: batch-wide mean and std (as in flow GRPO)
+            mean = rewards.mean()
+            rewards = rewards - mean
+            if self.args.grpo_std_normalization:
+                std = rewards.std()
+                rewards = rewards / (std + 1e-4)
+        else:
+            # group norm: per-prompt mean and per-group std
             if rewards.shape[-1] == self.args.n_samples_per_prompt * self.args.rollout_batch_size:
                 rewards = rewards.reshape(-1, self.args.n_samples_per_prompt)
             else:
-                # when samples count are not equal in each group
                 rewards = rewards.view(-1, rewards.shape[-1])
             mean = rewards.mean(dim=-1, keepdim=True)
             rewards = rewards - mean
 
-            if self.args.advantage_estimator in ["grpo", "gspo"] and self.args.grpo_std_normalization:
+            if self.args.grpo_std_normalization:
                 std = rewards.std(dim=-1, keepdim=True)
                 rewards = rewards / (std + 1e-6)
 
-            return raw_rewards, rewards.flatten().tolist()
-
-        return raw_rewards, raw_rewards
+        return raw_rewards, rewards.flatten().tolist()
 
     def _convert_samples_to_train_data(self, samples: list[Sample] | list[list[Sample]]):
         """
@@ -360,71 +372,29 @@ class RolloutManager:
         assert len(raw_rewards) == len(samples)
         assert len(rewards) == len(samples)
 
+        raw_t = torch.tensor(raw_rewards, dtype=torch.float)
+        norm_t = torch.tensor(rewards, dtype=torch.float)
+        print(
+            f"[reward stats] raw mean={raw_t.mean():.4f} std={raw_t.std():.4f} min={raw_t.min():.4f} max={raw_t.max():.4f} | "
+            f"normalized mean={norm_t.mean():.4f} std={norm_t.std():.4f} min={norm_t.min():.4f} max={norm_t.max():.4f}",
+            flush=True,
+        )
+
         train_data = {
-            "tokens": [sample.tokens for sample in samples],
-            "response_lengths": [sample.response_length for sample in samples],
-            # some reward model, e.g. remote rm, may return multiple rewards,
-            # we could use key to select the reward.
+            # RL
             "rewards": rewards,
             "raw_reward": raw_rewards,
-            "truncated": [1 if sample.status == Sample.Status.TRUNCATED else 0 for sample in samples],
+            "rollout_log_probs": [sample.rollout_log_probs for sample in samples],
+            # Rollout outputs — training side maps these to model-specific forward() args
+            "denoising_env": [sample.denoising_env for sample in samples],
+            "dit_trajectory": [sample.dit_trajectory for sample in samples],
+            # Bookkeeping
             "sample_indices": [sample.index for sample in samples],
+            "prompt": [sample.prompt for sample in samples],
         }
-        if any(getattr(sample, "reward", None) is None or "ocr" not in sample.reward for sample in samples):
-            raise ValueError("Missing OCR reward in rollout samples; expected reward['ocr'] for all samples.")
-        train_data["reward_ocr"] = [sample.reward["ocr"] for sample in samples]
-        if train_data["reward_ocr"]:
-            reward_ocr = train_data["reward_ocr"]
-            zero_ratio = float(np.mean([1.0 if r == 0.0 else 0.0 for r in reward_ocr]))
-            logger.info(
-                "rollout reward_ocr stats: n=%d min=%.6f max=%.6f zero_ratio=%.6f",
-                len(reward_ocr),
-                float(min(reward_ocr)),
-                float(max(reward_ocr)),
-                zero_ratio,
-            )
-        # Pass prompt text for diffusion training to recompute embeddings.
-        train_data["prompt"] = [sample.prompt for sample in samples]
 
-        # loss mask
-        # TODO: compress the loss mask
-        loss_masks = []
-        for sample in samples:
-            # always instantiate loss_mask if not provided
-            if sample.loss_mask is None:
-                sample.loss_mask = [1] * sample.response_length
-
-            assert (
-                len(sample.loss_mask) == sample.response_length
-            ), f"loss mask length {len(sample.loss_mask)} != response length {sample.response_length}"
-            if sample.remove_sample:
-                sample.loss_mask = [0] * sample.response_length
-            loss_masks.append(sample.loss_mask)
-        train_data["loss_masks"] = loss_masks
-
-        # overwriting the raw reward
-        if samples[0].metadata and "raw_reward" in samples[0].metadata:
-            train_data["raw_reward"] = [sample.metadata["raw_reward"] for sample in samples]
-
-        # For rollout buffer
-        if samples[0].metadata and "round_number" in samples[0].metadata:
-            train_data["round_number"] = [sample.metadata["round_number"] for sample in samples]
-
-        # Add rollout log probabilities for off-policy correction
-        if samples[0].rollout_log_probs is not None:
-            train_data["rollout_log_probs"] = [sample.rollout_log_probs for sample in samples]
-
-        if samples[0].rollout_routed_experts is not None:
-            train_data["rollout_routed_experts"] = [sample.rollout_routed_experts for sample in samples]
-
-        if samples[0].train_metadata is not None:
-            train_data["metadata"] = [sample.train_metadata for sample in samples]
-
-        if samples[0].multimodal_train_inputs is not None:
-            train_data["multimodal_train_inputs"] = [sample.multimodal_train_inputs for sample in samples]
-
-        if "teacher_log_probs" in samples[0].__dict__:
-            train_data["teacher_log_probs"] = [sample.teacher_log_probs for sample in samples]
+        if hasattr(self, "_dynamic_global_batch_size"):
+            train_data["dynamic_global_batch_size"] = self._dynamic_global_batch_size
 
         return train_data
 
@@ -433,55 +403,23 @@ class RolloutManager:
 
     def _split_train_data_by_dp(self, data, dp_size):
         """Split the train data by data parallel size."""
-        rollout_data = {}
+        num_samples = len(data["sample_indices"])
+        partitions = [range(i, num_samples, dp_size) for i in range(dp_size)]
 
-        if "prompt" in data:
-            rollout_data["prompt"] = data["prompt"]
-
-        total_lengths = [len(t) for t in data["tokens"]]
-        data["total_lengths"] = total_lengths
-
-        if self.args.balance_data:
-            partitions = get_seqlen_balanced_partitions(total_lengths, dp_size, equal_size=True)
-        else:
-            partitions = [range(i, len(total_lengths), dp_size) for i in range(dp_size)]
+        # Keys to partition (per-sample lists)
+        partition_keys = [k for k in data if isinstance(data[k], list) and len(data[k]) == num_samples]
+        # Keys to broadcast (global, not per-sample)
+        broadcast_keys = [k for k in data if k not in partition_keys and k != "dynamic_global_batch_size"]
 
         rollout_data_refs = []
-
         for i in range(dp_size):
             rollout_data = {}
             partition = partitions[i]
             rollout_data["partition"] = partition
-            for key in [
-                "tokens",
-                "multimodal_train_inputs",
-                "response_lengths",
-                "rewards",
-                "truncated",
-                "loss_masks",
-                "round_number",
-                "sample_indices",
-                "rollout_log_probs",
-                "rollout_routed_experts",
-                "prompt",
-                # Propagate rollout metadata (e.g., diffusion trajectories) to training.
-                "metadata",
-                "teacher_log_probs",
-            ]:
-                if key not in data:
-                    continue
-                val = [data[key][j] for j in partition]
-                rollout_data[key] = val
-            # keys that need to be splited at train side
-            for key in [
-                "raw_reward",
-                "total_lengths",
-                "reward_ocr",
-            ]:
-                if key not in data:
-                    continue
+            for key in partition_keys:
+                rollout_data[key] = [data[key][j] for j in partition]
+            for key in broadcast_keys:
                 rollout_data[key] = data[key]
-            # Pass dynamic global_batch_size to training side
             if hasattr(self, "_dynamic_global_batch_size"):
                 rollout_data["dynamic_global_batch_size"] = self._dynamic_global_batch_size
             rollout_data_refs.append(Box(ray.put(rollout_data)))
@@ -535,13 +473,9 @@ def init_rollout_engines(args, pg, all_rollout_engines):
     num_gpu_per_engine = min(args.rollout_num_gpus_per_engine, args.num_gpus_per_node)
     num_engines = args.rollout_num_gpus // num_gpu_per_engine
     assert len(all_rollout_engines) == num_engines
-    # if args.prefill_num_servers is not None:
-    #     prefill_num_servers = args.prefill_num_servers * args.rollout_num_gpus_per_engine // num_gpu_per_engine
-    #     assert (
-    #         num_engines > prefill_num_servers
-    #     ), f"num_engines {num_engines} should be larger than prefill_num_servers {prefill_num_servers}"
 
     pg, reordered_bundle_indices, reordered_gpu_ids = pg
+    print(f"[DEBUG] init_rollout_engines: reordered_bundle_indices={reordered_bundle_indices}, reordered_gpu_ids={reordered_gpu_ids}", flush=True)
 
     # use diffusion SGLang rollout engines for miles diffusion
     RolloutRayActor = ray.remote(SGLangDiffusionEngine)
@@ -556,6 +490,7 @@ def init_rollout_engines(args, pg, all_rollout_engines):
 
         # Get the base GPU ID from placement group
         base_gpu_id = int(reordered_gpu_ids[i * num_gpu_per_engine])
+        print(f"[DEBUG] Engine {i}: base_gpu_id={base_gpu_id}, bundle_index={reordered_bundle_indices[i * num_gpu_per_engine]}", flush=True)
 
         scheduling_strategy = PlacementGroupSchedulingStrategy(
             placement_group=pg,
@@ -574,13 +509,6 @@ def init_rollout_engines(args, pg, all_rollout_engines):
             "SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_IDLE": "false",
         }
 
-        worker_type = "regular"
-        if args.prefill_num_servers is not None:
-            if i < prefill_num_servers:
-                worker_type = "prefill"
-            else:
-                worker_type = "decode"
-
         rollout_engine = RolloutRayActor.options(
             num_cpus=num_cpus,
             num_gpus=num_gpus,
@@ -588,7 +516,7 @@ def init_rollout_engines(args, pg, all_rollout_engines):
             runtime_env={
                 "env_vars": env_vars,
             },
-        ).remote(args, rank=i, worker_type=worker_type, base_gpu_id=base_gpu_id)
+        ).remote(args, rank=i, base_gpu_id=base_gpu_id)
 
         rollout_engines.append((i, rollout_engine))
         all_rollout_engines[i] = rollout_engine
@@ -641,12 +569,6 @@ def _allocate_rollout_engine_addr_and_ports_normal(*, args, num_engines, rollout
     )
     addr_and_ports = [{} for _ in range(num_engines)]
 
-    # Calculate prefill limit to identify prefill engines
-    prefill_limit = 0
-    if args.prefill_num_servers is not None:
-        num_gpu_per_engine = min(args.rollout_num_gpus_per_engine, args.num_gpus_per_node)
-        prefill_limit = args.prefill_num_servers * args.rollout_num_gpus_per_engine // num_gpu_per_engine
-
     visited_nodes = set()
     for rank, engine in rollout_engines:
         if rank // num_engines_per_node in visited_nodes:
@@ -686,9 +608,6 @@ def _allocate_rollout_engine_addr_and_ports_normal(*, args, num_engines, rollout
             addr_and_ports[current_rank]["port"] = get_port()
             addr_and_ports[current_rank]["nccl_port"] = get_port()
 
-            if args.prefill_num_servers is not None and current_rank < prefill_limit:
-                addr_and_ports[current_rank]["disaggregation_bootstrap_port"] = get_port()
-
         if args.rollout_num_gpus_per_engine > args.num_gpus_per_node:
             num_node_per_engine = args.rollout_num_gpus_per_engine // args.num_gpus_per_node
             if rank % num_node_per_engine == 0:
@@ -722,23 +641,8 @@ def _start_router(args):
         from miles.router.router import run_router
 
         router_args = args
-
-    else:
-        from sglang_router.launch_router import RouterArgs
-
-        from miles.utils.http_utils import run_router
-
-        router_args = RouterArgs.from_cli_args(args, use_router_prefix=True)
-        router_args.host = args.sglang_router_ip
-        router_args.port = args.sglang_router_port
-        router_args.prometheus_port = find_available_port(random.randint(4000, 5000))
-        router_args.log_level = "warn"
-        router_args.request_timeout_secs = args.sglang_router_request_timeout_secs
-
-        if args.prefill_num_servers is not None:
-            router_args.pd_disaggregation = True
-
-        logger.info(f"Launch router with args: {router_args}")
+    else :
+        raise RuntimeError("Miles-diffusion only supports miles router for now")
 
     process = multiprocessing.Process(
         target=run_router,
@@ -804,14 +708,9 @@ def _log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_
 
 
 def compute_metrics_from_samples(args, samples):
-    response_lengths = [sample.effective_response_length for sample in samples]
-
     log_dict = {}
-    log_dict |= dict_add_prefix(compute_statistics(response_lengths), "response_len/")
     log_dict |= _compute_zero_std_metrics(args, samples)
     log_dict |= _compute_reward_cat_metrics(args, samples)
-    log_dict["repetition_frac"] = np.mean([int(has_repetition(s.response)) for s in samples]).item()
-    log_dict["truncated_ratio"] = np.mean([int(s.status == Sample.Status.TRUNCATED) for s in samples]).item()
     return log_dict
 
 
@@ -842,8 +741,7 @@ def compute_perf_metrics_from_samples(args, samples, rollout_time):
             rollout_time - mean_non_generation_time
         )
 
-    token_perf([sample.response_length for sample in samples], non_generation_time, key="")
-    token_perf([sample.effective_response_length for sample in samples], non_generation_time, key="effective_")
+    # token_perf
 
     return log_dict
 
@@ -863,27 +761,6 @@ def _compute_zero_std_metrics(args, all_samples: list[Sample]):
     interesting_rewards = [str(round(g[0].get_reward_value(args), 1)) for g in interesting_sample_groups]
 
     return {f"zero_std/count_{reward}": len(items) for reward, items in group_by(interesting_rewards).items()}
-
-
-def _compute_spec_metrics(args, all_samples: list[Sample]):
-    if args.sglang_speculative_algorithm is None:
-        return {}
-    num_samples = len(all_samples)
-    metrics = {}
-    metrics["spec_accept_rate"] = sum(sample.spec_info.spec_accept_rate for sample in all_samples) / num_samples
-    metrics["spec_accept_length"] = sum(sample.spec_info.spec_accept_length for sample in all_samples) / num_samples
-    return metrics
-
-
-def _compute_prefix_cache_metrics(args, all_samples: list[Sample]):
-    num_samples = len(all_samples)
-    metrics = {}
-    total_cached_tokens = sum(sample.prefix_cache_info.cached_tokens for sample in all_samples)
-    total_prompt_tokens = sum(sample.prefix_cache_info.total_prompt_tokens for sample in all_samples)
-
-    metrics["prefix_cache_hit_rate"] = total_cached_tokens / total_prompt_tokens if total_prompt_tokens > 0 else 0.0
-    metrics["avg_cached_tokens_per_sample"] = total_cached_tokens / num_samples
-    return metrics
 
 
 def _compute_reward_cat_metrics(args, all_samples: list[Sample]):

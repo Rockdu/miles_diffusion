@@ -68,7 +68,6 @@ class MilesRouter:
         # sglang-router api
         self.app.post("/add_worker")(self.add_worker)
         self.app.get("/list_workers")(self.list_workers)
-        self.app.post("/retrieve_from_text")(self.retrieve_from_text)
         # Catch-all route for proxying to SGLang - must be registered LAST
         self.app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])(self.proxy)
 
@@ -140,25 +139,13 @@ class MilesRouter:
 
         try:
             response = await self.client.request(request.method, url, content=body, headers=headers)
-            # Eagerly read content so we can return JSON (not streaming)
+            # Pass through raw bytes — JSON re-serialization is too expensive for large tensor payloads.
             content = await response.aread()
-            content_type = response.headers.get("content-type", "")
-            try:
-                # Prefer parsing JSON if possible
-                data = json.loads(content)
-                return JSONResponse(
-                    content=data,
-                    status_code=response.status_code,
-                    headers=dict(response.headers),
-                )
-            except Exception:
-                # Fall back to raw body with original content type
-                return Response(
-                    content=content,
-                    status_code=response.status_code,
-                    headers=dict(response.headers),
-                    media_type=content_type or None,
-                )
+            return Response(
+                content=content,
+                status_code=response.status_code,
+                headers=dict(response.headers),
+            )
 
         finally:
             self._finish_url(worker_url)
@@ -196,28 +183,6 @@ class MilesRouter:
     async def list_workers(self, request: Request):
         """List all registered workers"""
         return {"urls": list(self.worker_request_counts.keys())}
-
-    async def retrieve_from_text(self, request: Request):
-        """Get token information from text input"""
-        body = await request.body()
-        payload = json.loads(body) if body else {}
-
-        text = payload.get("text", "")
-
-        # Use radix tree's retrieve_from_text method (no need to fetch weight version here)
-        token_ids, logp, loss_mask = self.radix_tree.retrieve_from_text(text, return_logprob=True)
-
-        # Handle the result based on whether logp was requested
-        result = {
-            "tokens": token_ids,  # token IDs
-            "response": text,  # The input text
-            "loss_mask": loss_mask,  # Loss mask for the tokens
-            "token_length": len(token_ids),
-            "loss_mask_length": len(loss_mask),
-            "rollout_logp": logp,
-        }
-
-        return result
 
     def _use_url(self):
         """Select worker URL with minimal active requests."""
