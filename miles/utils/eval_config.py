@@ -101,8 +101,6 @@ class EvalDatasetConfig:
 
     # Dataset-specific overrides
     input_key: str | None = None
-    label_key: str | None = None
-    tool_key: str | None = None
     metadata_key: str | None = None
 
     n_samples_per_eval_prompt: int | None = None

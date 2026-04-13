@@ -14,7 +14,7 @@ try:
 except ImportError:
     pq = None
 
-from miles.utils.types import MultimodalTypes, Sample
+from miles.utils.types import Sample
 
 from .timer import Timer
 
@@ -124,6 +124,8 @@ def _build_messages(data: dict, prompt_key: str, as_conversation: bool, multimod
             prompt = [{"role": "user", "content": prompt}]
 
     if multimodal_keys:
+        from miles.utils.types import MultimodalTypes  # LLM-only; lazy to avoid diffusion import errors
+
         # Build mapping: placeholder -> (MultimodalType, content_list)
         multimodals = {}
         for type_name, data_key in multimodal_keys.items():
