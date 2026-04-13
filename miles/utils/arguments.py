@@ -124,10 +124,10 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Use diffusion GRPO training actor instead of text RL.",
             )
             parser.add_argument(
-                "--diffusion-train-batch-size",
+                "--diffusion-timestep-batch",
                 type=int,
-                default=None,
-                help="Micro batch size for diffusion training. Defaults to full batch.",
+                default=1,
+                help="Number of timesteps to batch together in one DiT forward pass during training.",
             )
             parser.add_argument(
                 "--diffusion-clip-range",

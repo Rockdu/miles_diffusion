@@ -86,15 +86,9 @@ class RayTrainGroup:
             actor_impl = MegatronTrainRayActor
 
         else:
-            if self.args.diffusion_train:
-                # Use diffusion-specific FSDP actor when running GRPO for diffusion.
-                from miles.backends.fsdp_utils import DiffusionFSDPTrainRayActor
+            from miles.backends.fsdp_utils import FSDPTrainRayActor
 
-                actor_impl = DiffusionFSDPTrainRayActor
-            else:
-                from miles.backends.fsdp_utils import FSDPTrainRayActor
-
-                actor_impl = FSDPTrainRayActor
+            actor_impl = FSDPTrainRayActor
 
         TrainRayActor = ray.remote(num_gpus=1, runtime_env={"env_vars": env_vars})(actor_impl)
 

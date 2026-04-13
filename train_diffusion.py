@@ -27,14 +27,14 @@ def train(args):
 
     # create the actor and critic models
     logger.info("train: creating training models")
-    # actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
+    actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
     logger.info("train: training models ready")
 
     if args.offload_rollout:
         ray.get(rollout_manager.onload_weights.remote())
 
     # always update weight first so that sglang has the loaded weights from training.
-    # actor_model.update_weights()
+    actor_model.update_weights()
 
     # if args.check_weight_update_equal:
     #     ray.get(rollout_manager.check_weights.remote(action="compare"))
@@ -43,30 +43,19 @@ def train(args):
     if args.num_rollout == 0 and args.eval_interval is not None:
         ray.get(rollout_manager.eval.remote(rollout_id=0))
 
-    # def offload_train():
-    #     if args.offload_train:
-    #         if args.use_critic:
-    #             critic_model.offload()
-    #             if rollout_id >= args.num_critic_only_steps:
-    #                 actor_model.offload()
-    #         else:
-    #             actor_model.offload()
-    #     else:
-    #         actor_model.clear_memory()
+    def offload_train():
+        if args.offload_train:
+            actor_model.offload()
+        else:
+            actor_model.clear_memory()
 
-    # def save(rollout_id):
-    #     if (not args.use_critic) or (rollout_id >= args.num_critic_only_steps):
-    #         actor_model.save_model(
-    #             rollout_id,
-    #             force_sync=rollout_id == args.num_rollout - 1,
-    #         )
-    #     if args.use_critic:
-    #         critic_model.save_model(
-    #             rollout_id,
-    #             force_sync=rollout_id == args.num_rollout - 1,
-    #         )
-    #     if args.rollout_global_dataset:
-    #         ray.get(rollout_manager.save.remote(rollout_id))
+    def save(rollout_id):
+        actor_model.save_model(
+            rollout_id,
+            force_sync=rollout_id == args.num_rollout - 1,
+        )
+        if args.rollout_global_dataset:
+            ray.get(rollout_manager.save.remote(rollout_id))
 
     # train loop.
     # note that for async training, one can change the position of the sync operation(ray.get).
@@ -83,16 +72,16 @@ def train(args):
             ray.get(rollout_manager.offload.remote())
 
         logger.info(f"train: rollout {rollout_id} actor train start")
-        # ray.get(actor_model.async_train(rollout_id, rollout_data_ref))
+        ray.get(actor_model.async_train(rollout_id, rollout_data_ref))
         logger.info(f"train: rollout {rollout_id} actor train done")
 
-        # if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
-        #     save(rollout_id)
+        if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
+            save(rollout_id)
 
-        # offload_train()
+        offload_train()
         if args.offload_rollout:
             ray.get(rollout_manager.onload_weights.remote())
-        # actor_model.update_weights()
+        actor_model.update_weights()
 
         if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
             ray.get(rollout_manager.eval.remote(rollout_id))

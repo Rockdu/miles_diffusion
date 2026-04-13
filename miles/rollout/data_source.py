@@ -2,12 +2,10 @@ import abc
 import copy
 import logging
 import os
-from pathlib import Path
 
 import torch
 
 from miles.utils.misc import load_function
-from miles.utils.processing_utils import load_processor, load_tokenizer
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
@@ -52,41 +50,14 @@ class RolloutDataSource(DataSource):
         self.metadata = {}
 
         if args.rollout_global_dataset:
-            if getattr(args, "diffusion_train", False):
-                from miles.utils.diffusion_data import Dataset as DiffusionDataset
+            from miles.utils.diffusion_data import Dataset as DiffusionDataset
 
-                self.dataset = DiffusionDataset(
-                    args.prompt_data,
-                    prompt_key=args.input_key,
-                    metadata_key=args.metadata_key,
-                    seed=args.rollout_seed,
-                )
-            else:
-                from miles.utils.data import Dataset
-
-                tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
-                processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
-
-                # TODO move (during the refactor)
-                if (d := args.dump_details) is not None:
-                    tokenizer.save_pretrained(Path(d) / "tokenizer")
-                    if processor:
-                        processor.save_pretrained(Path(d) / "processor")
-
-                self.dataset = Dataset(
-                    args.prompt_data,
-                    tokenizer=tokenizer,
-                    processor=processor,
-                    max_length=args.rollout_max_prompt_len,
-                    prompt_key=args.input_key,
-                    multimodal_keys=args.multimodal_keys,
-                    label_key=args.label_key,
-                    metadata_key=args.metadata_key,
-                    tool_key=args.tool_key,
-                    apply_chat_template=args.apply_chat_template,
-                    apply_chat_template_kwargs=args.apply_chat_template_kwargs,
-                    seed=args.rollout_seed,
-                )
+            self.dataset = DiffusionDataset(
+                args.prompt_data,
+                prompt_key=args.input_key,
+                metadata_key=args.metadata_key,
+                seed=args.rollout_seed,
+            )
             if self.args.rollout_shuffle:
                 self.dataset.shuffle(self.epoch_id)
         else:

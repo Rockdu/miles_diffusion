@@ -97,7 +97,6 @@ class RolloutManager:
         self.nodes_per_engine = max(1, args.rollout_num_gpus_per_engine // args.num_gpus_per_node)
         self.rollout_engine_lock = Lock.options(num_cpus=1, num_gpus=0).remote()
         self.rollout_id = -1
-        self.use_diffusion_rollout = getattr(args, "diffusion_train", False)
         self._diffusion_offload_fn = None
         self._diffusion_onload_fn = None
         self._metric_checker = MetricChecker.maybe_create(args)
@@ -185,10 +184,6 @@ class RolloutManager:
 
     def offload(self):
         self.health_monitoring_pause()
-        if self.use_diffusion_rollout:
-            if self._diffusion_offload_fn is not None:
-                return self._diffusion_offload_fn(self.args)
-            return None
         return ray.get(
             [engine.release_memory_occupation.remote() for engine in self.rollout_engines if engine is not None]
         )
@@ -415,7 +410,6 @@ class RolloutManager:
         for i in range(dp_size):
             rollout_data = {}
             partition = partitions[i]
-            rollout_data["partition"] = partition
             for key in partition_keys:
                 rollout_data[key] = [data[key][j] for j in partition]
             for key in broadcast_keys:

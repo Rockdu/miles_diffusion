@@ -49,7 +49,7 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --rollout-batch-size 8 \
   --n-samples-per-prompt 8 \
   --num-rollout 100000 \
-  --diffusion-train-batch-size 2 \
+  --diffusion-timestep-batch 2 \
   --actor-num-gpus-per-node 2 \
   --rollout-num-gpus 2 \
   --rollout-num-gpus-per-engine 1 \
