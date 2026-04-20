@@ -92,11 +92,13 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --diffusion-num-batches-per-epoch 1 \
   --diffusion-guidance-scale 4.0 \
   --diffusion-true-cfg-scale 4.0 \
-  --diffusion-rollout-noise-level 1.2 \
+  --diffusion-noise-level 1.2 \
+  --diffusion-step-strategy-path miles.rollout.step_strategy_hub.sde_window \
+  --diffusion-sde-window-size 2 \
+  --diffusion-sde-window-range 0,5 \
   --diffusion-height 256 \
   --diffusion-width 256 \
   --global-batch-size 8 \
-  --diffusion-ignore-last 2 \
-  --diffusion-rollout-debug-mode \
+  --diffusion-debug-mode \
   --debug-skip-optimizer-step \
   "${WANDB_ARGS[@]}"
