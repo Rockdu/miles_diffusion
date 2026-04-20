@@ -1010,10 +1010,23 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Disable rewards normalization",
             )
             parser.add_argument(
-                "--globalize-reward-norm",
+                "--globalize-reward-mean",
                 action="store_true",
                 default=False,
-                help="Use batch-wide mean/std instead of per-group mean/std for reward normalization (as in flow GRPO).",
+                help=(
+                    "Use batch-wide mean instead of per-prompt mean for GRPO advantage. "
+                    "flow_grpo's PerPromptStatTracker uses per-prompt mean, so leave this OFF "
+                    "for flow_grpo parity."
+                ),
+            )
+            parser.add_argument(
+                "--globalize-reward-std",
+                action="store_true",
+                default=False,
+                help=(
+                    "Use batch-wide std instead of per-group std for GRPO advantage. "
+                    "flow_grpo's pickscore recipe sets global_std=True, so enable this for parity."
+                ),
             )
             parser.add_argument(
                 "--use-rollout-entropy",

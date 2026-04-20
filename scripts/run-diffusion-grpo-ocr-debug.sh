@@ -85,7 +85,7 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --diffusion-model Qwen/Qwen-Image \
   --diffusion-reward ocr:1.0 \
   --advantage-estimator grpo \
-  --globalize-reward-norm \
+  --globalize-reward-std \
   --rm-type ocr \
   --diffusion-dtype bf16 \
   --diffusion-num-steps 10 \

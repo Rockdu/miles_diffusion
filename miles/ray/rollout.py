@@ -331,27 +331,25 @@ class RolloutManager:
         if not self.args.rewards_normalization:
             return raw_rewards, raw_rewards
 
-        rewards = torch.tensor(raw_rewards, dtype=torch.float)
+        # --globalize-reward-mean / --globalize-reward-std are orthogonal. flow_grpo
+        # pickscore_qwenimage uses per-prompt mean + global std (PerPromptStatTracker
+        # with global_std=True), which is --globalize-reward-std alone.
+        rewards_flat = torch.tensor(raw_rewards, dtype=torch.float)
+        rewards = rewards_flat.view(-1, self.args.n_samples_per_prompt)
 
-        if self.args.globalize_reward_norm:
-            # global norm: batch-wide mean and std (as in flow GRPO)
-            mean = rewards.mean()
-            rewards = rewards - mean
-            if self.args.grpo_std_normalization:
-                std = rewards.std()
-                rewards = rewards / (std + 1e-4)
+        if self.args.globalize_reward_mean:
+            mean = rewards_flat.mean()
         else:
-            # group norm: per-prompt mean and per-group std
-            if rewards.shape[-1] == self.args.n_samples_per_prompt * self.args.rollout_batch_size:
-                rewards = rewards.reshape(-1, self.args.n_samples_per_prompt)
-            else:
-                rewards = rewards.view(-1, rewards.shape[-1])
             mean = rewards.mean(dim=-1, keepdim=True)
-            rewards = rewards - mean
+        rewards = rewards - mean
 
-            if self.args.grpo_std_normalization:
+        if self.args.grpo_std_normalization:
+            if self.args.globalize_reward_std:
+                std = rewards_flat.std()
+            else:
                 std = rewards.std(dim=-1, keepdim=True)
-                rewards = rewards / (std + 1e-6)
+            # matches flow_grpo's `+ 1e-4` in both stat_tracking branches
+            rewards = rewards / (std + 1e-4)
 
         return raw_rewards, rewards.flatten().tolist()
 
