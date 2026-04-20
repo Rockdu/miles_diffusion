@@ -391,6 +391,8 @@ class RolloutManager:
         reward_stats["rollout/step"] = compute_rollout_step(self.args, self.rollout_id)
         tracking_utils.log(self.args, reward_stats, step_key="rollout/step")
 
+        self._log_rollout_images(samples)
+
         train_data = {
             # RL
             "rewards": rewards,
@@ -406,12 +408,49 @@ class RolloutManager:
             # Bookkeeping
             "sample_indices": [sample.index for sample in samples],
             "prompt": [sample.prompt for sample in samples],
+            # Per-sample training step indices (flow_grpo sde-window). None = train every step.
+            "sde_step_indices": [
+                (sample.train_metadata or {}).get("sde_step_indices") for sample in samples
+            ],
         }
 
         if hasattr(self, "_dynamic_global_batch_size"):
             train_data["dynamic_global_batch_size"] = self._dynamic_global_batch_size
 
         return train_data
+
+    def _log_rollout_images(self, samples: list[Sample]) -> None:
+        """Log a few rollout images to wandb under ``rollout/sample_images``.
+        Gated by ``--diffusion-log-images`` / ``--diffusion-log-image-interval``."""
+        max_images = int(getattr(self.args, "diffusion_log_images", 0) or 0)
+        if max_images <= 0:
+            return
+        interval = max(1, int(getattr(self.args, "diffusion_log_image_interval", 1) or 1))
+        if self.rollout_id % interval != 0:
+            return
+
+        import wandb
+        images = []
+        for s in samples[:max_images]:
+            t = s.generated_output
+            if t is None or t.ndim != 4:
+                continue
+            frame = t[:, 0, :, :].float().cpu().numpy().transpose(1, 2, 0)
+            if frame.max() <= 1.0 + 1e-3:
+                frame = frame * 255.0
+            frame = np.clip(frame, 0, 255).astype(np.uint8)
+            reward = s.reward if not self.args.reward_key else (s.reward or {}).get(self.args.reward_key)
+            images.append(wandb.Image(frame, caption=f"{str(s.prompt)[:160]} | reward={reward}"))
+        if not images:
+            return
+        tracking_utils.log(
+            self.args,
+            {
+                "rollout/sample_images": images,
+                "rollout/step": compute_rollout_step(self.args, self.rollout_id),
+            },
+            step_key="rollout/step",
+        )
 
     def set_train_parallel_config(self, config: dict):
         self.train_parallel_config = config

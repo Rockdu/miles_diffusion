@@ -58,14 +58,11 @@ class FSDPTrainRayActor(TrainRayActor):
             init_tracking(args, primary=False)
 
         # Load the diffusion pipeline; keep only transformer + scheduler.
-        # Default to bf16 to match sgl-d rollout engine's compute dtype; allow
-        # explicit fp16/fp32 via --diffusion-dtype.
-        if args.diffusion_dtype == "fp16":
-            dtype = torch.float16
-        elif args.diffusion_dtype == "fp32":
-            dtype = torch.float32
-        else:
-            dtype = torch.bfloat16
+        # --diffusion-dtype controls the training-side DiT compute precision.
+        # Must match the rollout engine's compute dtype for clean log-prob
+        # alignment; pass the same value to sglang-d via sglang_dit_dtype.
+        dtype = _resolve_compute_dtype(args.diffusion_dtype)
+        self._compute_dtype = dtype
         pipeline = DiffusionPipeline.from_pretrained(
             args.diffusion_model,
             torch_dtype=dtype,
@@ -264,6 +261,11 @@ class FSDPTrainRayActor(TrainRayActor):
         rewards = torch.tensor(rollout_data["rewards"], device=device, dtype=torch.float32)
         rollout_log_probs_list = rollout_data["rollout_log_probs"]
         rollout_debug_list = rollout_data.get("rollout_debug_tensors") or [None] * len(denoising_envs)
+        # Per-sample sde-window step indices (from step_strategy_hub.sde_window).
+        # When set, the trajectory / log_probs come back full-length and we
+        # slice to this subset — mirroring flow_grpo, which only computes
+        # log_prob / loss on in-window steps.
+        sde_step_indices_list = rollout_data.get("sde_step_indices") or [None] * len(denoising_envs)
 
         batch_size = len(denoising_envs)
         guidance_scale = float(getattr(self.args, "diffusion_guidance_scale", 0))
@@ -274,7 +276,7 @@ class FSDPTrainRayActor(TrainRayActor):
         use_cfg = cfg_scale > 0
         clip_range = float(getattr(self.args, "diffusion_clip_range", 1e-4))
         adv_clip_max = float(getattr(self.args, "diffusion_adv_clip_max", 5.0))
-        noise_level = float(getattr(self.args, "diffusion_rollout_noise_level", 0.7))
+        noise_level = float(getattr(self.args, "diffusion_noise_level", 0.7))
         num_timesteps = dit_trajectories[0].timesteps.shape[0]
 
         # Broadcast scalar reward to per-timestep advantage.
@@ -300,13 +302,9 @@ class FSDPTrainRayActor(TrainRayActor):
         self.scheduler._step_index = None
         self.scheduler._begin_index = None
 
-        # Skip last N denoising steps for training: at small σ the SDE
-        # noise_std_dev is tiny, amplifying any noise_pred diff into large
-        # log_prob error.  FlowGRPO skips 1, DanceGRPO also skips 1.
-        skip_last = int(getattr(self.args, "diffusion_ignore_last", 0))
-        train_num_timesteps = max(1, num_timesteps - skip_last)
+        train_num_timesteps = max(1, num_timesteps)
 
-        trajectories_per_step = max(1, int(getattr(self.args, "diffusion_grad_accum_steps", 1)))
+        trajectories_per_step = max(1, int(getattr(self.args, "diffusion_gradient_accumulation_steps", 1)))
         timestep_batch = int(getattr(self.args, "diffusion_timestep_batch", 1))
         num_steps_per_rollout = (batch_size + trajectories_per_step - 1) // trajectories_per_step
 
@@ -328,9 +326,24 @@ class FSDPTrainRayActor(TrainRayActor):
                 advantage_i = advantages[i]
                 reward_i = rewards[i]
 
+                # Restrict to the flow_grpo-style SDE window (if any). Trajectory and
+                # log_probs come back full-length so scheduler.timesteps/sigmas stay
+                # correct for any j via `index_for_timestep`; we just index in.
+                sde_idx = sde_step_indices_list[i]
+                if sde_idx is not None:
+                    idx = torch.as_tensor(sde_idx, device=device, dtype=torch.long)
+                    latents = latents[idx]
+                    next_latents = next_latents[idx]
+                    timesteps_i = timesteps_i[idx]
+                    log_prob_old_i = log_prob_old_i[idx]
+                    advantage_i = advantage_i[: idx.numel()]
+                    sample_train_steps = int(idx.numel())
+                else:
+                    sample_train_steps = train_num_timesteps
+
                 # Batch multiple timesteps for GPU utilization.
-                for t_start in range(0, train_num_timesteps, timestep_batch):
-                    t_end = min(train_num_timesteps, t_start + timestep_batch)
+                for t_start in range(0, sample_train_steps, timestep_batch):
+                    t_end = min(sample_train_steps, t_start + timestep_batch)
                     tb = t_end - t_start
                     lat_chunk = latents[t_start:t_end]
                     ts_chunk = timesteps_i[t_start:t_end]
@@ -359,12 +372,13 @@ class FSDPTrainRayActor(TrainRayActor):
                             flush=True,
                         )
 
-                    # Match rollout's bf16 input dtype exactly. Rollout runs under
-                    # torch.autocast("cuda", bf16) so all inputs enter the DiT as
-                    # bf16. Without explicit cast here, FSDP MixedPrecision only
-                    # casts params but leaves fp32 inputs → first matmul runs at
-                    # higher precision than rollout → systematic noise_pred drift.
-                    _dt = torch.bfloat16
+                    # Match rollout's compute dtype exactly. Rollout runs under
+                    # torch.autocast("cuda", <dtype>) so all inputs enter the DiT
+                    # as that dtype. Without explicit cast here, FSDP MixedPrecision
+                    # only casts params but leaves fp32 inputs → first matmul runs
+                    # at higher precision than rollout → systematic noise_pred drift.
+                    # When diffusion_dtype=fp32, this is a no-op (inputs already fp32).
+                    _dt = self._compute_dtype
                     _cast = lambda d: {k: v.to(_dt) if isinstance(v, torch.Tensor) else v for k, v in d.items()}
                     noise_pred_pos = self.model(
                         hidden_states=lat_chunk.to(_dt),
@@ -507,6 +521,15 @@ def move_torch_optimizer(optimizer, device):
     torch.cuda.synchronize()
 
 
+def _resolve_compute_dtype(name: str) -> torch.dtype:
+    """Map --diffusion-dtype string to torch.dtype. Single source of truth."""
+    if name == "fp16":
+        return torch.float16
+    if name == "fp32":
+        return torch.float32
+    return torch.bfloat16  # default
+
+
 def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None):
     """Apply FSDP v2 to the model.
 
@@ -515,7 +538,7 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None):
         mesh: Optional DeviceMesh for FSDP. If None, uses all ranks.
         cpu_offload: If True, offload parameters, gradients, and optimizer states
             to CPU. The optimizer step will run on CPU. (Default: False)
-        args: Arguments containing precision settings (fp16/bf16)
+        args: Arguments containing precision settings (--diffusion-dtype, --fp16)
 
     Ref: https://github.com/volcengine/verl/blob/main/verl/utils/fsdp_utils.py
     """
@@ -532,16 +555,9 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None):
         if module.__class__.__name__ in layer_cls_to_wrap
     ]
 
-    # Determine precision policy. sglang-d rollout runs DiT forward in bf16
-    # (verified from engine log), so mirror that here — fp16 param_dtype
-    # would introduce a training/rollout dtype mismatch and break log-prob
-    # alignment. Use fp32 reduce to avoid low-precision gradient overflow.
-    if getattr(args, "fp16", False):
-        param_dtype = torch.float16
-        reduce_dtype = torch.float32
-    else:
-        param_dtype = torch.bfloat16
-        reduce_dtype = torch.float32
+    diffusion_dtype = getattr(args, "diffusion_dtype", None) if args is not None else None
+    param_dtype = _resolve_compute_dtype(diffusion_dtype)
+    reduce_dtype = torch.float32
 
     logger.info(f"FSDP: wrapping {len(modules)} modules of type {layer_cls_to_wrap}, param_dtype={param_dtype}, reduce_dtype={reduce_dtype}")
 
