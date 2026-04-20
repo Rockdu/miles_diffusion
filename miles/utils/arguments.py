@@ -1430,13 +1430,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Batch size per PickScore actor call.",
             )
             parser.add_argument(
-                "--pickscore-dtype",
-                type=str,
-                default="fp32",
-                choices=["fp32", "float32", "fp16", "float16", "bf16", "bfloat16"],
-                help="Torch dtype for the PickScore CLIP model.",
-            )
-            parser.add_argument(
                 "--pickscore-processor-path",
                 type=str,
                 default=None,

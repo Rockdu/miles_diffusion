@@ -39,17 +39,6 @@ def _sample_to_rgb_hwc_uint8(sample: Sample) -> np.ndarray:
     return np.ascontiguousarray(hwc.clip(0, 255).astype(np.uint8))
 
 
-def _dtype_from_name(dtype_name: str) -> torch.dtype:
-    normalized = dtype_name.lower()
-    if normalized in {"fp16", "float16"}:
-        return torch.float16
-    if normalized in {"bf16", "bfloat16"}:
-        return torch.bfloat16
-    if normalized in {"fp32", "float32"}:
-        return torch.float32
-    raise ValueError(f"Unsupported PickScore dtype: {dtype_name}")
-
-
 def _required_arg(args, name: str) -> str:
     value = getattr(args, name, None)
     if value is None or value == "":
@@ -68,7 +57,6 @@ class PickScoreScorer(torch.nn.Module):
         self,
         *,
         device: str = "cuda",
-        dtype: torch.dtype = torch.float32,
         processor_path: str,
         model_path: str,
     ) -> None:
@@ -76,19 +64,8 @@ class PickScoreScorer(torch.nn.Module):
         from transformers import CLIPModel, CLIPProcessor
 
         self.device = torch.device(device)
-        self.dtype = dtype
         self.processor = CLIPProcessor.from_pretrained(processor_path)
         self.model = CLIPModel.from_pretrained(model_path).eval().to(self.device)
-        self.model = self.model.to(dtype=dtype)
-
-    def _to_device(self, inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        moved = {}
-        for key, value in inputs.items():
-            if torch.is_floating_point(value):
-                moved[key] = value.to(device=self.device, dtype=self.dtype)
-            else:
-                moved[key] = value.to(device=self.device)
-        return moved
 
     @torch.no_grad()
     def forward(self, prompts: Sequence[str], images: Sequence[Image.Image]) -> list[float]:
@@ -109,8 +86,8 @@ class PickScoreScorer(torch.nn.Module):
             max_length=77,
             return_tensors="pt",
         )
-        image_inputs = self._to_device(image_inputs)
-        text_inputs = self._to_device(text_inputs)
+        image_inputs = {key: value.to(device=self.device) for key, value in image_inputs.items()}
+        text_inputs = {key: value.to(device=self.device) for key, value in text_inputs.items()}
 
         image_embs = self.model.get_image_features(**image_inputs)
         image_embs = image_embs / image_embs.norm(p=2, dim=-1, keepdim=True).clamp_min(1e-12)
@@ -128,7 +105,6 @@ class PickScoreRewardActor:
     def __init__(
         self,
         *,
-        dtype_name: str = "fp32",
         processor_path: str,
         model_path: str,
     ) -> None:
@@ -145,7 +121,6 @@ class PickScoreRewardActor:
         )
         self.scorer = PickScoreScorer(
             device=device,
-            dtype=_dtype_from_name(dtype_name),
             processor_path=processor_path,
             model_path=model_path,
         )
@@ -174,7 +149,6 @@ class AsyncPickScorePool(metaclass=SingletonMeta):
         if self._batch_size <= 0:
             raise ValueError(f"pickscore_batch_size must be > 0, got {self._batch_size}")
 
-        dtype_name = getattr(args, "pickscore_dtype", "fp32")
         processor_path = _required_arg(args, "pickscore_processor_path")
         model_path = _required_arg(args, "pickscore_model_path")
         self._actors = [
@@ -183,7 +157,6 @@ class AsyncPickScorePool(metaclass=SingletonMeta):
                 num_gpus=num_gpus_per_worker,
                 scheduling_strategy="DEFAULT",
             ).remote(
-                dtype_name=dtype_name,
                 processor_path=processor_path,
                 model_path=model_path,
             )

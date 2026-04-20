@@ -56,7 +56,6 @@ fi
   --pickscore-num-workers 1 \
   --pickscore-num-gpus-per-worker 1.0 \
   --pickscore-batch-size 2 \
-  --pickscore-dtype fp32 \
   --pickscore-processor-path laion/CLIP-ViT-H-14-laion2B-s32B-b79K \
   --pickscore-model-path yuvalkirstain/PickScore_v1 \
   --diffusion-dtype bf16 \
