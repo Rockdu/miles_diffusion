@@ -219,6 +219,9 @@ class FSDPTrainRayActor(TrainRayActor):
             reduced["epoch"] = float(rollout_id)
             reduced["rollout/step"] = compute_rollout_step(self.args, rollout_id)
             reduced["global_step"] = float(step)
+            # wandb.define_metric("train/*", step_metric="train/step") pulls the
+            # x-axis value from this key; keep it == global_step for monotonicity.
+            reduced["train/step"] = float(step)
             tracking_utils.log(self.args, reduced, step_key="global_step")
             # Stdout mirror so we can spot misalignment / divergence without wandb.
             print(
