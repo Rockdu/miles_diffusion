@@ -87,7 +87,7 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --diffusion-step-strategy-path miles.rollout.step_strategy_hub.sde_window \
   --diffusion-sde-window-size 2 \
   --diffusion-sde-window-range 3,5 \
-  --diffusion-true-onpolicy \
+  --apply-qwen-image-sgl-d-patch \
   --update-weight-buffer-size 2147483648 \
   --diffusion-height 512 \
   --diffusion-width 512 \
