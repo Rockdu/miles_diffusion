@@ -271,11 +271,9 @@ def _calculate_zero_std_ratio(prompts: list[str], rewards: list[float]) -> tuple
     zero_std_ratio = zero_std_count / len(prompt_std_devs)
     return float(zero_std_ratio), float(prompt_std_devs.mean())
 
-# NOTE: image logging moved to miles/ray/rollout.py:_log_rollout_images
-# (key "rollout/sample_images" with proper wandb.define_metric, defined in
-# miles/utils/wandb_utils.py:163). The previous "images" key here had no
-# define_metric, which caused wandb workspace to spawn a new image panel
-# per training run. Removed to dedupe.
+# NOTE: image logging moved to miles/ray/rollout.py:_log_images
+# under "rollout_media/sample_images" so wandb groups them in a dedicated
+# media section.
 
 
 def _run_rollout_group(
@@ -359,8 +357,8 @@ def _run_rollout_group(
     reward_dict = {k: np.asarray(v, dtype=np.float64).tolist() for k, v in reward_dict.items()}
     rewards_avg = reward_dict.get("avg", reward_dict.get("ocr", []))
 
-    # NOTE: image logging is handled by RolloutManager._log_rollout_images
-    # (key "rollout/sample_images" with proper define_metric), not here.
+    # NOTE: image logging is handled by RolloutManager._log_images
+    # (key "rollout_media/sample_images"), not here.
 
     for idx, sample in enumerate(group):
         per_sample_reward = {k: float(v[idx]) for k, v in reward_dict.items()}
