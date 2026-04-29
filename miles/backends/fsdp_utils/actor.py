@@ -474,7 +474,18 @@ class FSDPTrainRayActor(TrainRayActor):
         log_prob_old_window = torch.stack(log_prob_old_list, dim=0)
         advantage_window = torch.stack(advantage_list, dim=0)
 
-        if use_cfg:
+        # Skip the (possibly NotImplementedError-raising) collate when no tile
+        # will ever have sample > 1: a model that only does timestep-only tiling
+        # then doesn't need to override collate_cond_for_sample_batch.
+        local_batch_size = int(traj_end - traj_start)
+        sample_microbatch_arg = getattr(self.args, "micro_batch_size_sample", None)
+        needs_multi_sample_tile = (
+            sample_microbatch_arg is None or sample_microbatch_arg > 1
+        ) and local_batch_size > 1
+
+        if not needs_multi_sample_tile:
+            cond_collated = None
+        elif use_cfg:
             cond_collated = train_pipeline_config.collate_cond_for_sample_batch(
                 positive_cond_kwargs_list + negative_cond_kwargs_list, device
             )
@@ -604,6 +615,11 @@ class FSDPTrainRayActor(TrainRayActor):
                 else None
             )
         else:
+            assert grids["cond"] is not None, (
+                "tile_sample_count > 1 but window cond_collated was skipped — "
+                "the skip predicate in _build_train_grids and the resolve "
+                "logic in _run_optim_window have diverged"
+            )
             pos_cond_tile, neg_cond_tile = _tile_collated_cond(
                 grids["cond"],
                 sample_indices=sample_indices,
