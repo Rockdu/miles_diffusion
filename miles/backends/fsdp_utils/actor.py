@@ -459,7 +459,7 @@ class FSDPTrainRayActor(TrainRayActor):
                 sde_window_size = current_window_size
             else:
                 assert current_window_size == sde_window_size, (
-                    f"per-sample SDE window length must match across microbatch "
+                    f"for now per-sample SDE window length must match across microbatch "
                     f"(got {sde_window_size} and {current_window_size})"
                 )
             latents_list.append(latents)
@@ -490,6 +490,8 @@ class FSDPTrainRayActor(TrainRayActor):
             "log_prob_old": log_prob_old_window,
             "advantage": advantage_window,
             "cond": cond_collated,
+            "per_sample_pos_cond": positive_cond_kwargs_list,
+            "per_sample_neg_cond": negative_cond_kwargs_list,
             "window_sample_count": int(traj_end - traj_start),
             "window_tstep_count": int(sde_window_size or 0),
         }
@@ -566,7 +568,7 @@ class FSDPTrainRayActor(TrainRayActor):
         """One DiT forward over a tile of (tile_sample × tile_tstep) cells
         flattened to batch = tile_sample * tile_tstep."""
         device = grids["latents"].device
-        compute_dtype = self._forward_dtype
+        forward_dtype = self._forward_dtype
         train_pipeline_config = self.train_pipeline_config
         tile_sample_count = int(sample_indices.numel())
         tile_tstep_count = int(tstep_indices.numel())
@@ -587,42 +589,69 @@ class FSDPTrainRayActor(TrainRayActor):
         # forward; diffusers' does not — pre-scale to match.
         timesteps_normalized = timesteps_flat / float(num_train_timesteps)
 
-        cond_tile = _slice_collated_cond(
-            grids["cond"],
-            sample_indices=sample_indices,
-            tile_tstep_count=tile_tstep_count,
-            window_sample_count=window_sample_count,
-            use_cfg=use_cfg,
-        )
-        cond_tile = _cast_cond_to_dtype(cond_tile, compute_dtype)
-
-        if use_cfg:
-            model_input_latents = torch.cat([latents_flat, latents_flat], dim=0)
-            model_input_timesteps = torch.cat([timesteps_normalized, timesteps_normalized], dim=0)
+        # tile_sample==1: skip window-collated cond and use the per-sample
+        # un-padded cond + expand along tstep.
+        if tile_sample_count == 1:
+            s = sample_indices.item()
+            pos_cond_tile = train_pipeline_config.expand_cond_for_timestep_batch(
+                grids["per_sample_pos_cond"][s], tile_tstep_count
+            )
+            neg_cond_tile = (
+                train_pipeline_config.expand_cond_for_timestep_batch(
+                    grids["per_sample_neg_cond"][s], tile_tstep_count
+                )
+                if use_cfg
+                else None
+            )
         else:
-            model_input_latents = latents_flat
-            model_input_timesteps = timesteps_normalized
+            pos_cond_tile, neg_cond_tile = _tile_collated_cond(
+                grids["cond"],
+                sample_indices=sample_indices,
+                tile_tstep_count=tile_tstep_count,
+                tile_sample_count=tile_sample_count,
+                use_cfg=use_cfg,
+            )
+
+        pos_cond_tile = _cast_cond_to_dtype(pos_cond_tile, forward_dtype)
+        if neg_cond_tile is not None:
+            neg_cond_tile = _cast_cond_to_dtype(neg_cond_tile, forward_dtype)
 
         # Cast inputs explicitly: FSDP MixedPrecisionPolicy casts params but
         # leaves fp32 inputs, which would run first matmul at higher precision
         # than rollout → systematic noise_pred drift.
-        noise_pred_combined = self.model(
-            hidden_states=model_input_latents.to(compute_dtype),
-            timestep=model_input_timesteps.to(compute_dtype),
-            return_dict=False,
-            **cond_tile,
-        )[0]
+        latents_input = latents_flat.to(forward_dtype)
+        timesteps_input = timesteps_normalized.to(forward_dtype)
 
-        if use_cfg:
-            noise_pred_positive, noise_pred_negative = noise_pred_combined.chunk(2, dim=0)
+        def _forward(cond: dict) -> torch.Tensor:
+            return self.model(
+                hidden_states=latents_input,
+                timestep=timesteps_input,
+                return_dict=False,
+                **cond,
+            )[0]
+
+        cfg_batching = bool(getattr(self.args, "fsdp_cfg_batching", False))
+
+        if not use_cfg:
+            noise_pred_flat = _forward(pos_cond_tile)
+        elif cfg_batching:
+            joint_cond = _pack_cond_for_joint_cfg(pos_cond_tile, neg_cond_tile)
+            joint_out = self.model(
+                hidden_states=torch.cat([latents_input, latents_input], dim=0),
+                timestep=torch.cat([timesteps_input, timesteps_input], dim=0),
+                return_dict=False,
+                **joint_cond,
+            )[0]
+            noise_pred_pos, noise_pred_neg = joint_out.chunk(2, dim=0)
             noise_pred_flat = train_pipeline_config.cfg_combine(
-                noise_pred_positive,
-                noise_pred_negative,
-                guidance_scale,
-                true_cfg_scale=true_cfg_scale,
+                noise_pred_pos, noise_pred_neg, guidance_scale, true_cfg_scale=true_cfg_scale,
             )
         else:
-            noise_pred_flat = noise_pred_combined
+            noise_pred_pos = _forward(pos_cond_tile)
+            noise_pred_neg = _forward(neg_cond_tile)
+            noise_pred_flat = train_pipeline_config.cfg_combine(
+                noise_pred_pos, noise_pred_neg, guidance_scale, true_cfg_scale=true_cfg_scale,
+            )
 
         _, log_prob_new_flat, _, _ = sde_step_with_logprob(
             self.scheduler,
@@ -672,19 +701,22 @@ def _chunked_indices(total: int, chunk_size: int, device: torch.device) -> list[
     ]
 
 
-def _slice_collated_cond(
+def _tile_collated_cond(
     cond: dict,
     *,
     sample_indices: torch.Tensor,
     tile_tstep_count: int,
-    window_sample_count: int,
+    tile_sample_count: int,
     use_cfg: bool,
-) -> dict:
-    """Slice a window-collated cond dict to a tile of shape
-    (tile_sample * tile_tstep, ...). For CFG, the collate packs
-    [pos | neg] into a (2 * window_sample, ...); this slices both halves
-    and re-packs them in the same order."""
-    def _slice_value(value, rows: torch.Tensor):
+) -> tuple[dict, dict | None]:
+    """Pick `sample_indices` rows from a sample-windowed cond and tile each
+    row `tile_tstep_count` times along the batch dim, yielding per-tile
+    (pos, neg) dicts each shaped (tile_sample_count * tile_tstep_count, ...).
+
+    For CFG the input packs [pos_M | neg_M] along batch=2M; pos and neg
+    halves are extracted separately. Returns (pos, None) when use_cfg is
+    False."""
+    def _tile_value(value, rows: torch.Tensor):
         if isinstance(value, torch.Tensor):
             return value.index_select(0, rows).repeat_interleave(tile_tstep_count, dim=0)
         if isinstance(value, list):
@@ -692,22 +724,25 @@ def _slice_collated_cond(
             return [item for item in picked for _ in range(tile_tstep_count)]
         return value
 
-    out: dict = {}
-    if use_cfg:
-        negative_sample_indices = sample_indices + window_sample_count
-        for key, value in cond.items():
-            positive_part = _slice_value(value, sample_indices)
-            negative_part = _slice_value(value, negative_sample_indices)
-            if isinstance(value, torch.Tensor):
-                out[key] = torch.cat([positive_part, negative_part], dim=0)
-            elif isinstance(value, list):
-                out[key] = positive_part + negative_part
-            else:
-                out[key] = value
-        return out
+    pos = {k: _tile_value(v, sample_indices) for k, v in cond.items()}
+    if not use_cfg:
+        return pos, None
+    neg_indices = sample_indices + tile_sample_count
+    neg = {k: _tile_value(v, neg_indices) for k, v in cond.items()}
+    return pos, neg
 
-    for key, value in cond.items():
-        out[key] = _slice_value(value, sample_indices)
+
+def _pack_cond_for_joint_cfg(pos: dict, neg: dict) -> dict:
+    """Pack pos and neg per-tile cond dicts into a single [pos | neg] dict
+    along the batch dim, for joint CFG forward."""
+    out: dict = {}
+    for key, value in pos.items():
+        if isinstance(value, torch.Tensor):
+            out[key] = torch.cat([value, neg[key]], dim=0)
+        elif isinstance(value, list):
+            out[key] = value + neg[key]
+        else:
+            out[key] = value
     return out
 
 

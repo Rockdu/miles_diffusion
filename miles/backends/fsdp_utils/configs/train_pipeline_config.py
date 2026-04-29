@@ -101,7 +101,7 @@ class TrainPipelineConfig(abc.ABC):
         Default: naive concat along batch dim, only valid when shapes match.
         """
         raise NotImplementedError(
-            f"{type(self).__name__} must override collate_cond_for_sample_batch"
+            f"Must implement collate_cond_for_sample_batch to enable --micro-batch-size-sample in fsdp training"
         )
 
     @abc.abstractmethod

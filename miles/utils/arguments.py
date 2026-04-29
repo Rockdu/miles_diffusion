@@ -171,6 +171,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Max absolute value for advantage clipping in diffusion training.",
             )
             parser.add_argument(
+                "--fsdp-cfg-batching",
+                action=argparse.BooleanOptionalAction,
+                default=False,
+                help=(
+                    "Batch positive and negative CFG branches into a single DiT "
+                    "forward. Default False = two separate forwards, matching "
+                    "sglang-d rollout's split CFG path bit-exactly."
+                ),
+            )
+            parser.add_argument(
                 "--fsdp-master-dtype",
                 type=str,
                 default="fp32",
