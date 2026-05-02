@@ -87,6 +87,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
   --pickscore-processor-path laion/CLIP-ViT-H-14-laion2B-s32B-b79K \
   --pickscore-model-path yuvalkirstain/PickScore_v1 \
   --fsdp-master-dtype fp32 \
+  --fsdp-reduce-dtype fp32 \
   --diffusion-forward-dtype bf16 \
   --diffusion-num-steps 10 \
   --diffusion-eval-num-steps 50 \

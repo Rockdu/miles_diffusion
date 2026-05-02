@@ -79,6 +79,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
   --globalize-reward-std \
   --rm-type ocr \
   --fsdp-master-dtype fp32 \
+  --fsdp-reduce-dtype fp32 \
   --diffusion-forward-dtype bf16 \
   --diffusion-num-steps 10 \
   --diffusion-eval-num-steps 50 \

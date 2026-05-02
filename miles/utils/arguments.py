@@ -194,6 +194,19 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--fsdp-reduce-dtype",
+                type=str,
+                default="fp32",
+                choices=["fp16", "bf16", "fp32"],
+                help=(
+                    "dtype for FSDP MixedPrecisionPolicy.reduce_dtype "
+                    "(grad reduce-scatter precision). fp32 (default) keeps "
+                    "multi-rank gradient sums numerically stable; bf16 matches "
+                    "flow_grpo's all-bf16 mixed-precision policy at the cost "
+                    "of bf16 add-non-associativity noise across ranks."
+                ),
+            )
+            parser.add_argument(
                 "--diffusion-forward-dtype",
                 type=str,
                 default="bf16",
