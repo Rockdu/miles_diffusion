@@ -871,9 +871,8 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None):
         if module.__class__.__name__ in layer_cls_to_wrap
     ]
 
-    rollout_dtype_name = getattr(args, "diffusion_forward_dtype", None) if args is not None else None
-    param_dtype = _resolve_dtype(rollout_dtype_name)
-    reduce_dtype = torch.float32
+    param_dtype = _resolve_dtype(args.diffusion_forward_dtype)
+    reduce_dtype = _resolve_dtype(args.fsdp_reduce_dtype)
     logger.info(f"FSDP: wrapping {len(modules)} modules of type {layer_cls_to_wrap}, param_dtype={param_dtype}, reduce_dtype={reduce_dtype}")
 
     fsdp_kwargs = {
