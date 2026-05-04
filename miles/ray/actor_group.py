@@ -73,9 +73,15 @@ class RayTrainGroup:
             env_vars["TMS_INIT_ENABLE"] = "1"
             env_vars["TMS_INIT_ENABLE_CPU_BACKUP"] = "1"
 
-        from miles.backends.fsdp_utils import FSDPTrainRayActor
+        backend = self.args.train_backend
+        if backend == "fsdp":
+            from miles.backends.fsdp_utils import FSDPTrainRayActor
 
-        TrainRayActor = ray.remote(num_gpus=1, runtime_env={"env_vars": env_vars})(FSDPTrainRayActor)
+            actor_impl = FSDPTrainRayActor
+        else:
+            raise NotImplementedError(f"Training backend {backend!r} is not supported.")
+
+        TrainRayActor = ray.remote(num_gpus=1, runtime_env={"env_vars": env_vars})(actor_impl)
 
         # Create worker actors
         self._actor_handlers = []
