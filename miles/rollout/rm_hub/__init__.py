@@ -1,5 +1,6 @@
 import asyncio
 
+from miles.utils.misc import load_function
 from miles.utils.types import Sample
 
 
@@ -28,6 +29,10 @@ async def batched_async_rm(
     samples: list[Sample],
     **kwargs,
 ) -> list[int | float]:
+    if args.custom_rm_path is not None:
+        rm_function = load_function(args.custom_rm_path)
+        return await rm_function(args, samples, **kwargs)
+
     if samples:
         rm_types = [_resolve_rm_type(args, sample) for sample in samples]
         if all(rm_type == "pickscore" for rm_type in rm_types):

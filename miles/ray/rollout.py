@@ -63,6 +63,16 @@ class RolloutManager:
         self.generate_rollout = load_function(self.args.rollout_function_path)
         print("[DEBUG] RolloutManager: loading eval_generate_rollout...", flush=True)
         self.eval_generate_rollout = load_function(self.args.eval_function_path)
+        self.custom_reward_post_process_func = (
+            load_function(self.args.custom_reward_post_process_path)
+            if self.args.custom_reward_post_process_path is not None
+            else None
+        )
+        self.custom_convert_samples_to_train_data_func = (
+            load_function(self.args.custom_convert_samples_to_train_data_path)
+            if self.args.custom_convert_samples_to_train_data_path is not None
+            else None
+        )
         print(f"[DEBUG] RolloutManager: import {self.args.rollout_function_path} done", flush=True)
         logger.info(f"import {self.args.rollout_function_path} as generate_rollout function.")
         logger.info(f"import {self.args.eval_function_path} as eval_generate_rollout function.")
@@ -290,6 +300,10 @@ class RolloutManager:
             torch.save(dict(rollout_id=rollout_id, **dump_data), path)
 
     def _post_process_rewards(self, samples: list[Sample] | list[list[Sample]]):
+        # list[list[Sample]] is for custom reward post process function
+        if self.custom_reward_post_process_func is not None:
+            return self.custom_reward_post_process_func(self.args, samples)
+
         raw_rewards = [sample.get_reward_value(self.args) for sample in samples]
 
         # --globalize-reward-mean / --globalize-reward-std are orthogonal. flow_grpo
@@ -318,6 +332,9 @@ class RolloutManager:
         """
         Convert inference generated samples to training data.
         """
+        if self.custom_convert_samples_to_train_data_func is not None:
+            return self.custom_convert_samples_to_train_data_func(self.args, samples)
+
         raw_rewards, rewards = self._post_process_rewards(samples)
 
         assert len(raw_rewards) == len(samples)
@@ -614,6 +631,11 @@ def _start_router(args):
 
 
 def _log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any] | None = None):
+    if args.custom_eval_rollout_log_function_path is not None:
+        custom_log_func = load_function(args.custom_eval_rollout_log_function_path)
+        if custom_log_func(rollout_id, args, data, extra_metrics):
+            return
+
     log_dict = extra_metrics or {}
     for key in data.keys():
         rewards = data[key]["rewards"]
@@ -630,6 +652,11 @@ def _log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any]
 
 
 def _log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_time):
+    if args.custom_rollout_log_function_path is not None:
+        custom_log_func = load_function(args.custom_rollout_log_function_path)
+        if custom_log_func(rollout_id, args, samples, rollout_extra_metrics, rollout_time):
+            return
+
     if args.load_debug_rollout_data:
         return
 

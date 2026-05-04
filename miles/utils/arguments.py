@@ -480,6 +480,58 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "The function should take list[list[Sample]] and return list[list[Sample]]."
                 ),
             )
+
+            # Customization extension hooks (load_function dispatch).
+            parser.add_argument(
+                "--custom-generate-function-path",
+                type=str,
+                default=None,
+                help=(
+                    "Substitute the inner `def generate(args, sample, sampling_params)` call inside "
+                    "the diffusion rollout. Useful for multi-turn refinement / custom CFG schedules / "
+                    "specialised sampling pipelines. The function may optionally accept `evaluation=...`."
+                ),
+            )
+            parser.add_argument(
+                "--custom-rollout-log-function-path",
+                type=str,
+                default=None,
+                help=(
+                    "Custom function for logging train rollout data. Signature: "
+                    "`def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_time) -> bool`. "
+                    "Truthy return skips the default logging."
+                ),
+            )
+            parser.add_argument(
+                "--custom-eval-rollout-log-function-path",
+                type=str,
+                default=None,
+                help=(
+                    "Custom function for logging eval rollout data. Signature: "
+                    "`def log_eval_rollout_data(rollout_id, args, data, extra_metrics) -> bool`. "
+                    "Truthy return skips the default logging."
+                ),
+            )
+            parser.add_argument(
+                "--custom-convert-samples-to-train-data-path",
+                type=str,
+                default=None,
+                help=(
+                    "Replace `RolloutManager._convert_samples_to_train_data`. Signature: "
+                    "`def convert_samples_to_train_data(args, samples) -> dict`."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-sample-filter-path",
+                type=str,
+                default=None,
+                help=(
+                    "Per-sample loss-mask filter run after dynamic_sampling_filter. Signature: "
+                    "`def filter(args, data: list[list[Sample]]) -> None`. The function should set "
+                    "`sample.remove_sample = True` on samples that should be excluded from loss "
+                    "computation (they still participate in advantage normalisation)."
+                ),
+            )
             # update weight
             parser.add_argument(
                 "--update-weight-buffer-size",
@@ -983,6 +1035,30 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=str,
                 default=None,
                 help="Hugging Face model path for PickScore. Required when --rm-type pickscore.",
+            )
+
+            # Customization extension hooks for reward computation.
+            parser.add_argument(
+                "--custom-rm-path",
+                type=str,
+                default=None,
+                help=(
+                    "Replace the built-in reward dispatch with a user-supplied batched function. "
+                    "Signature: `async def custom_rm(args, samples: list[Sample], **kwargs) -> list[float]`. "
+                    "Wired in batched_async_rm only — per-sample async_rm dispatch was deliberately "
+                    "removed to avoid the (args, sample) vs (args, list) signature ambiguity. "
+                    "If you want per-sample routing, do it inside your batched function."
+                ),
+            )
+            parser.add_argument(
+                "--custom-reward-post-process-path",
+                type=str,
+                default=None,
+                help=(
+                    "Replace `RolloutManager._post_process_rewards` (advantage normalisation). "
+                    "Signature: `def post_process(args, samples) -> tuple[list[float], list[float]]` "
+                    "returning (raw_rewards, normalised_rewards)."
+                ),
             )
             return parser
 

@@ -206,7 +206,14 @@ async def generate_and_rm_microgroup(
     # generate
     async with state.semaphore:
         with state.dp_rank_context() as _:
-            microgroup = await generate_microgroup(args, microgroup, sampling_params, evaluation=evaluation)
+            if args.custom_generate_function_path is not None:
+                custom_generate_func = load_function(args.custom_generate_function_path)
+                if "evaluation" in inspect.signature(custom_generate_func).parameters:
+                    microgroup = await custom_generate_func(args, microgroup, sampling_params, evaluation=evaluation)
+                else:
+                    microgroup = await custom_generate_func(args, microgroup, sampling_params)
+            else:
+                microgroup = await generate_microgroup(args, microgroup, sampling_params, evaluation=evaluation)
 
     # for the rm that need the whole group, we will not do the rm here
     if args.group_rm:
@@ -341,6 +348,10 @@ async def generate_rollout_async(
 
     # reset the global state to prevent effects on the next rollout or eval.
     state.reset()
+    if args.rollout_sample_filter_path is not None:
+        filter_func = load_function(args.rollout_sample_filter_path)
+        filter_func(args, data)
+
     return RolloutFnTrainOutput(samples=data, metrics=metric_gatherer.collect())
 
 
