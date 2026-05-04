@@ -457,76 +457,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Log diffusion images every N rollouts. Only used when diffusion-log-images > 0.",
             )
             parser.add_argument(
-                "--rollout-temperature",
-                type=float,
-                default=1.0,
-                help="the temperature for the inference engine during rollout.",
-            )
-            parser.add_argument(
-                "--rollout-top-p", type=float, default=1.0, help="the top-p for the inference engine during rollout."
-            )
-            parser.add_argument(
-                "--rollout-top-k", type=int, default=-1, help="the top-k for the inference engine during rollout."
-            )
-            parser.add_argument(
-                "--rollout-max-context-len",
-                type=int,
-                default=None,
-                help=(
-                    "The maximum context size for the inference engine during rollout."
-                    "It should no exceed the `max_position_embeddinds` in Huggingface model's `config.json`"
-                ),
-            )
-            parser.add_argument(
-                "--rollout-max-prompt-len",
-                type=int,
-                default=None,
-                help=(
-                    "The maximum length of the prompt for the inference engine during rollout. "
-                    "If set, we will filter out the long prompts during initialization of the global dataset. "
-                    "This is not recommended if the dataset is large."
-                ),
-            )
-            parser.add_argument(
-                "--rollout-max-response-len",
-                type=int,
-                default=None,
-                help=(
-                    "The maximum length of the response for the inference engine during rollout. "
-                    "It is basically `max_tokens` in sglang."
-                ),
-            )
-            parser.add_argument(
-                "--rollout-skip-special-tokens",
-                action="store_true",
-                default=False,
-                help=(
-                    "Whether to skip special tokens in the response during rollout. "
-                    "This is useful when you want to use the response as a prompt for the next rollout."
-                ),
-            )
-            parser.add_argument(
-                "--rollout-stop",
-                type=str,
-                nargs="+",
-                default=None,
-                help=(
-                    "The stop words for the inference engine during rollout. "
-                    "It can be a list of strings or a single string. "
-                    "It may be hard to pass special tokens in command line, in that case rollout_stop_token_ids can be used."
-                ),
-            )
-            parser.add_argument(
-                "--rollout-stop-token-ids",
-                type=int,
-                nargs="+",
-                default=None,
-                help=(
-                    "The stop token ids for the inference engine during rollout. "
-                    "It can be a list of integers or a single integer."
-                ),
-            )
-            parser.add_argument(
                 "--rollout-shuffle",
                 action="store_true",
                 default=False,
@@ -753,28 +683,8 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "the input should be the same structure as an openai message, e.g. [{'role': 'user', 'content': 'blabla'}]. "
                 ),
             )
-            parser.add_argument("--apply-chat-template", action="store_true", default=False)
-            # Temporarily be JSON-serialized str, will be a real dict after using Omegaconf
-            parser.add_argument("--apply-chat-template-kwargs", type=json.loads, default="{}")
             parser.add_argument("--input-key", type=str, default="input", help="JSON dataset key")
-            parser.add_argument("--label-key", type=str, default=None, help="JSON dataset key")
-            parser.add_argument(
-                "--multimodal-keys",
-                type=json.loads,
-                default=None,
-                help=(
-                    'JSON string for multimodal data mapping media types to data keys. Example: \'{"image": "image_file"}\''
-                ),
-            )
             parser.add_argument("--metadata-key", type=str, default="metadata", help="JSON dataset key")
-            parser.add_argument(
-                "--tool-key",
-                type=str,
-                default="tools",
-                help=(
-                    "When need to add tools during apply_chat_template, you should provide the key for the tools in the prompt dataset."
-                ),
-            )
 
             parser.add_argument(
                 "--start-rollout-id",
@@ -898,21 +808,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
 
             # The following keys are used to override the rollout version during eval.
             parser.add_argument("--eval-input-key", type=str, default=None, help="JSON dataset key")
-            parser.add_argument("--eval-label-key", type=str, default=None, help="JSON dataset key")
-            parser.add_argument("--eval-tool-key", type=str, default=None, help="JSON dataset key")
             parser.add_argument(
                 "--n-samples-per-eval-prompt",
                 type=int,
                 default=1,
                 help="number of responses for each prompt in generation",
             )
-            parser.add_argument("--eval-temperature", type=float, default=None)
-            parser.add_argument("--eval-top-p", type=float, default=None)
-            parser.add_argument("--eval-top-k", type=int, default=None)
-            parser.add_argument("--eval-max-response-len", type=int, default=None)
-            parser.add_argument("--eval-max-prompt-len", type=int, default=None)
-            parser.add_argument("--eval-min-new-tokens", type=int, default=None)
-            parser.add_argument("--eval-max-context-len", type=int, default=None)
 
             return parser
 
@@ -1788,22 +1689,6 @@ def miles_validate_args(args):
             if hasattr(args, k):
                 logger.info(f"Warning: Argument {k} is already set to {getattr(args, k)}, will override with {v}.")
             setattr(args, k, v)
-
-    if args.eval_max_context_len is None:
-        logger.info(
-            f"args.eval_max_context_len is not set. Use args.rollout_max_context_len {args.rollout_max_context_len} as default value."
-        )
-        args.eval_max_context_len = args.rollout_max_context_len
-
-    if args.rollout_max_context_len is not None:
-        if args.rollout_max_prompt_len is None:
-            args.rollout_max_prompt_len = args.rollout_max_context_len - 1
-            logger.info(
-                f"args.rollout_max_prompt_len is not set. Use args.rollout_max_context_len - 1 ({args.rollout_max_context_len} - 1) as default value so that there is at least one generated token to compute loss."
-            )
-        assert (
-            args.rollout_max_prompt_len <= args.rollout_max_context_len - 1
-        ), f"args.rollout_max_prompt_len ({args.rollout_max_prompt_len}) must be smaller than args.rollout_max_context_len ({args.rollout_max_context_len}) so that there is at least one generated token to compute loss."
 
     assert not (
         args.prefill_num_servers is not None and args.rollout_external
