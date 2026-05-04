@@ -136,7 +136,7 @@ class SGLangDiffusionEngine(RayActor):
 
         host = _format_v6_uri(host)
 
-        server_args_dict, external_engine_need_check_fields = _compute_server_args(
+        server_args_dict = _compute_server_args(
             self.args,
             host=host,
             port=port,
@@ -147,27 +147,7 @@ class SGLangDiffusionEngine(RayActor):
         self.server_host = server_args_dict["host"]  # with [] if ipv6
         self.server_port = server_args_dict["port"]
 
-        # keep external rollout engine for debug
-        if self.args.rollout_external:
-            self._init_external(server_args_dict, external_engine_need_check_fields=external_engine_need_check_fields)
-        else:
-            self._init_normal(server_args_dict)
-
-    def _init_external(self, expect_server_args):
-        logger.info(f"Use external SGLang-Diffusion engine (rank={self.rank}, expect_server_args={expect_server_args})")
-
-        # TODO: miles diffusion support server args sanity check
-        # Now only do healthy check for generate
-        # SGL-D TODO: SGLang-D support get actual server args
-        # def _get_actual_server_args():
-        #     response = requests.get(f"http://{self.server_host}:{self.server_port}/get_server_info")
-        #     response.raise_for_status()
-        #     return response.json()
-
-        _wait_server_healthy(
-            base_url=f"http://{self.server_host}:{self.server_port}",
-            is_process_alive=lambda: True,
-        )
+        self._init_normal(server_args_dict)
 
     def _init_normal(self, server_args_dict):
         logger.info(f"Launch HttpServerEngineAdapter at: {self.server_host}:{self.server_port}")
@@ -290,9 +270,6 @@ class SGLangDiffusionEngine(RayActor):
         )
 
     def shutdown(self):
-        if self.args.rollout_external:
-            return
-
         logger.info(f"Shutdown engine {self.server_host}:{self.server_port}...")
         if self.node_rank == 0:
             worker_url = f"http://{self.server_host}:{self.server_port}"
@@ -309,32 +286,15 @@ class SGLangDiffusionEngine(RayActor):
                 response.raise_for_status()
         kill_process_tree(self.process.pid)
 
-    def get_weight_version(self):
-        if self.node_rank != 0:
-            return
-        # SGL-D TODO: SGLang-Diffusion support get weight version
-        url = f"http://{self.server_host}:{self.server_port}/get_weight_version"
-        response = requests.get(url)
-        response.raise_for_status()
-        return response.json()["weight_version"]
-
     def release_memory_occupation(self):
         return self._make_request("release_memory_occupation")
 
     def resume_memory_occupation(self, tags: list[str] | None = None):
         return self._make_request("resume_memory_occupation")
 
-    def init_weights_update_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
-        # SGL-D TODO: Support weights update group for in-memory weight update
-        del master_address, master_port, rank_offset, world_size, group_name, backend
-        raise NotImplementedError("init_weights_update_group is not implemented in SGL-D yet")
-
     def simulate_crash(self):
-        if self.args.rollout_external or not getattr(self, "process", None):
-            logger.info(
-                "simulate_crash called but no local engine process exists (rollout_external=%s); skip kill",
-                self.args.rollout_external,
-            )
+        if not getattr(self, "process", None):
+            logger.info("simulate_crash called but no local engine process exists; skip kill")
             return
 
         logger.info(f"Simulating crash on engine {self.server_host}:{self.server_port}...")
@@ -370,13 +330,4 @@ def _compute_server_args(args, host, port, nccl_port):
         if hasattr(args, f"sglang_{attr.name}") and attr.name not in kwargs:
             kwargs[attr.name] = getattr(args, f"sglang_{attr.name}")
 
-    external_engine_need_check_fields = [
-        k for k in kwargs.keys() if k not in _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS
-    ]
-    return kwargs, external_engine_need_check_fields
-
-
-# Fields to skip when verifying an external SGLang-Diffusion engine's server args
-# against what miles would have computed. Empty for now; add field names here as
-# the external-engine sanity check grows (e.g. ports that legitimately differ).
-_EXTERNAL_ENGINE_SKIP_CHECK_FIELDS: list[str] = []
+    return kwargs
