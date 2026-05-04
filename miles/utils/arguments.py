@@ -457,12 +457,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Log diffusion images every N rollouts. Only used when diffusion-log-images > 0.",
             )
             parser.add_argument(
-                "--rollout-shuffle",
-                action="store_true",
-                default=False,
-                help=("Whether to shuffle the prompts during rollout."),
-            )
-            parser.add_argument(
                 "--rollout-seed",
                 type=int,
                 default=42,
@@ -974,43 +968,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "Whether to add a random suffix to the wandb run name. "
                     "By default, we will add a random 6 length string with characters to the run name."
                 ),
-            )
-            parser.add_argument(
-                "--wandb-always-use-train-step",
-                action="store_true",
-                default=False,
-                help=(
-                    "Whether to always use train step as the step metric in wandb. "
-                    "If set, we will always use the train steps for wandb logging, "
-                    "otherwise, will use rollout step for most info other than train/*. "
-                ),
-            )
-            parser.add_argument(
-                "--log-multi-turn",
-                action="store_true",
-                default=False,
-                help="Whether to log information for multi-turn rollout.",
-            )
-            parser.add_argument(
-                "--log-passrate",
-                action="store_true",
-                default=False,
-                help="Whether to turn on passrate logging, which will log the pass@n of the responses in the rollout.",
-            )
-            parser.add_argument(
-                "--log-reward-category",
-                type=str,
-                default=None,
-                help=(
-                    "Log statistics of the category of reward, such as why the reward function considers it as failed. "
-                    "Specify the key in the reward dict using this argument.",
-                ),
-            )
-            parser.add_argument(
-                "--log-correct-samples",
-                action="store_true",
-                default=False,
-                help="Whether to turn on passrate logging, which will log the pass@n of the responses in the rollout.",
             )
             parser.add_argument("--wandb-run-id", type=str, default=None)
             return parser
