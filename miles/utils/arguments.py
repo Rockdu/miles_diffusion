@@ -700,49 +700,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "`rollout_batch_size * n_samples_per_prompt // num_steps_per_rollout`."
                 ),
             )
-            # mbs for the training, will be ignored if `use_dynamic_batch_size` is set.
             reset_arg(parser, "--micro-batch-size", type=int, default=1)
-            parser.add_argument(
-                "--balance-data",
-                action="store_true",
-                default=False,
-                help=(
-                    "Balance the number of tokens between data parallel ranks with `karmarkar_karp` for verl. "
-                    "Note that this may allocate the different response of the same prompt into different training steps."
-                ),
-            )
-
-            parser.add_argument(
-                "--use-dynamic-batch-size",
-                action="store_true",
-                default=False,
-                help=(
-                    "Because the sample length varies, to maximize the GPU utilization, "
-                    "we will use the dynamic batch size to adjust the micro batch size according to the maximum number of tokens each gpu can run. "
-                    "For example, if we have 3 samples, with the length of 100, 200, and 300, and the max_tokens_per_gpu is 300, when enabling "
-                    "dynamic batch size, miles will make 2 micro batches, i.e. [100, 200], [300]."
-                ),
-            )
-            parser.add_argument(
-                "--max-tokens-per-gpu",
-                type=int,
-                default=None,
-                help=(
-                    "The maximum number of tokens per GPU for dynamic batch size. "
-                    "Note that when enabling context parallel (CP), the max tokens per gpu should be around "
-                    "`max_response_len // cp_size` instead of `max_response_len`."
-                ),
-            )
-            parser.add_argument(
-                "--log-probs-max-tokens-per-gpu",
-                type=int,
-                default=None,
-                help=(
-                    "The maximum number of tokens per GPU for calculating log probs. "
-                    "This is used to calculate the log probs of the responses during rollout, "
-                    "and should be set to a larger value than `max_tokens_per_gpu` if you want better performance. "
-                ),
-            )
             return parser
 
         def add_eval_arguments(parser):
@@ -1503,11 +1461,6 @@ def miles_validate_args(args):
             "The 'reinforce_plus_plus' and 'reinforce_plus_plus_baseline' advantage estimators "
             "require advantage normalization. Please add `--normalize-advantages` to your command."
         )
-
-    if args.use_dynamic_batch_size:
-        assert args.max_tokens_per_gpu is not None, "max_tokens_per_gpu must be set when use_dynamic_batch_size is set"
-        if args.log_probs_max_tokens_per_gpu is None:
-            args.log_probs_max_tokens_per_gpu = args.max_tokens_per_gpu
 
     if args.eps_clip_high is None:
         args.eps_clip_high = args.eps_clip
