@@ -112,8 +112,8 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--train-backend",
                 type=str,
-                choices=["megatron", "fsdp"],
-                default="megatron",
+                choices=["fsdp"],
+                default="fsdp",
                 help="The backend for training.",
             )
             # Diffusion GRPO training knobs (used by DiffusionFSDPTrainRayActor).
@@ -239,13 +239,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
-                "--qkv-format",
-                type=str,
-                choices=["thd", "bshd"],
-                default="thd",
-                help="The qkv layout for Megatron backend.",
-            )
-            parser.add_argument(
                 "--true-on-policy-mode",
                 action="store_true",
                 default=False,
@@ -268,24 +261,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 action="store_false",
                 dest="enable_weights_backuper",
                 help="Whether to disable weights backuper to save host memory.",
-            )
-            parser.add_argument(
-                "--megatron-to-hf-mode",
-                choices=["raw", "bridge"],
-                default="raw",
-                help="The method to convert megatron weights to hugging face weights for SGLang.",
-            )
-            parser.add_argument(
-                "--custom-model-provider-path",
-                type=str,
-                default=None,
-                help=(
-                    "Path to a custom model provider function. "
-                    "If set, we will use this function instead of the default model provider. "
-                    "The function should have the signature "
-                    "`def custom_model_provider(pre_process: bool, post_process: bool, vp_stage: int | None = None) -> GPTModel`. "
-                    "Example: 'my_module.my_model_provider'."
-                ),
             )
             parser.add_argument(
                 "--recompute-loss-function",
@@ -811,11 +786,8 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--start-rollout-id",
                 type=int,
-                default=None,
-                help=(
-                    "The starting rollout step, if not set, will try to load the step from --load when doing continue training, "
-                    "otherwise will be set to 0, meaning training from start."
-                ),
+                default=0,
+                help="The starting rollout step.",
             )
 
             # batch sizes
@@ -1631,42 +1603,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             )
             return parser
 
-        def add_custom_megatron_plugins_arguments(parser):
-            """
-            Add custom Megatron plugins arguments.
-            This is a placeholder for any additional arguments that might be needed.
-            """
-            # Custom arguments can be added here
-            parser.add_argument(
-                "--custom-megatron-init-path",
-                type=str,
-                default=None,
-            )
-            parser.add_argument(
-                "--custom-megatron-before-log-prob-hook-path",
-                type=str,
-                default=None,
-            )
-            parser.add_argument(
-                "--custom-megatron-before-train-step-hook-path",
-                type=str,
-                default=None,
-            )
-            return parser
-
-        def add_mtp_training_arguments(parser):
-            """Add MTP training specific arguments."""
-            reset_arg(parser, "--mtp-num-layers", type=int, default=None)
-            reset_arg(parser, "--mtp-loss-scaling-factor", type=float, default=0.2)
-            parser.add_argument(
-                "--enable-mtp-training",
-                action="store_true",
-                default=False,
-                help="Enable MTP layer parameter updates during training",
-            )
-
-            return parser
-
         def add_prefill_decode_disaggregation_arguments(parser):
             parser.add_argument(
                 "--prefill-num-servers",
@@ -1733,10 +1669,8 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
         parser = add_network_arguments(parser)
         parser = add_reward_model_arguments(parser)
         parser = add_rollout_buffer_arguments(parser)
-        parser = add_mtp_training_arguments(parser)
         parser = add_prefill_decode_disaggregation_arguments(parser)
         parser = add_ci_arguments(parser)
-        parser = add_custom_megatron_plugins_arguments(parser)
         reset_arg(
             parser,
             "--custom-config-path",
@@ -1744,7 +1678,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             default=None,
             help="Path to the YAML config for custom function arguments.",
         )
-        reset_arg(parser, "--padded-vocab-size", type=int, default=None)
 
         parser.set_defaults(sglang_tensor_parallel_size=add_sglang_tp_size())
         return parser
@@ -1834,25 +1767,6 @@ def miles_validate_args(args):
                 f"ref_load {args.ref_load} does not have latest_checkpointed_iteration.txt, "
                 "please make sure it is a valid megatron checkpoint directory."
             )
-
-    # TODO: During loading, we need to set the start_rollout_id here.
-    if args.megatron_to_hf_mode == "bridge":
-        if args.load is None:
-            args.load = args.ref_load or args.hf_checkpoint
-        args.start_rollout_id = 0
-    else:
-        if (
-            args.load is None
-            or not os.path.exists(args.load)
-            or not os.path.exists(os.path.join(args.load, "latest_checkpointed_iteration.txt"))
-        ):
-            args.no_load_optim = True
-            args.no_load_rng = True
-            args.finetune = True
-            args.load = args.ref_load
-            if args.ref_ckpt_step is not None:
-                args.ckpt_step = args.ref_ckpt_step
-            args.start_rollout_id = 0
 
     if args.eval_interval is not None:
         assert args.eval_datasets, "Evaluation datasets must be configured when eval_interval is set."
@@ -2002,9 +1916,6 @@ def miles_validate_args(args):
             "num_epoch is not set, but num_rollout is not set, " "please set --num-rollout or --num-epoch"
         )
 
-    if args.enable_mtp_training:
-        assert args.mtp_num_layers, "mtp_num_layers must be set when enable_mtp_training is set"
-
     if args.use_rollout_routing_replay:
         args.use_routing_replay = True
 
@@ -2035,12 +1946,6 @@ def miles_validate_args(args):
     assert not (
         args.prefill_num_servers is not None and args.rollout_external
     ), "prefill_num_servers cannot be set when rollout_external is set."
-
-    if args.qkv_format == "bshd":
-        assert args.train_backend == "megatron", "bshd format is only supported for megatron backend."
-        assert (
-            args.use_dynamic_batch_size is False
-        ), "Dynamic batch size is not supported for bshd format. Please specify --micro-batch-size instead."
 
 
 def hf_validate_args(args, hf_config):

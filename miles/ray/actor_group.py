@@ -77,18 +77,9 @@ class RayTrainGroup:
         if self.args.use_routing_replay and self.role == "actor":
             env_vars["ENABLE_ROUTING_REPLAY"] = "1"
 
-        backend = self.args.train_backend
-        if backend == "megatron":
-            from miles.backends.megatron_utils.actor import MegatronTrainRayActor
+        from miles.backends.fsdp_utils import FSDPTrainRayActor
 
-            actor_impl = MegatronTrainRayActor
-
-        else:
-            from miles.backends.fsdp_utils import FSDPTrainRayActor
-
-            actor_impl = FSDPTrainRayActor
-
-        TrainRayActor = ray.remote(num_gpus=1, runtime_env={"env_vars": env_vars})(actor_impl)
+        TrainRayActor = ray.remote(num_gpus=1, runtime_env={"env_vars": env_vars})(FSDPTrainRayActor)
 
         # Create worker actors
         self._actor_handlers = []
