@@ -80,62 +80,22 @@ def _create_placement_group(num_gpus):
 
 def create_placement_groups(args):
     """Create placement groups for actor and rollout engines."""
+    assert args.colocate or args.debug_train_only or args.debug_rollout_only, (
+        "Non-colocated placement is not supported."
+    )
 
-    # When not colocating, use separate placement groups to avoid bundle overlap/deadlock.
-    if not args.colocate and not args.debug_train_only and not args.debug_rollout_only:
-        logger.info("Creating placement groups (separate actor/rollout)...")
-        actor_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
-        rollout_gpus = args.rollout_num_gpus
-        actor_pg = _create_placement_group(actor_gpus) if actor_gpus > 0 else None
-        rollout_pg = _create_placement_group(rollout_gpus) if rollout_gpus > 0 else None
-        return {
-            "actor": actor_pg,
-            "rollout": rollout_pg,
-        }
-
-    num_gpus = 0
-    if args.debug_train_only:
-        num_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
-        rollout_offset = 0
-    elif args.debug_rollout_only:
+    if args.debug_rollout_only:
         num_gpus = args.rollout_num_gpus
-        rollout_offset = 0
-    elif args.colocate:
-        num_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
-        rollout_offset = 0
     else:
-        num_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node + args.rollout_num_gpus
-        rollout_offset = args.actor_num_nodes * args.actor_num_gpus_per_node
+        num_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
 
     logger.info(f"Creating placement group with {num_gpus} GPUs...")
-    logger.info("Placement group offsets: rollout_offset=%s", rollout_offset)
     pg, all_reordered_bundle_indices, all_reordered_gpu_ids = _create_placement_group(num_gpus)
 
-    def _subset_by_range(start: int, count: int):
-        if count <= 0:
-            return [], []
-        valid = set(range(start, start + count))
-        subset_indices = []
-        subset_gpu_ids = []
-        for bundle_idx, gpu_id in zip(all_reordered_bundle_indices, all_reordered_gpu_ids):
-            if bundle_idx in valid:
-                subset_indices.append(bundle_idx)
-                subset_gpu_ids.append(gpu_id)
-        return subset_indices, subset_gpu_ids
-
-    # When colocated, all roles share the full ordered bundle list.
-    if args.colocate or args.debug_rollout_only or args.debug_train_only:
-        actor_pg_reordered_bundle_indices = all_reordered_bundle_indices
-        actor_pg_reordered_gpu_ids = all_reordered_gpu_ids
-        rollout_pg_reordered_bundle_indices = all_reordered_bundle_indices if not args.debug_train_only else []
-        rollout_pg_reordered_gpu_ids = all_reordered_gpu_ids if not args.debug_train_only else []
-    else:
-        actor_count = args.actor_num_nodes * args.actor_num_gpus_per_node
-        rollout_count = args.rollout_num_gpus
-        actor_pg_reordered_bundle_indices, actor_pg_reordered_gpu_ids = _subset_by_range(0, actor_count)
-        rollout_pg_reordered_bundle_indices, rollout_pg_reordered_gpu_ids = _subset_by_range(
-            rollout_offset, rollout_count
-        )
+    actor_pg_reordered_bundle_indices = all_reordered_bundle_indices
+    actor_pg_reordered_gpu_ids = all_reordered_gpu_ids
+    rollout_pg_reordered_bundle_indices = all_reordered_bundle_indices if not args.debug_train_only else []
+    rollout_pg_reordered_gpu_ids = all_reordered_gpu_ids if not args.debug_train_only else []
 
     return {
         "actor": (pg, actor_pg_reordered_bundle_indices, actor_pg_reordered_gpu_ids),
