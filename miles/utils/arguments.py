@@ -1089,20 +1089,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             )
             return parser
 
-        def add_prefill_decode_disaggregation_arguments(parser):
-            # Placeholder namespace for the future experimental prefill/decode
-            # disaggregation work. The flag itself is not wired to any
-            # behaviour today; the implementer should add the dispatch + any
-            # combination-validity checks at the site where they actually
-            # split prefill/decode workers.
-            parser.add_argument(
-                "--prefill-num-servers",
-                type=int,
-                default=None,
-                help="Number of prefill servers for prefill/decode disaggregation (experimental, not yet wired).",
-            )
-            return parser
-
         def add_sglang_tp_size():
             temp_parser = argparse.ArgumentParser(add_help=False)
             temp_parser.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
@@ -1127,7 +1113,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
         parser = add_sglang_diffusion_arguments(parser)
         parser = add_network_arguments(parser)
         parser = add_reward_model_arguments(parser)
-        parser = add_prefill_decode_disaggregation_arguments(parser)
         parser = add_ci_arguments(parser)
         reset_arg(
             parser,
