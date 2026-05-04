@@ -498,26 +498,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
 
-            # partial rollout
-            parser.add_argument(
-                "--partial-rollout",
-                action="store_true",
-                default=False,
-                help=(
-                    "Whether to use partial rollout. "
-                    "If set, the unfinished samples during dynamic sampling will be recycled back to data buffer. "
-                    "This is useful for long responses."
-                ),
-            )
-            parser.add_argument(
-                "--mask-offpolicy-in-partial-rollout",
-                action="store_true",
-                default=False,
-                help=(
-                    "Whether to mask previous generation in partial rollout. "
-                    "If set, only on-policy generated tokens will be used in training"
-                ),
-            )
             parser.add_argument(
                 "--custom-generate-function-path",
                 type=str,
@@ -1323,43 +1303,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
 
         def add_rollout_buffer_arguments(parser):
             parser.add_argument(
-                "--rollout-buffer-url",
-                type=str,
-                default=None,
-                help="URL for the rollout buffer",
-            )
-
-            parser.add_argument(
-                "--fetch-trajectory-retry-times",
-                type=int,
-                default=-1,
-                help="Number of times to retry fetching trajectory, -1 means unlimited retry",
-            )
-            parser.add_argument(
-                "--min-batch-collection-ratio",
-                type=float,
-                default=1,
-                help="Minimum batch collection ratio",
-            )
-            parser.add_argument(
-                "--rollout-task-type",
-                type=str,
-                default="math",
-            )
-            parser.add_argument(
-                "--loss-mask-type",
-                type=str,
-                default="qwen",
-                choices=["qwen", "qwen3", "distill_qwen"],
-                help="Loss mask type",
-            )
-            parser.add_argument(
-                "--data-pad-size-multiplier",
-                type=int,
-                default=128,
-                help="Multiplier for data padding size in data processing.",
-            )
-            parser.add_argument(
                 "--rollout-sample-filter-path",
                 type=str,
                 default=None,
@@ -1379,18 +1322,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "Path to the rollout all samples process function that "
                     "can process all samples including filtered ones."
                 ),
-            )
-            parser.add_argument(
-                "--disable-rollout-trim-samples",
-                action="store_true",
-                default=False,
-                help="disable trim samples in rollout buffer when converting samples to train data",
-            )
-            parser.add_argument(
-                "--use-dynamic-global-batch-size",
-                action="store_true",
-                default=False,
-                help="enable dynamic global batch size, disable trim samples in rollout buffer when converting samples to train data",
             )
             return parser
 
