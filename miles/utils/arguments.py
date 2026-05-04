@@ -493,36 +493,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             )
 
             parser.add_argument(
-                "--custom-generate-function-path",
-                type=str,
-                default=None,
-                help=(
-                    "Only substitue the `def generate(args, sample, sampling_params)` function within the example rollout function. "
-                    "This should be useful if you need to implement some special rollout logic, e.g. multi-turn, function calling."
-                ),
-            )
-            parser.add_argument(
-                "--custom-rollout-log-function-path",
-                type=str,
-                default=None,
-                help=(
-                    "The custom function for logging rollout data. The signature of the functions is: "
-                    "def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_time) -> bool. "
-                    "The return value indicates whether to skip the default logging. "
-                ),
-            )
-            parser.add_argument(
-                "--custom-eval-rollout-log-function-path",
-                type=str,
-                default=None,
-                help=(
-                    "The custom function for logging eval rollout data. "
-                    "def log_eval_rollout_data(rollout_id, args, data, extra_metrics) -> bool. "
-                    "The return value indicates whether to skip the default logging. "
-                ),
-            )
-
-            parser.add_argument(
                 "--buffer-filter-path",
                 type=str,
                 default=None,
@@ -547,21 +517,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=int,
                 default=1,
                 help="Interval for updating the weights",
-            )
-            parser.add_argument(
-                "--keep-old-actor",
-                action="store_true",
-                help="Whether to keep the rollout model on training process",
-            )
-
-            parser.add_argument(
-                "--rollout-data-postprocess-path",
-                type=str,
-                default=None,
-                help=(
-                    "The called after we have all the rollout data including log_probs. "
-                    "It may be helpful for updating loss mask."
-                ),
             )
             parser.add_argument(
                 "--rollout-external",
@@ -806,15 +761,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Choose loss type, currently support ppo policy_loss or sft_loss, "
                     "if custom_loss is set, we will use the function path from `--custom-loss-function-path`."
-                ),
-            )
-            parser.add_argument(
-                "--custom-loss-function-path",
-                type=str,
-                default=None,
-                help=(
-                    "Path to the custom loss function, if the loss_type is `custom_loss`, "
-                    "we will use this function to calculate the loss. "
                 ),
             )
             parser.add_argument(
@@ -1186,58 +1132,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help="Hugging Face model path for PickScore. Required when --rm-type pickscore.",
             )
-            parser.add_argument(
-                "--custom-rm-path",
-                type=str,
-                default=None,
-                help=(
-                    "Path to the custom reward model function. "
-                    "If set, we will use this function to calculate the reward instead of the default one. "
-                    "The function should have the signature `def custom_rm(args, sample) -> float`."
-                ),
-            )
-            parser.add_argument(
-                "--custom-reward-post-process-path",
-                type=str,
-                default=None,
-                help=(
-                    "Path to the custom function that will post process reward, by default it will be the normalization for grpo. "
-                ),
-            )
-            parser.add_argument(
-                "--custom-convert-samples-to-train-data-path",
-                type=str,
-                default=None,
-                help=(
-                    "Path to a custom function that converts samples to training data. "
-                    "If set, this function will replace the default _convert_samples_to_train_data. "
-                    "The function should have the signature `def convert_samples_to_train_data(args, samples) -> dict`."
-                ),
-            )
-            return parser
-
-        def add_rollout_buffer_arguments(parser):
-            parser.add_argument(
-                "--rollout-sample-filter-path",
-                type=str,
-                default=None,
-                help=(
-                    "Path to the rollout sample filter function. "
-                    "This function determines whether a sample will participate in loss calculation. "
-                    "The function should take args and samples (list[Sample]) as input, and return None. "
-                    "Please directly modify the remove_sample attribute of Sample. "
-                    "Note: This attribute does not determine whether the sample participates in advantage normalization."
-                ),
-            )
-            parser.add_argument(
-                "--rollout-all-samples-process-path",
-                type=str,
-                default=None,
-                help=(
-                    "Path to the rollout all samples process function that "
-                    "can process all samples including filtered ones."
-                ),
-            )
             return parser
 
         def add_prefill_decode_disaggregation_arguments(parser):
@@ -1305,7 +1199,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
         parser = add_sglang_diffusion_arguments(parser)
         parser = add_network_arguments(parser)
         parser = add_reward_model_arguments(parser)
-        parser = add_rollout_buffer_arguments(parser)
         parser = add_prefill_decode_disaggregation_arguments(parser)
         parser = add_ci_arguments(parser)
         reset_arg(
