@@ -17,13 +17,15 @@ peft==0.18.1
 pillow==11.3.0
 pydantic==2.12.5
 pylatexenc==2.10
+pytest>=7.0.0
+pytest-asyncio
 python-Levenshtein==0.27.3
 pyyaml==6.0.1
 qwen_vl_utils==0.0.14
 ray[default]==2.53.0
 requests==2.32.5
-safetensors==0.7.0
 ring_flash_attn==0.1.8
+safetensors==0.7.0
 sglang-router==0.3.0
 tensorboard==2.20.0
 transformers==5.5.4
