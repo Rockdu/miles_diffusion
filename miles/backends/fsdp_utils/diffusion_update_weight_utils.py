@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 class DiffusionUpdateWeight(abc.ABC):
     """Base updater used by diffusion training actors."""
 
-    def __init__(self, args: Namespace, model: torch.nn.Module) -> None:
+    def __init__(self, args: Namespace, model: torch.nn.Module, target_module: str) -> None:
         self.args = args
         self.model = model
         self.weight_version = 0
@@ -179,8 +179,8 @@ class DiffusionUpdateWeightFromTensorLoRA(DiffusionUpdateWeightFromTensor):
     on the fly during sync (no in-place mutation of the FSDP model).
     """
 
-    def __init__(self, args, model):
-        super().__init__(args, model)
+    def __init__(self, args, model, target_module: str):
+        super().__init__(args, model, target_module)
         self._lora_index: dict[str, tuple] = {}
         for name, module in model.named_modules():
             if hasattr(module, "lora_A") and hasattr(module, "lora_B"):
