@@ -73,6 +73,29 @@ def validate_same_microbatch_counts_across_dp(
         )
 
 
+def _window_cond_pad_len(pairs: list, use_cfg: bool) -> int | None:
+    """Max text seq_len over an optimizer window's pairs (pos and, if CFG, neg).
+
+    Reproduces the legacy window-wide collate padding: the old TrainRayActor
+    collated cond once over all window samples (pos+neg concatenated), so every
+    tile in the window shared this single seq_len. Returns None if no seq_len
+    is available (collate then falls back to the microbatch-local max).
+    """
+    max_len = 0
+    for pair in pairs:
+        env = pair.get("denoising_env")
+        if env is None:
+            continue
+        conds = [getattr(env, "pos_cond_kwargs", None)]
+        if use_cfg:
+            conds.append(getattr(env, "neg_cond_kwargs", None))
+        for ck in conds:
+            lens = (getattr(ck, "txt_seq_lens", None) or []) if ck is not None else []
+            if lens:
+                max_len = max(max_len, int(lens[0]))
+    return max_len or None
+
+
 class FSDPTrainRayActor(TrainRayActor):
     """FSDP training actor for diffusion GRPO.
 
@@ -385,6 +408,14 @@ class FSDPTrainRayActor(TrainRayActor):
 
                 log_stats: dict[str, list[torch.Tensor]] = defaultdict(list)
 
+                # Optional: pad text-cond to the optimizer-window-wide max seq_len
+                # (matching the legacy window-collated padding) for bitwise parity.
+                cond_pad_len = None
+                if getattr(self.args, "diffusion_train_cond_pad_window", False):
+                    step_lo = microbatch_ranges[0][0]
+                    step_hi = microbatch_ranges[-1][1]
+                    cond_pad_len = _window_cond_pad_len(train_pairs[step_lo:step_hi], use_cfg)
+
                 for pair_lo, pair_hi in microbatch_ranges:
                     chunk = train_pairs[pair_lo:pair_hi]
                     loss_sum = self._forward_train_pair_batch(
@@ -397,6 +428,7 @@ class FSDPTrainRayActor(TrainRayActor):
                         num_train_timesteps=num_train_timesteps,
                         log_stats=log_stats,
                         device=device,
+                        cond_pad_len=cond_pad_len,
                         kl_beta=kl_beta,
                     )
                     if not self.args.debug_skip_optimizer_step:
@@ -432,9 +464,15 @@ class FSDPTrainRayActor(TrainRayActor):
         num_train_timesteps: int,
         log_stats: dict[str, list[torch.Tensor]],
         device: torch.device,
+        cond_pad_len: int | None = None,
         kl_beta: float = 0.0,
     ) -> torch.Tensor:
-        """One DiT forward + PPO loss over ``len(batch)`` train pairs. Returns sum of per-pair losses."""
+        """One DiT forward + PPO loss over ``len(batch)`` train pairs. Returns sum of per-pair losses.
+
+        ``cond_pad_len`` forces the text-cond collation to pad to this seq_len
+        (the optimizer-window-wide max) instead of the microbatch-local max,
+        reproducing the legacy window-collated padding for bitwise parity.
+        """
         forward_dtype = self._forward_dtype
         train_pipeline_config = self.train_pipeline_config
         bsz = len(batch)
@@ -489,10 +527,16 @@ class FSDPTrainRayActor(TrainRayActor):
                 else None
             )
         elif use_cfg and neg_list is not None:
-            pos_cond_microbatch = train_pipeline_config.collate_cond_for_sample_batch(pos_list, device)
-            neg_cond_microbatch = train_pipeline_config.collate_cond_for_sample_batch(neg_list, device)
+            pos_cond_microbatch = train_pipeline_config.collate_cond_for_sample_batch(
+                pos_list, device, pad_to_len=cond_pad_len
+            )
+            neg_cond_microbatch = train_pipeline_config.collate_cond_for_sample_batch(
+                neg_list, device, pad_to_len=cond_pad_len
+            )
         else:
-            pos_cond_microbatch = train_pipeline_config.collate_cond_for_sample_batch(pos_list, device)
+            pos_cond_microbatch = train_pipeline_config.collate_cond_for_sample_batch(
+                pos_list, device, pad_to_len=cond_pad_len
+            )
             neg_cond_microbatch = None
 
         pos_cond_microbatch = _cast_cond_to_dtype(pos_cond_microbatch, forward_dtype)
@@ -519,7 +563,9 @@ class FSDPTrainRayActor(TrainRayActor):
                 if not use_cfg:
                     return _forward(pos_cond_microbatch)
                 if self.args.fsdp_cfg_batching:
-                    joint_cond = train_pipeline_config.collate_cond_for_sample_batch(pos_list + neg_list, device)
+                    joint_cond = train_pipeline_config.collate_cond_for_sample_batch(
+                        pos_list + neg_list, device, pad_to_len=cond_pad_len
+                    )
                     joint_cond = _cast_cond_to_dtype(joint_cond, forward_dtype)
                     # forward as a batch to align with some implementations in sglang-d
                     joint_out = self.model(

@@ -153,7 +153,11 @@ class RolloutManager:
         _log_rollout_data(rollout_id, self.args, data, metrics, time.time() - start_time)
         data = self._convert_samples_to_train_data(data)
         logger.info("RolloutManager generate done: rollout_id=%s", rollout_id)
-        shards = self.train_data_dp_splitter.split_by_dp(data, self.train_parallel_config["dp_size"])
+        shards = self.train_data_dp_splitter.split_by_dp(
+            data,
+            self.train_parallel_config["dp_size"],
+            mode=getattr(self.args, "diffusion_train_dp_split", "contiguous"),
+        )
         return [Box(ray.put(shard)) for shard in shards]
 
     def eval(self, rollout_id):
@@ -356,6 +360,21 @@ class RolloutManager:
 
         reward_stats["rollout/step"] = compute_rollout_step(self.args, self.rollout_id)
         tracking_utils.log(self.args, reward_stats, step_key="rollout/step")
+
+        # Plain-stdout reward summary for offline log parsing (scripts/plot_diffusion_run_curves.py).
+        # Mirrors the baseline run's instrumentation so refactor vs baseline reward curves are
+        # extracted by the exact same regex. Lands in the Ray worker .out file.
+        print(
+            f"[reward stats] raw mean={reward_stats.get('rollout/reward/raw_mean', float('nan')):.4f} "
+            f"std={reward_stats.get('rollout/reward/raw_std', float('nan')):.4f} "
+            f"min={reward_stats.get('rollout/reward/raw_min', float('nan')):.4f} "
+            f"max={reward_stats.get('rollout/reward/raw_max', float('nan')):.4f} "
+            f"| normalized mean={reward_stats.get('rollout/reward/norm_mean', float('nan')):.4f} "
+            f"std={reward_stats.get('rollout/reward/norm_std', float('nan')):.4f} "
+            f"min={reward_stats.get('rollout/reward/norm_min', float('nan')):.4f} "
+            f"max={reward_stats.get('rollout/reward/norm_max', float('nan')):.4f}",
+            flush=True,
+        )
 
         max_images = self.args.diffusion_log_images
         interval = self.args.diffusion_log_image_interval

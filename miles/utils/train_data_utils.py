@@ -1,4 +1,5 @@
 import logging
+from collections import OrderedDict
 from typing import Any
 
 import torch
@@ -202,12 +203,32 @@ class RolloutTrainDataConverter:
 
 
 class TrainDataDPSplitter:
-    """Split flat train-pair payloads across DP ranks."""
+    """Split flat train-pair payloads across DP ranks.
 
-    def split_by_dp(self, data: dict[str, Any], dp_size: int) -> list[dict[str, list[dict[str, Any]]]]:
-        """Split train data across DP ranks using equal contiguous pair ranges."""
+    Two policies (``mode``):
+
+    - ``contiguous`` (default): rank r gets one contiguous block of train pairs
+      ``[r*pairs_per_rank : (r+1)*pairs_per_rank]``. Since pairs are sample-major,
+      this gives rank r a contiguous block of samples.
+    - ``baseline_stride``: reproduces the legacy TrainRayActor dispatch, which
+      partitioned *samples* by stride ``range(r, num_samples, dp_size)`` and then
+      tiled them. Used by the ``verify/baseline-batch-parity`` check to confirm the
+      refactored rollout-side dispatch can feed each DP rank the exact same
+      sample set (in the same order) as the old code path, so any residual
+      train-curve difference is attributable to grouping policy, not a bug.
+    """
+
+    def split_by_dp(
+        self,
+        data: dict[str, Any],
+        dp_size: int,
+        mode: str = "contiguous",
+    ) -> list[dict[str, list[dict[str, Any]]]]:
+        """Split train data across DP ranks into equal-sized shards."""
         if dp_size <= 0:
             raise ValueError(f"dp_size must be positive, got {dp_size}")
+        if mode not in ("contiguous", "baseline_stride"):
+            raise ValueError(f"unknown dp split mode {mode!r}")
         train_data = data["train_data"]
         scheduler_timesteps = data.get("scheduler_timesteps")
         scheduler_sigmas = data.get("scheduler_sigmas")
@@ -217,22 +238,27 @@ class TrainDataDPSplitter:
                 f"num_pairs={num_pairs} is smaller than dp_size={dp_size}; "
                 "would drop all pairs when enforcing equal DP shards"
             )
-        dropped_pairs = num_pairs % dp_size
-        if dropped_pairs:
-            logger.warning(
-                "Drop last %s train pairs after DP split so every DP rank has the same number of "
-                "pairs (num_pairs=%s, dp_size=%s)",
-                dropped_pairs,
-                num_pairs,
-                dp_size,
-            )
 
-        pairs_per_rank = num_pairs // dp_size
+        if mode == "baseline_stride":
+            rank_pairs = self._stride_partition_by_sample(train_data, dp_size)
+        else:
+            dropped_pairs = num_pairs % dp_size
+            if dropped_pairs:
+                logger.warning(
+                    "Drop last %s train pairs after DP split so every DP rank has the same number "
+                    "of pairs (num_pairs=%s, dp_size=%s)",
+                    dropped_pairs,
+                    num_pairs,
+                    dp_size,
+                )
+            pairs_per_rank = num_pairs // dp_size
+            rank_pairs = [
+                train_data[rank * pairs_per_rank : (rank + 1) * pairs_per_rank]
+                for rank in range(dp_size)
+            ]
+
         shards: list[dict[str, list[dict[str, Any]]]] = []
-        for rank in range(dp_size):
-            pair_lo = rank * pairs_per_rank
-            pair_hi = pair_lo + pairs_per_rank
-            shard_pairs = train_data[pair_lo:pair_hi]
+        for shard_pairs in rank_pairs:
             shard: dict[str, Any] = {"train_data": shard_pairs}
             if scheduler_timesteps is not None:
                 shard["scheduler_timesteps"] = scheduler_timesteps
@@ -240,3 +266,39 @@ class TrainDataDPSplitter:
                 shard["scheduler_sigmas"] = scheduler_sigmas
             shards.append(shard)
         return shards
+
+    @staticmethod
+    def _stride_partition_by_sample(
+        train_data: list[dict[str, Any]],
+        dp_size: int,
+    ) -> list[list[dict[str, Any]]]:
+        """Assign each sample's pairs to rank ``(sample_position % dp_size)``.
+
+        Mirrors the legacy ``_split_train_data_by_dp`` which did
+        ``partitions = [range(i, num_samples, dp_size) for i in range(dp_size)]``
+        over the per-sample lists. Pairs are sample-major, so grouping by
+        ``sample_index`` in first-seen order recovers sample positions; within a
+        rank the original sample-major order is preserved (so the actor's
+        contiguous micro-batch chunking reproduces the legacy tiles).
+        """
+        groups: "OrderedDict[Any, list[dict[str, Any]]]" = OrderedDict()
+        for pair in train_data:
+            groups.setdefault(pair["sample_index"], []).append(pair)
+        sample_groups = list(groups.values())  # first-seen (sample-major) order
+
+        per_sample_counts = {len(g) for g in sample_groups}
+        if len(per_sample_counts) != 1:
+            raise ValueError(
+                f"baseline_stride split requires every sample to contribute the same number of "
+                f"train pairs, got counts {sorted(per_sample_counts)}"
+            )
+        if len(sample_groups) % dp_size != 0:
+            raise ValueError(
+                f"baseline_stride split requires num_samples ({len(sample_groups)}) divisible by "
+                f"dp_size ({dp_size}) for equal shards"
+            )
+
+        rank_pairs: list[list[dict[str, Any]]] = [[] for _ in range(dp_size)]
+        for pos, grp in enumerate(sample_groups):
+            rank_pairs[pos % dp_size].extend(grp)
+        return rank_pairs

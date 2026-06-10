@@ -656,6 +656,29 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "use this knob differently."
                 ),
             )
+            parser.add_argument(
+                "--diffusion-train-dp-split",
+                type=str,
+                default="contiguous",
+                choices=["contiguous", "baseline_stride"],
+                help=(
+                    "How the rollout manager partitions flat train pairs across DP ranks. "
+                    "'contiguous' (default) gives each rank a contiguous sample block. "
+                    "'baseline_stride' reproduces the legacy TrainRayActor stride partition "
+                    "(range(rank, num_samples, dp_size)); used by the baseline-batch-parity "
+                    "verification to feed each rank the exact same samples as the old code path."
+                ),
+            )
+            parser.add_argument(
+                "--diffusion-train-cond-pad-window",
+                action="store_true",
+                help=(
+                    "Pad each microbatch's text-cond to the optimizer-window-wide max seq_len "
+                    "(matching the legacy window-collated padding) instead of the microbatch-local "
+                    "max. Combined with --diffusion-train-dp-split baseline_stride this removes the "
+                    "last bf16 forward-grouping difference vs the legacy code path (bitwise parity)."
+                ),
+            )
             return parser
 
         def add_eval_arguments(parser):
