@@ -1,3 +1,4 @@
+import functools
 import logging
 from argparse import Namespace
 from collections import defaultdict
@@ -22,12 +23,33 @@ from miles.utils.timer import Timer, inverse_timer, timer
 from miles.utils.tracking_utils import init_tracking
 
 from . import checkpoint
+from .arguments import deterministic_capable_flash_fns
 from .configs.train_pipeline_config import get_train_pipeline_config
 from .diffusion_update_weight_utils import DiffusionUpdateWeightFromTensor, DiffusionUpdateWeightFromTensorLoRA
 from .lr_scheduler import get_lr_scheduler
 from .parallel import create_fsdp_parallel_state
 
 logger = logging.getLogger(__name__)
+
+
+def _enable_deterministic_flash_attention() -> None:
+    """Wrap diffusers' flash entry points so they run with deterministic=True.
+
+    diffusers never forwards deterministic to flash-attn, so we patch the module
+    globals it dispatches through. Only the backward differs, so the flash forward
+    (and train/rollout consistency) is unchanged. The set of patchable functions
+    is already validated up front by load_fsdp_args. Idempotent across re-inits.
+    """
+    import diffusers.models.attention_dispatch as ad
+
+    if getattr(ad, "_miles_deterministic_flash_patched", False):
+        return
+
+    names = deterministic_capable_flash_fns()
+    for name in names:
+        setattr(ad, name, functools.partial(getattr(ad, name), deterministic=True))
+    ad._miles_deterministic_flash_patched = True
+    logger.info("Enabled deterministic flash attention backward for: %s", ", ".join(names))
 
 
 class FSDPTrainRayActor(TrainRayActor):
@@ -40,6 +62,9 @@ class FSDPTrainRayActor(TrainRayActor):
     @with_defer(lambda: Timer().start("train_wait"))
     def init(self, args: Namespace, role: str, with_ref: bool = False) -> int:  # type: ignore[override]
         super().init(args, role, with_ref)
+
+        if args.fsdp_attention_deterministic:
+            _enable_deterministic_flash_attention()
 
         self.parallel_state = create_fsdp_parallel_state(args)
         torch.manual_seed(args.seed)
@@ -77,6 +102,9 @@ class FSDPTrainRayActor(TrainRayActor):
             model = pipeline.transformer
             self.scheduler = pipeline.scheduler
             del pipeline
+
+        if args.fsdp_attention_backend is not None:
+            model.set_attention_backend(args.fsdp_attention_backend)
 
         self.train_pipeline_config = get_train_pipeline_config(args.diffusion_model)
 

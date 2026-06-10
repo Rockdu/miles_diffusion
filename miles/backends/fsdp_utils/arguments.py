@@ -32,6 +32,16 @@ class FSDPArgs:
 
     attn_implementation: str = "flash_attention_2"
 
+    # DiT attention backend, passed to diffusers set_attention_backend (e.g.
+    # "flash", "sage", "native"). None keeps the diffusers default.
+    fsdp_attention_backend: str | None = None
+
+    # Force a deterministic backward on diffusers' flash backends (forward is
+    # already deterministic). diffusers never passes deterministic=True, so this
+    # monkey-patches the flash_attn entry points. Keeps the flash forward (and so
+    # train/rollout consistency) while making the training backward reproducible.
+    fsdp_attention_deterministic: bool = False
+
     # Logging
     wandb_project: str = "miles-fsdp"
     wandb_run_name: str | None = None
@@ -84,6 +94,55 @@ def parse_fsdp_cli(extra_args_provider=None):
     return args
 
 
+# diffusers' flash backends (FA2 `flash`, FA3 `_flash_3`) dispatch through these
+# module globals; the FA3 custom op also reads them at call time.
+_FLASH_ATTN_DISPATCH_FNS = (
+    "flash_attn_func",
+    "flash_attn_varlen_func",
+    "flash_attn_3_func",
+    "flash_attn_3_varlen_func",
+)
+
+
+def deterministic_capable_flash_fns():
+    """diffusers flash entry points whose signature accepts a `deterministic` arg."""
+    import inspect
+
+    import diffusers.models.attention_dispatch as ad
+
+    out = []
+    for name in _FLASH_ATTN_DISPATCH_FNS:
+        fn = getattr(ad, name, None)
+        if fn is None:
+            continue
+        try:
+            if "deterministic" in inspect.signature(fn).parameters:
+                out.append(name)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def validate_attention_args(args):
+    """Fail fast (before any actor is launched) on attention misconfiguration."""
+    if not getattr(args, "fsdp_attention_deterministic", False):
+        return
+    # deterministic only changes the flash backward; on any other backend the
+    # switch would silently do nothing, which is exactly the dangerous case.
+    backend = args.fsdp_attention_backend
+    if backend is None or "flash" not in backend.lower():
+        raise ValueError(
+            "--fsdp-attention-deterministic only affects flash backends; set "
+            "--fsdp-attention-backend to a flash variant (e.g. flash, _flash_3)."
+        )
+    if not deterministic_capable_flash_fns():
+        raise RuntimeError(
+            "--fsdp-attention-deterministic is set but no diffusers flash entry "
+            "point exposes a deterministic argument (is flash-attn installed and "
+            "recent enough?)."
+        )
+
+
 def load_fsdp_args(extra_args_provider=None):
     args = parse_fsdp_cli(extra_args_provider)
     if args.config:
@@ -92,4 +151,5 @@ def load_fsdp_args(extra_args_provider=None):
         for k, v in data.items():
             if not hasattr(args, k):
                 setattr(args, k, v)
+    validate_attention_args(args)
     return args
