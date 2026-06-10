@@ -1,3 +1,4 @@
+import functools
 import logging
 from argparse import Namespace
 from collections import defaultdict
@@ -22,12 +23,61 @@ from miles.utils.timer import Timer, inverse_timer, timer
 from miles.utils.tracking_utils import init_tracking
 
 from . import checkpoint
+from .arguments import deterministic_capable_flash_fns
 from .configs.train_pipeline_config import get_train_pipeline_config
 from .diffusion_update_weight_utils import DiffusionUpdateWeightFromTensor, DiffusionUpdateWeightFromTensorLoRA
 from .lr_scheduler import get_lr_scheduler
 from .parallel import create_fsdp_parallel_state
 
 logger = logging.getLogger(__name__)
+
+
+def _enable_deterministic_training(args: Namespace) -> None:
+    """Train-actor deterministic mode (mirrors VeOmni's enable_full_determinism).
+
+    NCCL_DETERMINISTIC / CUBLAS_WORKSPACE_CONFIG are injected at actor spawn (see
+    actor_group) because NCCL/cuBLAS read them before this runs. Here we set the
+    torch-runtime knobs plus the flash-attn kernel knob that torch's global flag
+    can't reach. validate_attention_args has already rejected backends we cannot
+    make deterministic; see it for the support matrix.
+    """
+    # deterministic cuDNN algorithms; no need to disable cuDNN outright.
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    # warn_only=True to keep training runnable — ops lacking a deterministic impl
+    # warn instead of crashing. Trade-off: the SDPA (native) backward only switches
+    # to its deterministic path under warn_only=False (deterministicAlgorithms() &&
+    # !warnOnly; see aten attention_backward.cu), so here it only warns and stays
+    # nondeterministic. Under this mode only the flash backend (patched below) is
+    # guaranteed deterministic.
+    torch.use_deterministic_algorithms(True, warn_only=True)
+
+    # flash-attn is a separate CUDA extension (not torch SDPA), so torch's flag
+    # can't reach it and diffusers neither forwards deterministic= nor reads
+    # FLASH_ATTENTION_DETERMINISTIC — we patch it on directly.
+    backend = args.fsdp_attention_backend
+    if backend is not None and "flash" in backend.lower():
+        _enable_deterministic_flash_attention()
+
+
+def _enable_deterministic_flash_attention() -> None:
+    """Wrap diffusers' flash entry points so they run with deterministic=True.
+
+    diffusers never forwards deterministic to flash-attn, so we patch the module
+    globals it dispatches through. Only the backward differs, so the flash forward
+    (and train/rollout consistency) is unchanged. The set of patchable functions
+    is already validated up front by load_fsdp_args. Idempotent across re-inits.
+    """
+    import diffusers.models.attention_dispatch as ad
+
+    if getattr(ad, "_miles_deterministic_flash_patched", False):
+        return
+
+    names = deterministic_capable_flash_fns()
+    for name in names:
+        setattr(ad, name, functools.partial(getattr(ad, name), deterministic=True))
+    ad._miles_deterministic_flash_patched = True
+    logger.info("Enabled deterministic flash attention backward for: %s", ", ".join(names))
 
 
 class FSDPTrainRayActor(TrainRayActor):
@@ -40,6 +90,9 @@ class FSDPTrainRayActor(TrainRayActor):
     @with_defer(lambda: Timer().start("train_wait"))
     def init(self, args: Namespace, role: str, with_ref: bool = False) -> int:  # type: ignore[override]
         super().init(args, role, with_ref)
+
+        if args.deterministic_mode:
+            _enable_deterministic_training(args)
 
         self.parallel_state = create_fsdp_parallel_state(args)
         torch.manual_seed(args.seed)
@@ -77,6 +130,9 @@ class FSDPTrainRayActor(TrainRayActor):
             model = pipeline.transformer
             self.scheduler = pipeline.scheduler
             del pipeline
+
+        if args.fsdp_attention_backend is not None:
+            model.set_attention_backend(args.fsdp_attention_backend)
 
         self.train_pipeline_config = get_train_pipeline_config(args.diffusion_model)
 
