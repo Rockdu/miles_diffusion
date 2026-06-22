@@ -16,7 +16,12 @@ from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.memory_utils import clear_memory, print_memory
 from miles.utils.metric_utils import compute_rollout_step
 from miles.utils.sde_log_prob import sde_step_with_logprob
-from miles.utils.train_data_utils import scheduler_meta_from_rollout, stack_train_pair_rollout_debug
+from miles.utils.train_data_utils import (
+    build_microbatch_schedule,
+    scheduler_meta_from_rollout,
+    stack_train_pair_rollout_debug,
+    validate_same_microbatch_counts_across_dp,
+)
 from miles.utils.timer import Timer, inverse_timer, timer
 from miles.utils.tracking_utils import init_tracking
 from miles.utils import tracking_utils
@@ -32,45 +37,6 @@ from .parallel import create_fsdp_parallel_state
 from .diffusion_update_weight_utils import DiffusionUpdateWeightFromTensor, DiffusionUpdateWeightFromTensorLoRA
 
 logger = logging.getLogger(__name__)
-
-
-def build_microbatch_schedule(
-    *,
-    num_pairs_per_optim_step: int,
-    num_optim_steps_per_rollout: int,
-    micro_batch_size: int,
-) -> list[list[tuple[int, int]]]:
-    """Absolute train-pair ranges for every optimizer step and micro-batch."""
-    schedule: list[list[tuple[int, int]]] = []
-    for step_id in range(num_optim_steps_per_rollout):
-        step_pair_lo = step_id * num_pairs_per_optim_step
-        step_pair_hi = step_pair_lo + num_pairs_per_optim_step
-        step_ranges = []
-        for pair_lo in range(step_pair_lo, step_pair_hi, micro_batch_size):
-            pair_hi = min(step_pair_hi, pair_lo + micro_batch_size)
-            step_ranges.append((pair_lo, pair_hi))
-        schedule.append(step_ranges)
-    return schedule
-
-
-def validate_same_microbatch_counts_across_dp(
-    *,
-    microbatch_schedule: list[list[tuple[int, int]]],
-    parallel_state,
-) -> None:
-    """Ensure every DP rank will run the same number of FSDP micro-batches."""
-    local_microbatch_counts = [len(step_ranges) for step_ranges in microbatch_schedule]
-    gathered_microbatch_counts = [None] * parallel_state.dp_cp_size
-    dist.all_gather_object(
-        gathered_microbatch_counts,
-        local_microbatch_counts,
-        group=parallel_state.dp_cp_group_gloo,
-    )
-    if any(counts != local_microbatch_counts for counts in gathered_microbatch_counts):
-        raise ValueError(
-            "Uneven train-pair counts would make DP ranks run different numbers of FSDP "
-            f"micro-batches per optimizer step: {gathered_microbatch_counts}"
-        )
 
 
 class FSDPTrainRayActor(TrainRayActor):
