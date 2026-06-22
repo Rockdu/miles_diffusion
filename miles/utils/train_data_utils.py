@@ -2,10 +2,62 @@ import logging
 from typing import Any
 
 import torch
+import torch.distributed as dist
 
 from miles.utils.types import RolloutDebugTensors, Sample
 
 logger = logging.getLogger(__name__)
+
+
+def build_microbatch_schedule(
+    *,
+    num_pairs_per_optim_step: int,
+    num_optim_steps_per_rollout: int,
+    micro_batch_size: int,
+) -> list[list[tuple[int, int]]]:
+    """Absolute train-pair ranges for every optimizer step and micro-batch."""
+    schedule: list[list[tuple[int, int]]] = []
+    for step_id in range(num_optim_steps_per_rollout):
+        step_pair_lo = step_id * num_pairs_per_optim_step
+        step_pair_hi = step_pair_lo + num_pairs_per_optim_step
+        step_ranges = []
+        for pair_lo in range(step_pair_lo, step_pair_hi, micro_batch_size):
+            pair_hi = min(step_pair_hi, pair_lo + micro_batch_size)
+            step_ranges.append((pair_lo, pair_hi))
+        schedule.append(step_ranges)
+    return schedule
+
+
+def microbatch_counts_agree(
+    gathered_microbatch_counts: list,
+    local_microbatch_counts: list,
+) -> bool:
+    """Pure predicate: do all DP ranks report the same per-step micro-batch counts?
+
+    Factored out of ``validate_same_microbatch_counts_across_dp`` so the
+    comparison logic is unit-testable without a process group.
+    """
+    return all(counts == local_microbatch_counts for counts in gathered_microbatch_counts)
+
+
+def validate_same_microbatch_counts_across_dp(
+    *,
+    microbatch_schedule: list[list[tuple[int, int]]],
+    parallel_state,
+) -> None:
+    """Ensure every DP rank will run the same number of FSDP micro-batches."""
+    local_microbatch_counts = [len(step_ranges) for step_ranges in microbatch_schedule]
+    gathered_microbatch_counts = [None] * parallel_state.dp_cp_size
+    dist.all_gather_object(
+        gathered_microbatch_counts,
+        local_microbatch_counts,
+        group=parallel_state.dp_cp_group_gloo,
+    )
+    if not microbatch_counts_agree(gathered_microbatch_counts, local_microbatch_counts):
+        raise ValueError(
+            "Uneven train-pair counts would make DP ranks run different numbers of FSDP "
+            f"micro-batches per optimizer step: {gathered_microbatch_counts}"
+        )
 
 
 def stack_train_pair_rollout_debug(
