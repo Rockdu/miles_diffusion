@@ -78,12 +78,19 @@ class TrainPipelineConfig(abc.ABC):
         self,
         per_sample_cond_kwargs: list[dict],
         device: torch.device,
+        pad_to_len: int | None = None,
     ) -> dict:
         """Stack a list of per-sample cond_kwargs (output of prepare_cond_kwargs)
         into a single batched dict suitable for one DiT forward over M samples.
 
         Model-specific because variable-length text embeds need padding + mask.
         Default: naive concat along batch dim, only valid when shapes match.
+
+        ``pad_to_len`` is part of the contract so the trainer can uniformly ask
+        every config to pad text to a shared width (the legacy window-wide
+        seq_len) for bitwise grouping parity. Configs that do variable-length
+        padding (e.g. Qwen-Image) must honor it; configs that concat
+        fixed-length embeds (SD3, Wan2.2, LTX) accept and ignore it.
         """
         raise NotImplementedError(
             "Must implement collate_cond_for_sample_batch to enable micro-batch-size > 1 in fsdp training"
