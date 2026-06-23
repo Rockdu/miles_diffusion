@@ -80,6 +80,23 @@ def test_qwen_variable_config_honors_pad_to_len():
     assert widened["encoder_hidden_states_mask"].shape[1] == 20
 
 
+def test_qwen_single_sample_collate_is_clean_broadcast_with_all_true_mask():
+    """Single-sample (timestep-stacked) micro-batches now always go through
+    collate (the expand_cond_for_timestep_batch shortcut was removed). Collating
+    bsz copies of one sample must give each row == that sample's embed at its own
+    (un-padded) length, plus an all-True mask -- the all-True mask being a forward
+    no-op verified on GPU in tests/manual/check_mask_equivalence.py."""
+    cond = _qwen_cond(6, seed=3)
+    bsz = 4
+    out = QwenImageTrainPipelineConfig.collate_cond_for_sample_batch(None, [cond] * bsz, "cpu")
+    enc = out["encoder_hidden_states"]
+    assert enc.shape[0] == bsz
+    assert enc.shape[1] == 6  # single sample's own length, no extra padding
+    for i in range(bsz):
+        assert torch.equal(enc[i], cond["encoder_hidden_states"][0])
+    assert out["encoder_hidden_states_mask"].all()
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

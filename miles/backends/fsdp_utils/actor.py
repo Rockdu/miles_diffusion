@@ -478,22 +478,18 @@ class FSDPTrainRayActor(TrainRayActor):
             else None
         )
 
-        first_sample_index = batch[0]["sample_index"]
-        same_sample_microbatch = all(batch[i]["sample_index"] == first_sample_index for i in range(1, bsz))
-
-        if same_sample_microbatch:
-            pos_cond_microbatch = train_pipeline_config.expand_cond_for_timestep_batch(pos_list[0], bsz)
-            neg_cond_microbatch = (
-                train_pipeline_config.expand_cond_for_timestep_batch(neg_list[0], bsz)
-                if use_cfg and neg_list is not None
-                else None
-            )
-        elif use_cfg and neg_list is not None:
-            pos_cond_microbatch = train_pipeline_config.collate_cond_for_sample_batch(pos_list, device)
-            neg_cond_microbatch = train_pipeline_config.collate_cond_for_sample_batch(neg_list, device)
-        else:
-            pos_cond_microbatch = train_pipeline_config.collate_cond_for_sample_batch(pos_list, device)
-            neg_cond_microbatch = None
+        # A single-sample (timestep-stacked) micro-batch used to take a separate
+        # expand_cond_for_timestep_batch path (which emits no encoder_hidden_states_mask).
+        # Collating bsz copies of the one sample is bitwise-equivalent: the all-True
+        # mask qwen's collate then adds is a verified no-op vs no mask
+        # (tests/manual/check_mask_equivalence.py), and for fixed-length concat configs
+        # the rows are identical either way. So always collate.
+        pos_cond_microbatch = train_pipeline_config.collate_cond_for_sample_batch(pos_list, device)
+        neg_cond_microbatch = (
+            train_pipeline_config.collate_cond_for_sample_batch(neg_list, device)
+            if use_cfg and neg_list is not None
+            else None
+        )
 
         pos_cond_microbatch = _cast_cond_to_dtype(pos_cond_microbatch, forward_dtype)
         if neg_cond_microbatch is not None:

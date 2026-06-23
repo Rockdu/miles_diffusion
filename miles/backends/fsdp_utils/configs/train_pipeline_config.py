@@ -58,22 +58,6 @@ class TrainPipelineConfig(abc.ABC):
     ) -> dict:
         """Convert CondKwargs to model-specific forward() kwargs."""
 
-    def expand_cond_for_timestep_batch(
-        self,
-        cond_kwargs: dict,
-        batch_size: int,
-    ) -> dict:
-        """Expand per-sample conditioning to a timestep batch."""
-        out = {}
-        for k, v in cond_kwargs.items():
-            if isinstance(v, torch.Tensor):
-                out[k] = v.expand(batch_size, *v.shape[1:]) if v.shape[0] == 1 else v
-            elif isinstance(v, list):
-                out[k] = v * batch_size if len(v) == 1 else v
-            else:
-                out[k] = v
-        return out
-
     def collate_cond_for_sample_batch(
         self,
         per_sample_cond_kwargs: list[dict],
