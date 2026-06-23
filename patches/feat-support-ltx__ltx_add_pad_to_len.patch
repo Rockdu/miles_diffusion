@@ -1,0 +1,12 @@
+diff --git a/miles/backends/fsdp_utils/configs/ltx.py b/miles/backends/fsdp_utils/configs/ltx.py
+index f34c461..a2925ef 100644
+--- a/miles/backends/fsdp_utils/configs/ltx.py
++++ b/miles/backends/fsdp_utils/configs/ltx.py
+@@ -139,6 +139,7 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
+         self,
+         per_sample_cond_kwargs: list[dict],
+         device: torch.device,
++        pad_to_len: int | None = None,  # accepted for interface parity; LTX concats fixed-length embeds
+     ) -> dict:
+         out: dict = {}
+         for key in per_sample_cond_kwargs[0]:
