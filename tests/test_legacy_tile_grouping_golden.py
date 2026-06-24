@@ -28,8 +28,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from miles.backends.fsdp_utils.actor import build_microbatch_schedule
-from miles.utils.train_data_utils import TrainDataDPSplitter
+from miles.utils.train_data_utils import TrainDataDPSplitter, build_microbatch_schedule
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "legacy_ocr_tile_grouping.json"
 
