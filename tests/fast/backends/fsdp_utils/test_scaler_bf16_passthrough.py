@@ -2,6 +2,10 @@
 backward + optimizer.step. CPU-only (enabled=False short-circuits before any CUDA op),
 so this runs in CI without a GPU. The scaler only matters for fp16 (SD3.5)."""
 
+from tests.ci.ci_register import register_cpu_ci
+
+register_cpu_ci(est_time=20, suite="stage-a-cpu", labels=[])
+
 import torch
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 

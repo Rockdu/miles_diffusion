@@ -25,12 +25,16 @@ Run:  python -m pytest tests/test_legacy_tile_grouping_golden.py -q
 
 from __future__ import annotations
 
+from tests.ci.ci_register import register_cpu_ci
+
+register_cpu_ci(est_time=20, suite="stage-a-cpu", labels=[])
+
 import json
 from pathlib import Path
 
 from miles.utils.train_data_utils import TrainDataDPSplitter, build_microbatch_schedule
 
-_FIXTURE = Path(__file__).parent / "fixtures" / "legacy_ocr_tile_grouping.json"
+_FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "legacy_ocr_tile_grouping.json"
 
 
 def _load_fixture() -> dict:

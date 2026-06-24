@@ -302,6 +302,11 @@ def build_microbatch_schedule(
     micro_batch_size: int,
 ) -> list[list[tuple[int, int]]]:
     """Absolute train-pair ranges for every optimizer step and micro-batch."""
+    if num_pairs_per_optim_step % micro_batch_size != 0:
+        raise ValueError(
+            f"num_pairs_per_optim_step={num_pairs_per_optim_step} must be a whole multiple of "
+            f"micro_batch_size={micro_batch_size} (no ragged final micro-batch)"
+        )
     schedule: list[list[tuple[int, int]]] = []
     for step_id in range(num_optim_steps_per_rollout):
         step_pair_lo = step_id * num_pairs_per_optim_step

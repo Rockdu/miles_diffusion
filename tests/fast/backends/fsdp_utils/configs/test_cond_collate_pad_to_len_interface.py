@@ -20,6 +20,10 @@ Run:  python -m pytest tests/test_cond_collate_pad_to_len_interface.py -q
 
 from __future__ import annotations
 
+from tests.ci.ci_register import register_cpu_ci
+
+register_cpu_ci(est_time=40, suite="stage-a-cpu", labels=[])
+
 import inspect
 
 import torch

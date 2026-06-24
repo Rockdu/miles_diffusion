@@ -4,6 +4,10 @@ Pure index arithmetic: split one rank's flat sample-major train-pairs into
 optimizer steps, then into contiguous micro-batches. No torch / model needed.
 """
 
+from tests.ci.ci_register import register_cpu_ci
+
+register_cpu_ci(est_time=10, suite="stage-a-cpu", labels=[])
+
 from miles.utils.train_data_utils import build_microbatch_schedule
 
 
@@ -21,16 +25,6 @@ def test_absolute_offsets_across_steps():
     ]
 
 
-def test_last_microbatch_is_partial_when_not_divisible():
-    sched = build_microbatch_schedule(num_pairs_per_optim_step=10, num_optim_steps_per_rollout=1, micro_batch_size=4)
-    assert sched == [[(0, 4), (4, 8), (8, 10)]]  # last is a 2-pair remainder
-
-
-def test_microbatch_size_larger_than_step_is_single_batch():
-    sched = build_microbatch_schedule(num_pairs_per_optim_step=5, num_optim_steps_per_rollout=2, micro_batch_size=100)
-    assert sched == [[(0, 5)], [(5, 10)]]
-
-
 def test_count_and_contiguous_coverage():
     sched = build_microbatch_schedule(num_pairs_per_optim_step=256, num_optim_steps_per_rollout=2, micro_batch_size=8)
     assert len(sched) == 2
@@ -40,6 +34,23 @@ def test_count_and_contiguous_coverage():
         assert step[-1][1] == (k + 1) * 256  # and covers the whole step
         for (_lo, hi), (nlo, _) in zip(step, step[1:], strict=False):
             assert hi == nlo  # contiguous, no gaps/overlaps
+
+
+def test_raises_when_step_not_divisible_by_microbatch():
+    """num_pairs_per_optim_step must be a whole multiple of micro_batch_size, so
+    every micro-batch is full and all DP ranks run the same count. A ragged
+    remainder (or micro_batch_size > step) must raise, not silently truncate."""
+    bad_configs = [
+        dict(num_pairs_per_optim_step=10, num_optim_steps_per_rollout=1, micro_batch_size=4),  # remainder 2
+        dict(num_pairs_per_optim_step=5, num_optim_steps_per_rollout=2, micro_batch_size=100),  # mbs > step
+    ]
+    for cfg in bad_configs:
+        try:
+            build_microbatch_schedule(**cfg)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected ValueError for {cfg}")
 
 
 if __name__ == "__main__":
