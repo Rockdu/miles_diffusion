@@ -444,22 +444,29 @@ class FSDPTrainRayActor(TrainRayActor):
             else None
         )
 
-        # A single-sample (timestep-stacked) micro-batch used to take a separate
-        # expand_cond_for_timestep_batch path (which emits no encoder_hidden_states_mask).
-        # Collating bsz copies of the one sample is bitwise-equivalent: the all-True
-        # mask qwen's collate then adds is a verified no-op vs no mask
-        # (tests/manual/check_mask_equivalence.py), and for fixed-length concat configs
-        # the rows are identical either way. So always collate.
-        pos_cond_microbatch = train_pipeline_config.collate_cond_for_sample_batch(pos_list, device)
-        neg_cond_microbatch = (
-            train_pipeline_config.collate_cond_for_sample_batch(neg_list, device)
-            if use_cfg and neg_list is not None
-            else None
-        )
-
-        pos_cond_microbatch = _cast_cond_to_dtype(pos_cond_microbatch, forward_dtype)
-        if neg_cond_microbatch is not None:
-            neg_cond_microbatch = _cast_cond_to_dtype(neg_cond_microbatch, forward_dtype)
+        # Collate cond once, up front. With CFG batching, pos+neg must share one
+        # padded width and go through a single joint forward, so build that joint cond
+        # directly; otherwise build pos (and neg) separately. (A single-sample
+        # timestep-stacked micro-batch is just collate of bsz copies of one sample --
+        # bitwise-equivalent to the old expand_cond_for_timestep_batch path; the
+        # all-True mask qwen adds is a verified forward no-op, see
+        # tests/manual/check_mask_equivalence.py.)
+        cfg_batching = use_cfg and bool(self.args.fsdp_cfg_batching)
+        joint_cond = None
+        pos_cond_microbatch = None
+        neg_cond_microbatch = None
+        if cfg_batching:
+            joint_cond = _cast_cond_to_dtype(
+                train_pipeline_config.collate_cond_for_sample_batch(pos_list + neg_list, device), forward_dtype
+            )
+        else:
+            pos_cond_microbatch = _cast_cond_to_dtype(
+                train_pipeline_config.collate_cond_for_sample_batch(pos_list, device), forward_dtype
+            )
+            if use_cfg and neg_list is not None:
+                neg_cond_microbatch = _cast_cond_to_dtype(
+                    train_pipeline_config.collate_cond_for_sample_batch(neg_list, device), forward_dtype
+                )
 
         # Cast inputs explicitly: FSDP MixedPrecisionPolicy casts params but
         # leaves fp32 inputs, which would run first matmul at higher precision
@@ -480,10 +487,8 @@ class FSDPTrainRayActor(TrainRayActor):
             with adapter_ctx:
                 if not use_cfg:
                     return _forward(pos_cond_microbatch)
-                if self.args.fsdp_cfg_batching:
-                    joint_cond = train_pipeline_config.collate_cond_for_sample_batch(pos_list + neg_list, device)
-                    joint_cond = _cast_cond_to_dtype(joint_cond, forward_dtype)
-                    # forward as a batch to align with some implementations in sglang-d
+                if cfg_batching:
+                    # forward pos+neg as one joint batch to align with sglang-d
                     joint_out = self.model(
                         hidden_states=torch.cat([latents_input, latents_input], dim=0),
                         timestep=torch.cat([timesteps_input, timesteps_input], dim=0),
