@@ -20,12 +20,7 @@ from miles.utils.profile_utils import TrainProfiler
 from miles.utils.sde_log_prob import sde_step_with_logprob
 from miles.utils.timer import Timer, inverse_timer, timer
 from miles.utils.tracking_utils import init_tracking
-from miles.utils.train_data_utils import (
-    build_microbatch_schedule,
-    scheduler_meta_from_rollout,
-    stack_train_pair_rollout_debug,
-    validate_same_microbatch_counts_across_dp,
-)
+from miles.utils.train_data_utils import scheduler_meta_from_rollout, stack_train_pair_rollout_debug
 
 from . import checkpoint
 from .configs.train_pipeline_config import get_train_pipeline_config
@@ -285,8 +280,6 @@ class FSDPTrainRayActor(TrainRayActor):
         if not train_pairs:
             raise ValueError("rollout_data['train_data'] is empty")
 
-        num_pairs = len(train_pairs)
-
         # ------------- CFG Scale -------------
         guidance_scale = self.args.diffusion_guidance_scale
         true_cfg_scale = self.args.diffusion_true_cfg_scale
@@ -318,39 +311,24 @@ class FSDPTrainRayActor(TrainRayActor):
         self.scheduler._step_index = None
         self.scheduler._begin_index = None
 
-        # ------------- Optimizer Windows -------------
-        num_optim_steps_per_rollout = self.args.num_steps_per_rollout
-        if num_pairs % num_optim_steps_per_rollout != 0:
-            raise ValueError(
-                f"num_pairs_shard={num_pairs} not divisible by " f"num_steps_per_rollout={num_optim_steps_per_rollout}"
-            )
-        num_pairs_per_optim_step = num_pairs // num_optim_steps_per_rollout
-
-        # ------------- Microbatch Synchronization -------------
-        micro_bs = self.args.micro_batch_size
-        if micro_bs <= 0:
-            raise ValueError(f"micro_batch_size must be positive, got {micro_bs}")
-        microbatch_schedule = build_microbatch_schedule(
-            num_pairs_per_optim_step=num_pairs_per_optim_step,
-            num_optim_steps_per_rollout=num_optim_steps_per_rollout,
-            micro_batch_size=micro_bs,
-        )
-        validate_same_microbatch_counts_across_dp(
-            microbatch_schedule=microbatch_schedule,
-            parallel_state=self.parallel_state,
-        )
+        # ------------- Micro-batch schedule -------------
+        # Built rollout-side (RolloutManager.generate) and shipped with the shard; the
+        # actor just consumes it. schedule[optim_step][micro_batch] = absolute train-pair
+        # indices into train_pairs (contiguous for 1D --micro-batch-size; sample x timestep
+        # tiles for legacy 2D --micro-batch-size-sample/-tstep).
+        microbatch_schedule = rollout_data["microbatch_schedule"]
 
         # ------------- Forward / Backward -------------
         with timer("actor_train"):
-            for microbatch_ranges in microbatch_schedule:
+            for microbatches in microbatch_schedule:
                 self.optimizer.zero_grad(set_to_none=True)
 
-                num_local_pairs = sum(pair_hi - pair_lo for pair_lo, pair_hi in microbatch_ranges)
+                num_local_pairs = sum(len(mb) for mb in microbatches)
 
                 log_stats: dict[str, list[torch.Tensor]] = defaultdict(list)
 
-                for pair_lo, pair_hi in microbatch_ranges:
-                    chunk = train_pairs[pair_lo:pair_hi]
+                for pair_indices in microbatches:
+                    chunk = [train_pairs[i] for i in pair_indices]
                     loss_sum = self._forward_train_pair_batch(
                         chunk,
                         use_cfg=use_cfg,

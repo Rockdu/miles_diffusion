@@ -656,6 +656,31 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "use this knob differently."
                 ),
             )
+            parser.add_argument(
+                "--micro-batch-size-sample",
+                type=int,
+                default=None,
+                help=(
+                    "Diffusion FSDP legacy 2D grouping: samples per DiT-forward tile. When set "
+                    "(together with --micro-batch-size-tstep), the RolloutManager groups train pairs "
+                    "into sample x timestep tiles instead of contiguous --micro-batch-size chunks, "
+                    "reproducing the legacy TrainRayActor tiling (e.g. SD3.5 where tstep micro-batch "
+                    "!= SDE window)."
+                ),
+            )
+            parser.add_argument(
+                "--micro-batch-size-tstep",
+                type=int,
+                default=None,
+                help="Diffusion FSDP legacy 2D grouping: SDE timesteps per DiT-forward tile (pairs with --micro-batch-size-sample).",
+            )
+            parser.add_argument(
+                "--diffusion-train-iter-order",
+                type=str,
+                default="sample_major",
+                choices=["sample_major", "timestep_major"],
+                help="Diffusion FSDP legacy 2D grouping: tile iteration order.",
+            )
             return parser
 
         def add_eval_arguments(parser):
