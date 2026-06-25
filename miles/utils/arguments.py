@@ -661,6 +661,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=int,
                 default=None,
                 help=(
+                    "[DEPRECATED -- kept only for backward compatibility with legacy (pre-refactor) configs; planned for removal, prefer --micro-batch-size.] "
                     "Diffusion FSDP legacy 2D grouping: samples per DiT-forward tile. When set "
                     "(together with --micro-batch-size-tstep), the RolloutManager groups train pairs "
                     "into sample x timestep tiles instead of contiguous --micro-batch-size chunks, "
@@ -672,14 +673,22 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "--micro-batch-size-tstep",
                 type=int,
                 default=None,
-                help="Diffusion FSDP legacy 2D grouping: SDE timesteps per DiT-forward tile (pairs with --micro-batch-size-sample).",
+                help=(
+                    "[DEPRECATED -- kept only for backward compatibility with legacy (pre-refactor) configs; planned for removal, prefer --micro-batch-size.] "
+                    "Diffusion FSDP legacy 2D grouping: SDE timesteps per DiT-forward tile "
+                    "(pairs with --micro-batch-size-sample)."
+                ),
             )
             parser.add_argument(
                 "--diffusion-train-iter-order",
                 type=str,
                 default="sample_major",
                 choices=["sample_major", "timestep_major"],
-                help="Diffusion FSDP legacy 2D grouping: tile iteration order.",
+                help=(
+                    "[DEPRECATED -- kept only for backward compatibility with legacy (pre-refactor) configs; planned for removal, prefer --micro-batch-size.] "
+                    "Diffusion FSDP legacy 2D grouping: tile iteration order "
+                    "(only meaningful with --micro-batch-size-sample/-tstep)."
+                ),
             )
             return parser
 
