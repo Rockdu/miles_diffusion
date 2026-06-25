@@ -3,6 +3,7 @@ from collections import OrderedDict
 from typing import Any
 
 import torch
+import torch.distributed as dist
 
 from miles.utils.types import RolloutDebugTensors, Sample
 
@@ -390,60 +391,53 @@ def build_tiled_microbatch_schedule(
     return schedule
 
 
-def build_shard_microbatch_schedule(
+def reorder_train_pairs_for_tiling(
     train_data: list[dict[str, Any]],
     *,
     num_optim_steps_per_rollout: int,
-    micro_batch_size: int,
-    sample_microbatch: int | None = None,
-    tstep_microbatch: int | None = None,
+    sample_microbatch: int,
+    tstep_microbatch: int,
     iter_order: str = "sample_major",
-) -> list[list[list[int]]]:
-    """One DP rank's micro-batch schedule: ``schedule[optim_step][micro_batch]`` is a
-    list of absolute train-pair indices into ``train_data``.
-
-    Default 1D: contiguous chunks of ``micro_batch_size`` pairs. When
-    ``sample_microbatch`` / ``tstep_microbatch`` are given, use the legacy 2D
-    sample x timestep tiling (``build_tiled_microbatch_schedule``) -- needed to
-    reproduce configs whose timestep micro-batch != the SDE window (e.g. SD3.5).
-    """
-    if (sample_microbatch is None) != (tstep_microbatch is None):
-        raise ValueError("--micro-batch-size-sample and --micro-batch-size-tstep must be set together")
-
-    num_pairs = len(train_data)
-    if num_pairs % num_optim_steps_per_rollout != 0:
-        raise ValueError(f"num_pairs={num_pairs} not divisible by num_steps_per_rollout={num_optim_steps_per_rollout}")
-
-    if sample_microbatch is not None:
-        num_samples = len({pair["sample_index"] for pair in train_data})
-        if num_pairs % num_samples != 0:
-            raise ValueError(f"num_pairs={num_pairs} not divisible by num_samples={num_samples} (uneven SDE window)")
-        if num_samples % num_optim_steps_per_rollout != 0:
-            raise ValueError(
-                f"num_samples={num_samples} not divisible by num_steps_per_rollout={num_optim_steps_per_rollout}"
-            )
-        return build_tiled_microbatch_schedule(
-            num_samples_per_optim_step=num_samples // num_optim_steps_per_rollout,
-            sde_window_size=num_pairs // num_samples,
-            num_optim_steps_per_rollout=num_optim_steps_per_rollout,
-            sample_microbatch=sample_microbatch,
-            tstep_microbatch=tstep_microbatch,
-            iter_order=iter_order,
+) -> list[dict[str, Any]]:
+    """Reorder a rank's sample-major train pairs so the legacy sample x timestep tiles are
+    contiguous; the train actor then reproduces them with a plain contiguous schedule.
+    Requires uniform tiles -- a contiguous micro_batch_size cannot express ragged ones."""
+    num_samples = len({pair["sample_index"] for pair in train_data})
+    sde_window_size = len(train_data) // num_samples
+    num_samples_per_optim_step = num_samples // num_optim_steps_per_rollout
+    eff_sample = min(sample_microbatch, num_samples_per_optim_step)
+    eff_tstep = min(tstep_microbatch, sde_window_size)
+    if num_samples_per_optim_step % eff_sample or sde_window_size % eff_tstep:
+        raise ValueError(
+            f"reorder needs uniform tiles: num_samples_per_optim_step={num_samples_per_optim_step} not divisible by "
+            f"sample_microbatch={eff_sample} or sde_window_size={sde_window_size} not by tstep_microbatch={eff_tstep}"
         )
-
-    if micro_batch_size <= 0:
-        raise ValueError(f"micro_batch_size must be positive, got {micro_batch_size}")
-    ranges = build_microbatch_schedule(
-        num_pairs_per_optim_step=num_pairs // num_optim_steps_per_rollout,
+    schedule = build_tiled_microbatch_schedule(
+        num_samples_per_optim_step=num_samples_per_optim_step,
+        sde_window_size=sde_window_size,
         num_optim_steps_per_rollout=num_optim_steps_per_rollout,
-        micro_batch_size=micro_batch_size,
+        sample_microbatch=sample_microbatch,
+        tstep_microbatch=tstep_microbatch,
+        iter_order=iter_order,
     )
-    return [[list(range(lo, hi)) for (lo, hi) in step] for step in ranges]
+    return [train_data[i] for step in schedule for micro_batch in step for i in micro_batch]
 
 
-def validate_uniform_microbatch_schedule(schedules: list[list[list[list[int]]]]) -> None:
-    """Every DP shard must split into the same number of micro-batches per optimizer
-    step, so all FSDP ranks run the same number of forward/backward passes."""
-    counts = [[len(step) for step in sched] for sched in schedules]
-    if any(c != counts[0] for c in counts):
-        raise ValueError(f"DP ranks would run different micro-batch counts per optim step: {counts}")
+def validate_same_microbatch_counts_across_dp(
+    *,
+    microbatch_schedule: list[list[tuple[int, int]]],
+    parallel_state,
+) -> None:
+    """Ensure every DP rank will run the same number of FSDP micro-batches."""
+    local_microbatch_counts = [len(step_ranges) for step_ranges in microbatch_schedule]
+    gathered_microbatch_counts = [None] * parallel_state.dp_cp_size
+    dist.all_gather_object(
+        gathered_microbatch_counts,
+        local_microbatch_counts,
+        group=parallel_state.dp_cp_group_gloo,
+    )
+    if any(counts != local_microbatch_counts for counts in gathered_microbatch_counts):
+        raise ValueError(
+            "Uneven train-pair counts would make DP ranks run different numbers of FSDP "
+            f"micro-batches per optimizer step: {gathered_microbatch_counts}"
+        )

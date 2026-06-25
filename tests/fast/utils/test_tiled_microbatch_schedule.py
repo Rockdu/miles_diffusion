@@ -15,11 +15,7 @@ register_cpu_ci(est_time=15, suite="stage-a-cpu", labels=[])
 import json
 from pathlib import Path
 
-from miles.utils.train_data_utils import (
-    build_shard_microbatch_schedule,
-    build_tiled_microbatch_schedule,
-    validate_uniform_microbatch_schedule,
-)
+from miles.utils.train_data_utils import build_tiled_microbatch_schedule, reorder_train_pairs_for_tiling
 
 _FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "legacy_tile_2d_grouping.json"
 
@@ -94,46 +90,46 @@ def _sample_major_pairs(num_samples, sde_window):
     return [{"sample_index": s, "tag": (s, t)} for s in range(num_samples) for t in range(sde_window)]
 
 
-def test_build_shard_1d_contiguous():
-    data = _sample_major_pairs(8, 2)  # 16 pairs
-    sched = build_shard_microbatch_schedule(data, num_optim_steps_per_rollout=2, micro_batch_size=4)
-    assert sched == [[[0, 1, 2, 3], [4, 5, 6, 7]], [[8, 9, 10, 11], [12, 13, 14, 15]]]
-
-
-def test_build_shard_2d_matches_legacy_sd3_tile():
-    data = _sample_major_pairs(16, 10)  # SD3-like, 1 optim step
-    sched = build_shard_microbatch_schedule(
-        data,
+def test_reorder_makes_legacy_tiles_contiguous():
+    # After reorder, each contiguous tile_size block == the corresponding legacy tile
+    # (so the actor's plain contiguous schedule reproduces the 2D tiling).
+    data = _sample_major_pairs(8, 4)  # 8 samples x 4 tsteps
+    reordered = reorder_train_pairs_for_tiling(
+        data, num_optim_steps_per_rollout=1, sample_microbatch=4, tstep_microbatch=2, iter_order="sample_major"
+    )
+    tiled = build_tiled_microbatch_schedule(
+        num_samples_per_optim_step=8,
+        sde_window_size=4,
         num_optim_steps_per_rollout=1,
-        micro_batch_size=1,
-        sample_microbatch=8,
-        tstep_microbatch=5,
+        sample_microbatch=4,
+        tstep_microbatch=2,
         iter_order="sample_major",
     )
-    expected_tile0 = [sp * 10 + tp for sp in range(8) for tp in range(5)]
-    assert sched[0][0] == expected_tile0
+    tile_size = 4 * 2
+    for i, tile in enumerate(tiled[0]):
+        chunk = reordered[i * tile_size : (i + 1) * tile_size]
+        assert [p["tag"] for p in chunk] == [(idx // 4, idx % 4) for idx in tile]
 
 
-def test_build_shard_requires_both_2d_args():
-    data = _sample_major_pairs(8, 2)
+def test_reorder_multi_optim_step_preserves_step_boundaries():
+    data = _sample_major_pairs(8, 2)  # 16 pairs; 2 optim steps -> 4 samples/step
+    reordered = reorder_train_pairs_for_tiling(
+        data, num_optim_steps_per_rollout=2, sample_microbatch=2, tstep_microbatch=2, iter_order="sample_major"
+    )
+    assert {p["sample_index"] for p in reordered[:8]} == {0, 1, 2, 3}
+    assert {p["sample_index"] for p in reordered[8:]} == {4, 5, 6, 7}
+
+
+def test_reorder_rejects_ragged_tiles():
+    data = _sample_major_pairs(10, 4)  # 10 samples not divisible by sample_mb=4 -> ragged
     try:
-        build_shard_microbatch_schedule(data, num_optim_steps_per_rollout=1, micro_batch_size=1, sample_microbatch=4)
+        reorder_train_pairs_for_tiling(
+            data, num_optim_steps_per_rollout=1, sample_microbatch=4, tstep_microbatch=2, iter_order="sample_major"
+        )
     except ValueError:
         pass
     else:
-        raise AssertionError("expected ValueError when only one 2D arg is set")
-
-
-def test_validate_uniform_microbatch_schedule():
-    ok = [[[0, 1], [2, 3]]]
-    validate_uniform_microbatch_schedule([ok, [[[0, 1], [2, 3]]]])  # same counts -> fine
-    mismatch = [[[0, 1, 2, 3]]]  # 1 micro-batch vs 2
-    try:
-        validate_uniform_microbatch_schedule([ok, mismatch])
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("expected ValueError for uneven micro-batch counts")
+        raise AssertionError("expected ValueError for ragged (non-uniform) tiles")
 
 
 if __name__ == "__main__":

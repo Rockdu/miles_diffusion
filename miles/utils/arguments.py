@@ -1268,6 +1268,11 @@ def miles_validate_args(args):
     if args.eps_clip_high is None:
         args.eps_clip_high = args.eps_clip
 
+    if (args.micro_batch_size_sample is None) != (args.micro_batch_size_tstep is None):
+        raise ValueError("--micro-batch-size-sample and --micro-batch-size-tstep must be set together")
+    if args.micro_batch_size_sample is not None:
+        args.micro_batch_size = args.micro_batch_size_sample * args.micro_batch_size_tstep
+
     if args.eval_reward_key is None:
         args.eval_reward_key = args.reward_key
 

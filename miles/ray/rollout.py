@@ -24,12 +24,7 @@ from miles.utils.metric_utils import compute_rollout_step, compute_statistics, d
 from miles.utils.misc import load_function
 from miles.utils.ray_utils import Box
 from miles.utils.tracking_utils import init_tracking
-from miles.utils.train_data_utils import (
-    RolloutTrainDataConverter,
-    TrainDataDPSplitter,
-    build_shard_microbatch_schedule,
-    validate_uniform_microbatch_schedule,
-)
+from miles.utils.train_data_utils import RolloutTrainDataConverter, TrainDataDPSplitter, reorder_train_pairs_for_tiling
 from miles.utils.types import Sample
 
 from .utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, Lock
@@ -159,19 +154,22 @@ class RolloutManager:
         data = self._convert_samples_to_train_data(data)
         logger.info("RolloutManager generate done: rollout_id=%s", rollout_id)
         shards = self.train_data_dp_splitter.split_by_dp(data, self.train_parallel_config["dp_size"])
-        # Build each rank's micro-batch schedule here (org-batch lives in the rollout
-        # manager), validate all ranks split into the same number of micro-batches, and
-        # ship the schedule with the shard. The train actor just consumes it.
-        for shard in shards:
-            shard["microbatch_schedule"] = build_shard_microbatch_schedule(
-                shard["train_data"],
-                num_optim_steps_per_rollout=self.args.num_steps_per_rollout,
-                micro_batch_size=self.args.micro_batch_size,
-                sample_microbatch=self.args.micro_batch_size_sample,
-                tstep_microbatch=self.args.micro_batch_size_tstep,
-                iter_order=self.args.diffusion_train_iter_order,
-            )
-        validate_uniform_microbatch_schedule([shard["microbatch_schedule"] for shard in shards])
+        # Legacy 2D tiling: reorder so sample x timestep tiles are contiguous; the actor's
+        # plain contiguous schedule reproduces them.
+        if self.args.micro_batch_size_sample is not None:
+            shards = [
+                {
+                    **shard,
+                    "train_data": reorder_train_pairs_for_tiling(
+                        shard["train_data"],
+                        num_optim_steps_per_rollout=self.args.num_steps_per_rollout,
+                        sample_microbatch=self.args.micro_batch_size_sample,
+                        tstep_microbatch=self.args.micro_batch_size_tstep,
+                        iter_order=self.args.diffusion_train_iter_order,
+                    ),
+                }
+                for shard in shards
+            ]
         return [Box(ray.put(shard)) for shard in shards]
 
     def eval(self, rollout_id):
