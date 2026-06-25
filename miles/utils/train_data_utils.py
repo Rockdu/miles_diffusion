@@ -62,7 +62,8 @@ class RolloutTrainDataConverter:
         device = torch.device("cpu")
         train_data: list[dict[str, Any]] = []
         first_traj = samples[0].dit_trajectory
-        # assume all samples have the same scheduler meta
+        # Scheduler meta is taken from sample 0 and returned once for the whole batch;
+        # the per-sample loop below verifies every sample actually shares it.
         scheduler_meta: dict[str, torch.Tensor] = {"scheduler_timesteps": first_traj.timesteps.detach().cpu().float()}
 
         if first_traj.sigmas is not None:
@@ -70,6 +71,22 @@ class RolloutTrainDataConverter:
 
         for sample, rew, raw_r in zip(samples, rewards, raw_rewards, strict=True):
             traj, denoising_env, rollout_log_probs = self._sample_required_inputs(sample)
+            # Nail down the shared-scheduler-meta assumption: every sample must carry the
+            # same timesteps/sigmas as sample 0, since one scheduler_meta is returned for all.
+            if not torch.equal(traj.timesteps.detach().cpu().float(), scheduler_meta["scheduler_timesteps"]):
+                raise ValueError(
+                    f"sample {sample.index} has different scheduler_timesteps than sample 0; "
+                    "the converter assumes one shared schedule across the batch"
+                )
+            expected_sigmas = scheduler_meta.get("scheduler_sigmas")
+            traj_sigmas = None if traj.sigmas is None else traj.sigmas.detach().cpu().float()
+            if (expected_sigmas is None) != (traj_sigmas is None) or (
+                expected_sigmas is not None and not torch.equal(traj_sigmas, expected_sigmas)
+            ):
+                raise ValueError(
+                    f"sample {sample.index} has different scheduler_sigmas than sample 0; "
+                    "the converter assumes one shared schedule across the batch"
+                )
             # build per-sample features for train pairs
             per_sample_features = self._build_per_sample_features(
                 sample,

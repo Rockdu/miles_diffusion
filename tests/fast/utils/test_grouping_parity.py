@@ -84,7 +84,10 @@ def _mk_sample(index: int, num_steps: int, sde_idx, chan: int = 4, with_debug=Tr
     g = torch.Generator().manual_seed(100 + index)
     latents = torch.randn(num_steps + 1, chan, generator=g)  # (T+1, C)
     timesteps = torch.arange(num_steps, dtype=torch.float32) + 0.5  # (T,)
-    sigmas = torch.randn(num_steps + 1, generator=g) if with_sigmas else None
+    # Scheduler sigmas are SHARED across all samples in a batch (one scheduler), so use a
+    # fixed seed (not the per-sample one) -- the converter now verifies this; a per-sample
+    # seed here would (correctly) raise.
+    sigmas = torch.randn(num_steps + 1, generator=torch.Generator().manual_seed(7)) if with_sigmas else None
     traj = SimpleNamespace(latents=latents, timesteps=timesteps, sigmas=sigmas)
     rollout_log_probs = torch.randn(num_steps, generator=g)  # (T,)
     dbg = None
@@ -156,6 +159,30 @@ def test_l2_converter_sigmas_optional():
     out = RolloutTrainDataConverter().convert_samples(samples, [1.0, 2.0], [1.0, 2.0])
     assert "scheduler_sigmas" not in out
     assert len(out["train_data"]) == 2 * len(sde)
+
+
+def test_l2_converter_rejects_mismatched_scheduler_timesteps():
+    """One scheduler_meta is returned for the whole batch (from sample 0); a sample
+    carrying a different schedule must raise, not silently inherit sample 0's."""
+    samples = [_mk_sample(i, 6, [1, 3, 4]) for i in range(3)]
+    samples[2].dit_trajectory.timesteps = samples[2].dit_trajectory.timesteps + 1.0  # tamper
+    try:
+        RolloutTrainDataConverter().convert_samples(samples, [0.1, 0.2, 0.3], [0.4, 0.5, 0.6])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for mismatched scheduler_timesteps")
+
+
+def test_l2_converter_rejects_mismatched_scheduler_sigmas():
+    samples = [_mk_sample(i, 4, [0, 2]) for i in range(2)]  # with_sigmas=True
+    samples[1].dit_trajectory.sigmas = samples[1].dit_trajectory.sigmas + 1.0  # tamper
+    try:
+        RolloutTrainDataConverter().convert_samples(samples, [1.0, 2.0], [1.0, 2.0])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for mismatched scheduler_sigmas")
 
 
 # --------------------------------------------------------------------------------------
