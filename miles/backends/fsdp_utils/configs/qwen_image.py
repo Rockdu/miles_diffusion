@@ -162,6 +162,11 @@ class QwenImageTrainPipelineConfig(TrainPipelineConfig):
             "img_shapes": img_shapes,
         }
 
+    def maybe_legacy_window_pad_len(self, conds: list) -> int | None:
+        # LEGACY 2D parity: reproduce the legacy whole-window cond pad width. TODO: remove with legacy 2D path.
+        lens = [int(c.txt_seq_lens[0]) for c in conds if c is not None and c.txt_seq_lens]
+        return max(lens) if lens else None
+
     def cfg_combine(
         self,
         noise_pred_pos: torch.Tensor,

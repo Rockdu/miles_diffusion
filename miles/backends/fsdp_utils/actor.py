@@ -345,6 +345,9 @@ class FSDPTrainRayActor(TrainRayActor):
 
                 num_local_pairs = sum(pair_hi - pair_lo for pair_lo, pair_hi in microbatch_ranges)
 
+                # LEGACY 2D parity: pad cond to the whole-window width. TODO: remove with legacy 2D path.
+                legacy_pad_to_len = self._maybe_legacy_window_pad_len(train_pairs, microbatch_ranges)
+
                 log_stats: dict[str, list[torch.Tensor]] = defaultdict(list)
 
                 for pair_lo, pair_hi in microbatch_ranges:
@@ -360,6 +363,7 @@ class FSDPTrainRayActor(TrainRayActor):
                         log_stats=log_stats,
                         device=device,
                         kl_beta=kl_beta,
+                        pad_to_len=legacy_pad_to_len,
                     )
                     if not self.args.debug_skip_optimizer_step:
                         # ShardedGradScaler keeps fp16 policy grads from underflowing
@@ -382,6 +386,20 @@ class FSDPTrainRayActor(TrainRayActor):
                 reduced = {f"train/{k}": torch.stack(v).mean().item() for k, v in log_stats.items()}
                 self._gather_and_log_metrics(rollout_id, reduced, step=self.global_step)
 
+    def _maybe_legacy_window_pad_len(self, train_pairs: list, microbatch_ranges: list) -> int | None:
+        """LEGACY 2D parity: the whole-window max cond seq_len (like the legacy tile path), or
+        None unless the legacy --micro-batch-size-sample>1 path is active. TODO: remove with it."""
+        if self.args.micro_batch_size_sample is None or self.args.micro_batch_size_sample <= 1:
+            return None
+        conds = []
+        for pair_lo, pair_hi in microbatch_ranges:
+            for pair in train_pairs[pair_lo:pair_hi]:
+                env = pair["denoising_env"]
+                conds.append(env.pos_cond_kwargs)
+                if env.neg_cond_kwargs is not None:
+                    conds.append(env.neg_cond_kwargs)
+        return self.train_pipeline_config.maybe_legacy_window_pad_len(conds)
+
     def _forward_train_pair_batch(
         self,
         batch: list,
@@ -395,6 +413,7 @@ class FSDPTrainRayActor(TrainRayActor):
         log_stats: dict[str, list[torch.Tensor]],
         device: torch.device,
         kl_beta: float = 0.0,
+        pad_to_len: int | None = None,
     ) -> torch.Tensor:
         """One DiT forward + PPO loss over ``len(batch)`` train pairs. Returns sum of per-pair losses."""
         forward_dtype = self._forward_dtype
@@ -449,15 +468,20 @@ class FSDPTrainRayActor(TrainRayActor):
         neg_cond_microbatch = None
         if cfg_batching:
             joint_cond = _cast_cond_to_dtype(
-                train_pipeline_config.collate_cond_for_sample_batch(pos_list + neg_list, device), forward_dtype
+                train_pipeline_config.collate_cond_for_sample_batch(
+                    pos_list + neg_list, device, pad_to_len=pad_to_len
+                ),
+                forward_dtype,
             )
         else:
             pos_cond_microbatch = _cast_cond_to_dtype(
-                train_pipeline_config.collate_cond_for_sample_batch(pos_list, device), forward_dtype
+                train_pipeline_config.collate_cond_for_sample_batch(pos_list, device, pad_to_len=pad_to_len),
+                forward_dtype,
             )
             if use_cfg and neg_list is not None:
                 neg_cond_microbatch = _cast_cond_to_dtype(
-                    train_pipeline_config.collate_cond_for_sample_batch(neg_list, device), forward_dtype
+                    train_pipeline_config.collate_cond_for_sample_batch(neg_list, device, pad_to_len=pad_to_len),
+                    forward_dtype,
                 )
 
         # Cast inputs explicitly: FSDP MixedPrecisionPolicy casts params but

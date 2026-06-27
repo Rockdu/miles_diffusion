@@ -80,6 +80,11 @@ class TrainPipelineConfig(abc.ABC):
             "Must implement collate_cond_for_sample_batch to enable micro-batch-size > 1 in fsdp training"
         )
 
+    def maybe_legacy_window_pad_len(self, conds: list) -> int | None:
+        """LEGACY 2D parity: seq_len to pad text embeds to (whole-window max), or None for
+        fixed-length-cond models. Qwen-Image overrides. TODO: remove with the legacy 2D path."""
+        return None
+
     @abc.abstractmethod
     def cfg_combine(
         self,
