@@ -15,6 +15,7 @@ sample/timestep chunks, single-cell and whole-window cases.
 
 Regenerate:  python tests/fixtures/gen_legacy_tile_2d_fixture.py
 """
+
 from __future__ import annotations
 
 import ast
