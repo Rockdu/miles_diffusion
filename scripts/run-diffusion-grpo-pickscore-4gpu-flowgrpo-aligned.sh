@@ -14,7 +14,7 @@
 #   num_steps_per_rollout=2 → 256 items/optim step (matches flow_grpo's
 #   pickscore_qwenimage 32-GPU: train_batch_size=4 × 32 GPU × 2 grad_accum = 256).
 #   ÷ 4 train gpus = 64 items/rank/optim step.
-#   --micro-batch-size 8 → 8 train pairs/forward, 8 forwards/rank/optim step.
+#   --micro-batch-size-sample 8 --micro-batch-size-tstep 1 (legacy 2D compat).
 #
 # Layout: first 4 GPUs in CUDA_VISIBLE_DEVICES = train+sgld colocate,
 # the 5th GPU = pickscore reward worker (1 GPU dedicated).
@@ -57,7 +57,9 @@ hf download --repo-type dataset rockdu/miles-diffusion-datasets \
   --n-samples-per-prompt 16 \
   --num-rollout 100000 \
   --diffusion-microgroup-size 8 \
-  --micro-batch-size 8 \
+  --micro-batch-size-sample 8 \
+  --micro-batch-size-tstep 1 \
+  --diffusion-train-iter-order sample_major \
   --gradient-checkpointing \
   --actor-num-gpus-per-node 4 \
   --rollout-num-gpus 4 \
