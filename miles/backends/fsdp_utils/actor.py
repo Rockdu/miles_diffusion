@@ -551,19 +551,16 @@ class FSDPTrainRayActor(TrainRayActor):
             log_stats["log_prob_old_idx_0"].append(log_prob_old[0].detach())
             log_stats["log_prob_mean_abs_diff"].append(torch.mean(torch.abs(log_prob_new - log_prob_old)).detach())
 
-            for debug_key, train_tensor in (
-                ("rollout_step_model_output", noise_pred_microbatch),
-                ("rollout_step_prev_sample_mean", prev_sample_mean_new),
-                ("rollout_step_noise_std_dev", std_dev_t_new),
-            ):
-                rollout_tensor = stack_train_pair_rollout_debug(batch, debug_key)
-                if rollout_tensor is None:
-                    continue
+            # model_output_* checks the train forward reproduces the rollout forward -- the only
+            # model-dependent consistency metric (std_dev/prev_sample_mean are deterministic
+            # functions of it). Matches the legacy actor metric name.
+            rollout_model_output = stack_train_pair_rollout_debug(batch, "rollout_step_model_output")
+            if rollout_model_output is not None:
                 _append_rollout_train_abs_diff_stats(
                     log_stats,
-                    debug_key,
-                    train_tensor.float(),
-                    rollout_tensor.to(device=device, dtype=torch.float32).float(),
+                    "model_output",
+                    noise_pred_microbatch.float(),
+                    rollout_model_output.to(device=device, dtype=torch.float32).float(),
                 )
 
         return loss_sum
