@@ -404,12 +404,12 @@ class FSDPTrainRayActor(TrainRayActor):
         def _stack(key):
             return torch.stack([pair[key] for pair in batch]).to(device=device, dtype=torch.float32)
 
-        latents_microbatch = _stack("latent")
-        next_latents_microbatch = _stack("next_latent")
-        timesteps_microbatch = _stack("timestep").reshape(bsz)
-        log_prob_old_microbatch = _stack("log_prob_old").reshape(bsz)
+        latents_microbatch = _stack("latent")  # (bsz, *latent_dims)
+        next_latents_microbatch = _stack("next_latent")  # (bsz, *latent_dims)
+        timesteps_microbatch = _stack("timestep")  # (bsz,) -- per-pair timestep is scalar
+        log_prob_old_microbatch = _stack("log_prob_old")  # (bsz,) -- per-pair log_prob is scalar
 
-        advantage = torch.tensor(
+        advantage = torch.tensor(  # (bsz,)
             [float(pair["advantage"]) for pair in batch],
             device=device,
             dtype=torch.float32,
@@ -509,9 +509,9 @@ class FSDPTrainRayActor(TrainRayActor):
             noise_level=noise_level,
         )
 
-        log_prob_new = log_prob_new_microbatch.reshape(bsz)
-        log_prob_old = log_prob_old_microbatch.reshape(bsz)
-        ratio = torch.exp(log_prob_new - log_prob_old)
+        log_prob_new = log_prob_new_microbatch  # (bsz,) -- sde_step_with_logprob means over non-batch dims
+        log_prob_old = log_prob_old_microbatch  # (bsz,)
+        ratio = torch.exp(log_prob_new - log_prob_old)  # (bsz,)
         unclipped = -advantage * ratio
         clipped = -advantage * torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range)
         per_pair_loss = torch.maximum(unclipped, clipped)
@@ -547,8 +547,8 @@ class FSDPTrainRayActor(TrainRayActor):
             log_stats["ratio_abs_minus_1"].append((ratio - 1.0).abs().mean().detach())
             log_stats["approx_kl"].append(0.5 * torch.mean((log_prob_new - log_prob_old) ** 2).detach())
             log_stats["clipfrac"].append(torch.mean((torch.abs(ratio - 1.0) > clip_range).float()).detach())
-            log_stats["log_prob_new_idx_0"].append(log_prob_new.reshape(-1)[0].detach())
-            log_stats["log_prob_old_idx_0"].append(log_prob_old.reshape(-1)[0].detach())
+            log_stats["log_prob_new_idx_0"].append(log_prob_new[0].detach())
+            log_stats["log_prob_old_idx_0"].append(log_prob_old[0].detach())
             log_stats["log_prob_mean_abs_diff"].append(torch.mean(torch.abs(log_prob_new - log_prob_old)).detach())
 
             for debug_key, train_tensor in (
