@@ -153,10 +153,11 @@ class RolloutManager:
         _log_rollout_data(rollout_id, self.args, data, metrics, time.time() - start_time)
         data = self._convert_samples_to_train_data(data)
         logger.info("RolloutManager generate done: rollout_id=%s", rollout_id)
-        shards = self.train_data_dp_splitter.split_by_dp(data, self.train_parallel_config["dp_size"])
-        # Legacy 2D tiling: reorder so sample x timestep tiles are contiguous; the actor's
-        # plain contiguous schedule reproduces them.
+        dp_size = self.train_parallel_config["dp_size"]
+        # Legacy 2D compat: strided DP split + tile reorder reproduce the legacy
+        # tiles bit-for-bit; otherwise the native 1D contiguous split.
         if self.args.micro_batch_size_sample is not None:
+            shards = self.train_data_dp_splitter.split_by_dp(data, dp_size, mode="baseline_stride")
             shards = [
                 {
                     **shard,
@@ -170,6 +171,8 @@ class RolloutManager:
                 }
                 for shard in shards
             ]
+        else:
+            shards = self.train_data_dp_splitter.split_by_dp(data, dp_size)
         return [Box(ray.put(shard)) for shard in shards]
 
     def eval(self, rollout_id):
