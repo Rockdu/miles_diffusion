@@ -400,23 +400,17 @@ class FSDPTrainRayActor(TrainRayActor):
         forward_dtype = self._forward_dtype
         train_pipeline_config = self.train_pipeline_config
         bsz = len(batch)
-        latents_microbatch = torch.stack([batch[i]["latent"] for i in range(bsz)]).to(
-            device=device, dtype=torch.float32
-        )
-        next_latents_microbatch = torch.stack([batch[i]["next_latent"] for i in range(bsz)]).to(
-            device=device, dtype=torch.float32
-        )
-        timesteps_microbatch = (
-            torch.stack([batch[i]["timestep"] for i in range(bsz)]).to(device=device, dtype=torch.float32).reshape(bsz)
-        )
-        log_prob_old_microbatch = (
-            torch.stack([batch[i]["log_prob_old"] for i in range(bsz)])
-            .to(device=device, dtype=torch.float32)
-            .reshape(bsz)
-        )
+
+        def _stack(key):
+            return torch.stack([pair[key] for pair in batch]).to(device=device, dtype=torch.float32)
+
+        latents_microbatch = _stack("latent")
+        next_latents_microbatch = _stack("next_latent")
+        timesteps_microbatch = _stack("timestep").reshape(bsz)
+        log_prob_old_microbatch = _stack("log_prob_old").reshape(bsz)
 
         advantage = torch.tensor(
-            [float(batch[i]["advantage"]) for i in range(bsz)],
+            [float(pair["advantage"]) for pair in batch],
             device=device,
             dtype=torch.float32,
         )
