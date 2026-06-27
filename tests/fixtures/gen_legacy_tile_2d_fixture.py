@@ -1,19 +1,15 @@
-"""Generate the golden fixture of REAL legacy 2D-tile groupings across many
-(sample_microbatch, tstep_microbatch, iter_order, window-shape) combinations.
+"""Golden fixture for build_tiled_microbatch_schedule -> legacy_tile_2d_grouping.json.
 
-For each config it executes the **verbatim** legacy ``_run_optim_window`` from
-``origin/main`` (radixark/miles_diffusion) over a single optimizer window of
-``M`` samples x ``T`` SDE timesteps -- ``_forward_tile`` is replaced by a recorder
-and ``debug_skip_optimizer_step`` is set, so only the genuine chunk/tile iteration
-runs -- and records each tile's ``(sample_pos, tstep_pos)`` cells in order.
+Distinct from gen_legacy_tile_fixture: this cross-checks the 2D tiling function alone,
+over a single optimizer window, across many (sample_mb, tstep_mb, iter_order, M, T)
+configs -- crucially the NON-degenerate ones a 1D micro_batch_size cannot express
+(SD3 tstep_mb=5 < T=10, timestep_major, ragged, single-cell, whole-window). It does NOT
+exercise any DP split -- that axis is the 1D fixture's job. Replayed cell-for-cell by
+test_tiled_microbatch_schedule.py.
 
-``tests/fast/utils/test_tiled_microbatch_schedule.py`` replays each case through
-the refactored ``build_tiled_microbatch_schedule`` and asserts cell-for-cell
-equality, so the rollout-side 2D grouping is cross-checked against the real
-legacy tiling for tstep_mb<T, tstep_mb==T, tstep_mb==1, timestep_major, ragged
-sample/timestep chunks, single-cell and whole-window cases.
-
-Regenerate:  python tests/fixtures/gen_legacy_tile_2d_fixture.py
+Each config executes origin/main _run_optim_window verbatim (_forward_tile -> recorder,
+debug_skip_optimizer_step) over M samples x T sde-steps.
+Regenerate: python tests/fixtures/gen_legacy_tile_2d_fixture.py
 """
 
 from __future__ import annotations

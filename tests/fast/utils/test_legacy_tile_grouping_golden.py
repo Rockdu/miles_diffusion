@@ -1,26 +1,12 @@
-"""Golden CI: the refactored compat-mode group-batch reproduces REAL legacy tiles.
+"""Golden CI: baseline_stride + 1D schedule reproduce the REAL legacy OCR tiles.
 
-``tests/fixtures/legacy_ocr_tile_grouping.json`` holds the genuine tile
-membership of the legacy ``TrainRayActor`` grid-tiling path, captured by running
-``origin/main``'s ``_run_optim_window`` verbatim with the 2-GPU OCR baseline
-config (see ``tests/fixtures/gen_legacy_tile_fixture.py`` for provenance).
-
-This test feeds the *same* rollout (flat sample-major train pairs carrying their
-real ``(sample_index, sde_step)`` identity) through the refactored compat
-pipeline:
-
-    TrainDataDPSplitter(mode="baseline_stride")   # == legacy range(rank, N, dp)
-        -> build_microbatch_schedule(...)          # contiguous micro-batches
-
-and asserts every recorded legacy tile is reproduced cell-for-cell, in order, by
-the corresponding refactored micro-batch — i.e. the new group-batch is bit-exact
-compatible with the old grid-tile grouping when the parity knob is on.
-
-Pure-tensor, CPU-only, no model forward (so it is immune to the bf16
-attention-backward non-determinism that makes end-to-end comparison unreliable).
-
-Run:  python -m pytest tests/test_legacy_tile_grouping_golden.py -q
-      python tests/test_legacy_tile_grouping_golden.py
+The distinctive axis here is the DP split: this replays the one real 2-GPU OCR config
+(legacy_ocr_tile_grouping.json, see gen_legacy_tile_fixture.py) through
+TrainDataDPSplitter("baseline_stride")  # == legacy range(rank, N, dp)
+    -> build_microbatch_schedule(...)    # contiguous micro-batches
+and asserts every legacy tile is reproduced cell-for-cell. The 2D tiling function is
+covered separately by test_tiled_microbatch_schedule.py (no DP split there).
+Pure-tensor CPU, no model forward (immune to bf16 backward non-determinism).
 """
 
 from __future__ import annotations

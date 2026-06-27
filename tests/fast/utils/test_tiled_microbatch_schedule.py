@@ -1,11 +1,10 @@
 """Cross-check build_tiled_microbatch_schedule against REAL legacy 2D tiles.
 
-tests/fixtures/legacy_tile_2d_grouping.json holds the genuine tile membership of
-TrainRayActor._run_optim_window for many (sample_microbatch x tstep_microbatch x
-iter_order x M x T) configs (captured by running origin/main's _run_optim_window
-verbatim -- see tests/fixtures/gen_legacy_tile_2d_fixture.py). This replays each
-config through the refactored build_tiled_microbatch_schedule and asserts every
-tile is reproduced cell-for-cell. Pure-CPU, no model.
+Distinct from test_legacy_tile_grouping_golden.py (which adds the DP split): this replays
+many (sample_mb x tstep_mb x iter_order x M x T) configs from legacy_tile_2d_grouping.json
+-- including non-degenerate tilings a 1D micro_batch_size cannot express -- through the
+refactored build_tiled_microbatch_schedule and asserts cell-for-cell equality. No DP
+split, no model; pure CPU. See gen_legacy_tile_2d_fixture.py for provenance.
 """
 
 from tests.ci.ci_register import register_cpu_ci

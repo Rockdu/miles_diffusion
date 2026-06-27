@@ -1,42 +1,17 @@
-"""Generate the golden fixture of REAL legacy-tile group-batch data.
+"""Golden fixture for the REAL 2-GPU OCR pipeline -> legacy_ocr_tile_grouping.json.
 
-This runs the **verbatim** legacy ``TrainRayActor`` grouping path from the
-upstream baseline (``origin/main`` == radixark/miles_diffusion @ a48476c) and
-records, for a handful of representative tiles, the exact ``(sample_index,
-sde_step)`` cells each legacy tile consumes, in order.  The committed JSON it
-emits (``legacy_ocr_tile_grouping.json``) is the golden reference that
-``tests/test_legacy_tile_grouping_golden.py`` replays against the refactored
-compat-mode pipeline (``TrainDataDPSplitter(mode="baseline_stride")`` +
-``build_microbatch_schedule``).
+Distinct from gen_legacy_tile_2d_fixture: this is the ONLY golden that exercises the DP
+split. It runs the full legacy dispatch end-to-end -- baseline_stride rank partition
+(range(rank, N, dp)) + per-optim-step slice + tiling -- for the one real OCR config
+(512 samples, dp=2, window=2, sample_mb=4, tstep_mb=2), replayed by
+test_legacy_tile_grouping_golden.py via TrainDataDPSplitter("baseline_stride") +
+build_microbatch_schedule (the 1D path). The 2D fixture instead cross-checks the
+build_tiled_microbatch_schedule function across tiling shapes but never splits by rank.
 
-How "real" is this:  the tile membership is produced by *executing the actual
-legacy ``_run_optim_window`` source pulled from ``origin/main``* (not a
-re-implementation) — ``_forward_tile`` is replaced by a recorder, and
-``debug_skip_optimizer_step`` is set so no model/scaler is needed, so the only
-thing that runs is the genuine legacy chunk/tile iteration.  The DP stride split
-and the per-optim-step slice are reproduced verbatim from the cited lines.
-
-Provenance (origin/main @ a48476c):
-  - DP stride            miles/ray/rollout.py:433
-        partitions = [range(i, num_samples, dp_size) for i in range(dp_size)]
-  - optim-step slice     miles/backends/fsdp_utils/actor.py:_train_core
-        num_samples_per_optim_step = num_rollout_samples // num_optim_steps_per_rollout
-        traj_start = step_id * num_samples_per_optim_step
-  - tile iteration       miles/backends/fsdp_utils/actor.py:_run_optim_window (537)  [executed live]
-  - cell order in tile   miles/backends/fsdp_utils/actor.py:_forward_tile (593)
-        latents_tile = grids["latents"][sample_indices][:, tstep_indices]
-        latents_flat = latents_tile.reshape(n_s * n_t, ...)   # sample-major (s outer, t inner)
-  - _chunked_indices     miles/backends/fsdp_utils/actor.py:774   [embedded verbatim below]
-
-Real 2-GPU OCR baseline config (origin/main
-  scripts/run-diffusion-grpo-ocr-2gpu-flowgrpo-aligned.sh):
-    --rollout-batch-size 32   --diffusion-microgroup-size 16   -> 512 samples/rollout
-    --num-steps-per-rollout 2   --diffusion-sde-window-size 2
-    --diffusion-sde-window-range 3,5     -> effective sde indices [3, 4]
-    --micro-batch-size-sample 4   --micro-batch-size-tstep 2
-    --diffusion-train-iter-order sample_major   (dp_size = 2 train GPUs)
-
-Regenerate:  python tests/fixtures/gen_legacy_tile_fixture.py
+Tiles come from executing origin/main (a48476c) _run_optim_window verbatim (_forward_tile
+-> recorder, debug_skip_optimizer_step set); DP stride (rollout.py:433) and optim-step
+slice reproduced from the same source.
+Regenerate: python tests/fixtures/gen_legacy_tile_fixture.py
 """
 
 from __future__ import annotations
