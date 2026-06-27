@@ -318,15 +318,13 @@ class FSDPTrainRayActor(TrainRayActor):
         self.scheduler._step_index = None
         self.scheduler._begin_index = None
 
-        # ------------- Optimizer Windows -------------
+        # ------------- Micro-batch schedule -------------
         num_optim_steps_per_rollout = self.args.num_steps_per_rollout
         if num_pairs % num_optim_steps_per_rollout != 0:
             raise ValueError(
                 f"num_pairs_shard={num_pairs} not divisible by " f"num_steps_per_rollout={num_optim_steps_per_rollout}"
             )
         num_pairs_per_optim_step = num_pairs // num_optim_steps_per_rollout
-
-        # ------------- Microbatch Synchronization -------------
         micro_bs = self.args.micro_batch_size
         if micro_bs <= 0:
             raise ValueError(f"micro_batch_size must be positive, got {micro_bs}")

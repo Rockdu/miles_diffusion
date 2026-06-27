@@ -1,6 +1,6 @@
 """Strong, deterministic parity tests for the refactored train-data grouping.
 
-These pin the refactored组batch (group-batch) pipeline against the *legacy*
+These pin the refactored group-batch pipeline against the *legacy*
 TrainRayActor grouping at the **data-assembly layer** (everything before the DiT
 forward). They are pure-tensor, CPU-only, and bit-exact — deliberately avoiding
 any model forward/backward so they are NOT polluted by the bf16 attention-backward
