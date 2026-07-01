@@ -73,3 +73,17 @@ debug-cu13:
 
     docker build -f docker/Dockerfile . --build-arg SGLANG_IMAGE_TAG={{SGLANG_IMAGE_TAG_CU13}} --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t radixark/miles-diffusion-test:$IMAGE_TAG
     docker push radixark/miles-diffusion-test:$IMAGE_TAG
+
+# CU13 release: build + push to the primary namespace under the cu130 version
+# tag. Deliberately does NOT tag `latest` — cu129 stays `latest` until CU13 is
+# fully validated (bump the tag here, or add `latest` once CU13 is promoted).
+release-cu13:
+    #!/bin/bash
+    set -euxo pipefail
+    cd ..
+
+    VERSION="$(cat docker/version-cu13.txt | tr -d '\n')"
+    IMAGE_TAG=${VERSION}
+
+    docker build -f docker/Dockerfile . --build-arg SGLANG_IMAGE_TAG={{SGLANG_IMAGE_TAG_CU13}} --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t radixark/miles-diffusion:$IMAGE_TAG
+    docker push radixark/miles-diffusion:$IMAGE_TAG

@@ -25,9 +25,15 @@ cu130 build via `--build-arg SGLANG_IMAGE_TAG` (default stays `v0.5.12-cu129`, s
 string lives in `docker/version-cu13.txt`.
 
 ```bash
-just build-local-cu13   # local build, no push  -> radixark/miles-diffusion:<cu13-version>-local
-just debug-cu13         # build + push to the -test namespace (experimental, shareable)
+just build-local-cu13   # local build, no push   -> radixark/miles-diffusion:<cu13-version>-local
+just debug-cu13         # build + push to -test   -> radixark/miles-diffusion-test:<cu13-version>
+just release-cu13       # build + push to primary -> radixark/miles-diffusion:<cu13-version> (no `latest`)
 ```
+
+`release-cu13` publishes under the cu130 version tag but deliberately does **not**
+move `latest` — `release-primary` (cu129) still owns `latest` until CU13 is
+promoted. (The eventual promotion mirrors `radixark/miles`, which already ships
+CU13 as the default and keeps CU12 as a `-cu12`-postfixed variant.)
 
 **Running the cu130 image** (2-GPU Qwen-Image OCR GRPO) needs, in addition to the
 cu129 requirements (`--cap-add=SYS_PTRACE --security-opt seccomp=unconfined` for
