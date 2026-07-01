@@ -11,46 +11,6 @@ just build-local
 Builds `radixark/miles-diffusion:<version>-local` locally without pushing.
 (`<version>` is read from `docker/version.txt`.)
 
-## Experimental CUDA 13 (cu130)
-
-> ⚠️ **Preliminary.** The CU13 image builds and boots the full RL runtime
-> (SGLang diffusion engine, model load, FSDP + LoRA weight sync, NCCL). It has
-> only been **partially validated at runtime** — a colocate Qwen-Image OCR GRPO
-> run reaches training steps end-to-end — so treat it as experimental until a
-> longer soak.
-
-Same `docker/Dockerfile`; the only change is the sglang base image, swapped to a
-cu130 build via `--build-arg SGLANG_IMAGE_TAG` (default stays `v0.5.12-cu129`, so
-`release-primary` is unaffected). Base: `lmsysorg/sglang:v0.5.14-cu130`. Version
-string lives in `docker/version-cu13.txt`.
-
-`cu13` is a `variant` argument on the existing recipes (default `cu12`):
-
-```bash
-just build-local cu13      # local build, no push   -> radixark/miles-diffusion:<cu13-version>-cu13-local
-just debug cu13            # build + push to -test   -> radixark/miles-diffusion-test:<cu13-version>-cu13
-just release-primary cu13  # build + push to primary -> radixark/miles-diffusion:<cu13-version>-cu13
-```
-
-The `cu13` variant reads `docker/version-cu13.txt`, swaps the sglang base to
-cu130, tags with a `-cu13` postfix, and deliberately does **not** move `latest` —
-the default `cu12` variant (cu129) still owns `latest` until CU13 is promoted.
-(The eventual promotion mirrors `radixark/miles`, which already ships CU13 as the
-default and keeps CU12 as a postfixed variant.)
-
-**Running the cu130 image** (2-GPU Qwen-Image OCR GRPO) needs, in addition to the
-cu129 requirements (`--cap-add=SYS_PTRACE --security-opt seccomp=unconfined` for
-colocate CUDA-IPC weight sync), a larger `/dev/shm` — the cu130 base ships NCCL
-2.28.9, whose shared-memory transport exhausts docker's default 64 MB:
-
-```bash
-docker run --rm --shm-size=32g --gpus '"device=<A>,<B>"' \
-  --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
-  -e CUDA_VISIBLE_DEVICES=0,1 \
-  radixark/miles-diffusion:<cu13-version>-local \
-  bash -lc 'cd /root/miles_diffusion && bash scripts/run-diffusion-grpo-ocr-2gpu-flowgrpo-aligned.sh'
-```
-
 ## Release rule
 
 _TBD._
