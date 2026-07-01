@@ -99,11 +99,10 @@ def parse_fsdp_cli(extra_args_provider=None):
 # a custom attention kernel that is not listed here runs a nondeterministic
 # backward *silently* under deterministic mode.
 #
-#   native / _native_* (torch SDPA) : its deterministic backward needs
-#                                      warn_only=False; under the warn_only=True we
-#                                      use, torch WARNS and stays nondeterministic
-#                                      (loud, not silent — acceptable). See actor
-#                                      _enable_deterministic_training.
+#   native / _native_* (torch SDPA) : deterministic backward via torch's global flag
+#                                      — but only with warn_only=False (see actor
+#                                      _enable_deterministic_training and aten
+#                                      attention_backward.cu). Nothing else to do.
 #   flash* / _flash_3* (flash-attn) : flash-attn's per-call `deterministic=` is NOT
 #                                      reached by torch's global flag and diffusers
 #                                      never forwards it -> we monkey-patch it on.

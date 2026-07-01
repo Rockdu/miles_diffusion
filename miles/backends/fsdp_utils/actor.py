@@ -44,13 +44,14 @@ def _enable_deterministic_training(args: Namespace) -> None:
     # deterministic cuDNN algorithms; no need to disable cuDNN outright.
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    # warn_only=True to keep training runnable — ops lacking a deterministic impl
-    # warn instead of crashing. Trade-off: the SDPA (native) backward only switches
-    # to its deterministic path under warn_only=False (deterministicAlgorithms() &&
-    # !warnOnly; see aten attention_backward.cu), so here it only warns and stays
-    # nondeterministic. Under this mode only the flash backend (patched below) is
-    # guaranteed deterministic.
-    torch.use_deterministic_algorithms(True, warn_only=True)
+    # warn_only=False is required, not just stricter: the SDPA (native) backward
+    # only takes its deterministic path when deterministicAlgorithms() && !warnOnly
+    # (see aten attention_backward.cu) — with warn_only=True it silently keeps the
+    # fast nondeterministic kernel. So warn_only=True would make this mode a no-op on
+    # any SDPA/native backend. The cost is that a truly nondeterministic op raises
+    # instead of warning; validated on Qwen-Image (B200) that real training does not
+    # hit one, and that two 4-step runs are then bit-identical (metrics + weights).
+    torch.use_deterministic_algorithms(True, warn_only=False)
 
     # flash-attn is a separate CUDA extension (not torch SDPA), so torch's flag
     # can't reach it and diffusers neither forwards deterministic= nor reads
