@@ -24,18 +24,17 @@ cu130 build via `--build-arg SGLANG_IMAGE_TAG` (default stays `v0.5.12-cu129`, s
 `release-primary` is unaffected). Base: `lmsysorg/sglang:v0.5.14-cu130`. Version
 string lives in `docker/version-cu13.txt`.
 
-`cu13` is a `variant` argument on the existing recipes (default `cu12`):
-
 ```bash
-just build-local cu13      # local build, no push   -> radixark/miles-diffusion:<cu13-version>-local
-just debug cu13            # build + push to -test   -> radixark/miles-diffusion-test:<cu13-version>
-just release-primary cu13  # build + push to primary -> radixark/miles-diffusion:<cu13-version> (no `latest`)
+just build-local-cu13      # local build, no push   -> radixark/miles-diffusion:<cu13-version>-local
+just debug-cu13            # build + push to -test   -> radixark/miles-diffusion-test:<cu13-version>
+just release-primary cu13  # build + push to primary -> radixark/miles-diffusion:<cu13-version>-cu13 (no `latest`)
 ```
 
-The `cu13` variant publishes under the cu130 version tag but deliberately does
-**not** move `latest` — the default `cu12` variant (cu129) still owns `latest`
-until CU13 is promoted. (The eventual promotion mirrors `radixark/miles`, which
-already ships CU13 as the default and keeps CU12 as a postfixed variant.)
+The release path is a `cu13` variant of `release-primary` (default `cu12`); it
+publishes under the cu130 version tag with a `-cu13` postfix and deliberately
+does **not** move `latest` — the default `cu12` variant (cu129) still owns
+`latest` until CU13 is promoted. (The eventual promotion mirrors `radixark/miles`,
+which already ships CU13 as the default and keeps CU12 as a postfixed variant.)
 
 **Running the cu130 image** (2-GPU Qwen-Image OCR GRPO) needs, in addition to the
 cu129 requirements (`--cap-add=SYS_PTRACE --security-opt seccomp=unconfined` for

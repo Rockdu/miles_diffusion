@@ -1,19 +1,14 @@
-# CUDA variant selector shared by the build recipes below.
-#   cu12 (default) — cu129 base, reads docker/version.txt, tags `latest`.
-#   cu13           — swaps the sglang base to cu130 via SGLANG_IMAGE_TAG, reads
-#                    docker/version-cu13.txt, tags with a `-cu13` postfix and
-#                    does NOT move `latest` (still experimental; promote later).
 SGLANG_IMAGE_TAG_CU13 := "v0.5.14-cu130"
 
+# release-primary [variant]: cu12 (default) reproduces the original behaviour;
+# cu13 swaps the sglang base to cu130 and tags with a `-cu13` postfix (no `latest`).
 release-primary variant="cu12":
     #!/bin/bash
-    set -euo pipefail
-    case "{{variant}}" in
-      cu12) POSTFIX="";      EXTRA="";                                                       VFILE="docker/version.txt" ;;
-      cu13) POSTFIX="-cu13"; EXTRA="--build-arg SGLANG_IMAGE_TAG={{SGLANG_IMAGE_TAG_CU13}}"; VFILE="docker/version-cu13.txt" ;;
-      *) echo "unknown variant: {{variant}} (use cu12|cu13)"; exit 1 ;;
-    esac
-    ARG_TAG_POSTFIX="$POSTFIX" ARG_BUILD_EXTRA_ARGS="$EXTRA" ARG_VERSION_FILE="$VFILE" just _release-raw
+    if [ "{{variant}}" = "cu13" ]; then
+        ARG_TAG_POSTFIX="-cu13" ARG_BUILD_EXTRA_ARGS="--build-arg SGLANG_IMAGE_TAG={{SGLANG_IMAGE_TAG_CU13}}" ARG_VERSION_FILE="docker/version-cu13.txt" just _release-raw
+    else
+        ARG_TAG_POSTFIX="" ARG_BUILD_EXTRA_ARGS="" just _release-raw
+    fi
 
 _release-raw:
     #!/bin/bash
@@ -26,46 +21,59 @@ _release-raw:
     docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" $ARG_BUILD_EXTRA_ARGS -t radixark/miles-diffusion:$IMAGE_TAG
     docker push radixark/miles-diffusion:$IMAGE_TAG
 
-    # Only the default (empty-postfix) variant owns `latest`.
     if [ -z "${ARG_TAG_POSTFIX}" ]; then
         docker tag radixark/miles-diffusion:$IMAGE_TAG radixark/miles-diffusion:latest
         docker push radixark/miles-diffusion:latest
     fi
 
-debug variant="cu12":
+debug:
     #!/bin/bash
     set -euxo pipefail
     cd ..
 
-    case "{{variant}}" in
-      cu12) EXTRA="";                                                       VFILE="docker/version.txt";      TAG_LATEST=1 ;;
-      cu13) EXTRA="--build-arg SGLANG_IMAGE_TAG={{SGLANG_IMAGE_TAG_CU13}}"; VFILE="docker/version-cu13.txt"; TAG_LATEST=0 ;;
-      *) echo "unknown variant: {{variant}} (use cu12|cu13)"; exit 1 ;;
-    esac
-    VERSION="$(cat $VFILE | tr -d '\n')"
+    VERSION="$(cat docker/version.txt | tr -d '\n')"
     IMAGE_TAG=${VERSION}
 
-    docker build -f docker/Dockerfile . $EXTRA --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t radixark/miles-diffusion-test:$IMAGE_TAG
+    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t radixark/miles-diffusion-test:$IMAGE_TAG
     docker push radixark/miles-diffusion-test:$IMAGE_TAG
 
-    if [ "$TAG_LATEST" = 1 ]; then
-        docker tag radixark/miles-diffusion-test:$IMAGE_TAG radixark/miles-diffusion-test:latest
-        docker push radixark/miles-diffusion-test:latest
-    fi
+    docker tag radixark/miles-diffusion-test:$IMAGE_TAG radixark/miles-diffusion-test:latest
+    docker push radixark/miles-diffusion-test:latest
 
 # Local build only (no push), tag suffixed with -local. Not present in the
 # radixark/miles justfile; kept for diffusion local iteration.
-build-local variant="cu12":
+build-local:
     #!/bin/bash
     set -euxo pipefail
     cd ..
 
-    case "{{variant}}" in
-      cu12) EXTRA="";                                                       VFILE="docker/version.txt" ;;
-      cu13) EXTRA="--build-arg SGLANG_IMAGE_TAG={{SGLANG_IMAGE_TAG_CU13}}"; VFILE="docker/version-cu13.txt" ;;
-      *) echo "unknown variant: {{variant}} (use cu12|cu13)"; exit 1 ;;
-    esac
-    VERSION="$(cat $VFILE | tr -d '\n')"
+    VERSION="$(cat docker/version.txt | tr -d '\n')"
     IMAGE_TAG="${VERSION}-local"
 
-    docker build -f docker/Dockerfile . $EXTRA --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t radixark/miles-diffusion:$IMAGE_TAG
+    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t radixark/miles-diffusion:$IMAGE_TAG
+
+# ============================== Experimental CUDA 13 (cu130) ==============================
+# cu130 local/test builds. The release path is `just release-primary cu13`.
+
+# Local CU13 build only (no push), tag suffixed with -local.
+build-local-cu13:
+    #!/bin/bash
+    set -euxo pipefail
+    cd ..
+
+    VERSION="$(cat docker/version-cu13.txt | tr -d '\n')"
+    IMAGE_TAG="${VERSION}-local"
+
+    docker build -f docker/Dockerfile . --build-arg SGLANG_IMAGE_TAG={{SGLANG_IMAGE_TAG_CU13}} --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t radixark/miles-diffusion:$IMAGE_TAG
+
+# CU13 build + push to the -test namespace (experimental, shareable).
+debug-cu13:
+    #!/bin/bash
+    set -euxo pipefail
+    cd ..
+
+    VERSION="$(cat docker/version-cu13.txt | tr -d '\n')"
+    IMAGE_TAG=${VERSION}
+
+    docker build -f docker/Dockerfile . --build-arg SGLANG_IMAGE_TAG={{SGLANG_IMAGE_TAG_CU13}} --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t radixark/miles-diffusion-test:$IMAGE_TAG
+    docker push radixark/miles-diffusion-test:$IMAGE_TAG
