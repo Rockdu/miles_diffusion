@@ -1,7 +1,10 @@
 SGLANG_IMAGE_TAG_CU13 := "v0.5.14-cu130"
 
-# release-primary [variant]: cu12 (default) reproduces the original behaviour;
-# cu13 swaps the sglang base to cu130 and tags with a `-cu13` postfix (no `latest`).
+# The recipes below take a `variant` arg (default `cu12`):
+#   cu12 — original behaviour: cu129 base, reads docker/version.txt, owns `latest`.
+#   cu13 — cu130 base via SGLANG_IMAGE_TAG, reads docker/version-cu13.txt,
+#          `-cu13` tag postfix, and does NOT move `latest` (still experimental).
+
 release-primary variant="cu12":
     #!/bin/bash
     if [ "{{variant}}" = "cu13" ]; then
@@ -26,54 +29,40 @@ _release-raw:
         docker push radixark/miles-diffusion:latest
     fi
 
-debug:
+debug variant="cu12":
     #!/bin/bash
     set -euxo pipefail
     cd ..
 
-    VERSION="$(cat docker/version.txt | tr -d '\n')"
-    IMAGE_TAG=${VERSION}
+    if [ "{{variant}}" = "cu13" ]; then
+        EXTRA="--build-arg SGLANG_IMAGE_TAG={{SGLANG_IMAGE_TAG_CU13}}"; VFILE="docker/version-cu13.txt"; POSTFIX="-cu13"
+    else
+        EXTRA=""; VFILE="docker/version.txt"; POSTFIX=""
+    fi
+    VERSION="$(cat $VFILE | tr -d '\n')"
+    IMAGE_TAG=${VERSION}${POSTFIX}
 
-    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t radixark/miles-diffusion-test:$IMAGE_TAG
+    docker build -f docker/Dockerfile . $EXTRA --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t radixark/miles-diffusion-test:$IMAGE_TAG
     docker push radixark/miles-diffusion-test:$IMAGE_TAG
 
-    docker tag radixark/miles-diffusion-test:$IMAGE_TAG radixark/miles-diffusion-test:latest
-    docker push radixark/miles-diffusion-test:latest
+    if [ -z "$POSTFIX" ]; then
+        docker tag radixark/miles-diffusion-test:$IMAGE_TAG radixark/miles-diffusion-test:latest
+        docker push radixark/miles-diffusion-test:latest
+    fi
 
 # Local build only (no push), tag suffixed with -local. Not present in the
 # radixark/miles justfile; kept for diffusion local iteration.
-build-local:
+build-local variant="cu12":
     #!/bin/bash
     set -euxo pipefail
     cd ..
 
-    VERSION="$(cat docker/version.txt | tr -d '\n')"
-    IMAGE_TAG="${VERSION}-local"
+    if [ "{{variant}}" = "cu13" ]; then
+        EXTRA="--build-arg SGLANG_IMAGE_TAG={{SGLANG_IMAGE_TAG_CU13}}"; VFILE="docker/version-cu13.txt"; POSTFIX="-cu13"
+    else
+        EXTRA=""; VFILE="docker/version.txt"; POSTFIX=""
+    fi
+    VERSION="$(cat $VFILE | tr -d '\n')"
+    IMAGE_TAG="${VERSION}${POSTFIX}-local"
 
-    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t radixark/miles-diffusion:$IMAGE_TAG
-
-# ============================== Experimental CUDA 13 (cu130) ==============================
-# cu130 local/test builds. The release path is `just release-primary cu13`.
-
-# Local CU13 build only (no push), tag suffixed with -local.
-build-local-cu13:
-    #!/bin/bash
-    set -euxo pipefail
-    cd ..
-
-    VERSION="$(cat docker/version-cu13.txt | tr -d '\n')"
-    IMAGE_TAG="${VERSION}-local"
-
-    docker build -f docker/Dockerfile . --build-arg SGLANG_IMAGE_TAG={{SGLANG_IMAGE_TAG_CU13}} --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t radixark/miles-diffusion:$IMAGE_TAG
-
-# CU13 build + push to the -test namespace (experimental, shareable).
-debug-cu13:
-    #!/bin/bash
-    set -euxo pipefail
-    cd ..
-
-    VERSION="$(cat docker/version-cu13.txt | tr -d '\n')"
-    IMAGE_TAG=${VERSION}
-
-    docker build -f docker/Dockerfile . --build-arg SGLANG_IMAGE_TAG={{SGLANG_IMAGE_TAG_CU13}} --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t radixark/miles-diffusion-test:$IMAGE_TAG
-    docker push radixark/miles-diffusion-test:$IMAGE_TAG
+    docker build -f docker/Dockerfile . $EXTRA --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t radixark/miles-diffusion:$IMAGE_TAG
