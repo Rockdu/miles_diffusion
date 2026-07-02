@@ -33,42 +33,23 @@ logger = logging.getLogger(__name__)
 
 
 def _enable_deterministic_training(args: Namespace) -> None:
-    """Train-actor deterministic mode (mirrors VeOmni's enable_full_determinism).
-
-    NCCL_DETERMINISTIC / CUBLAS_WORKSPACE_CONFIG are injected at actor spawn (see
-    actor_group) because NCCL/cuBLAS read them before this runs. Here we set the
-    torch-runtime knobs plus the flash-attn kernel knob that torch's global flag
-    can't reach. validate_attention_args has already rejected backends we cannot
-    make deterministic; see it for the support matrix.
-    """
-    # deterministic cuDNN algorithms; no need to disable cuDNN outright.
+    """Train-actor deterministic mode. NCCL/CUBLAS env is set at spawn (actor_group);
+    here we set the torch-runtime knobs."""
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    # warn_only=False is required, not just stricter: the SDPA (native) backward
-    # only takes its deterministic path when deterministicAlgorithms() && !warnOnly
-    # (see aten attention_backward.cu) — with warn_only=True it silently keeps the
-    # fast nondeterministic kernel. So warn_only=True would make this mode a no-op on
-    # any SDPA/native backend. The cost is that a truly nondeterministic op raises
-    # instead of warning; validated on Qwen-Image (B200) that real training does not
-    # hit one, and that two 4-step runs are then bit-identical (metrics + weights).
+    # warn_only=False is required: SDPA's deterministic backward is gated on
+    # !warnOnly (aten attention_backward.cu), so warn_only=True is a no-op on native.
     torch.use_deterministic_algorithms(True, warn_only=False)
 
-    # flash-attn is a separate CUDA extension (not torch SDPA), so torch's flag
-    # can't reach it and diffusers neither forwards deterministic= nor reads
-    # FLASH_ATTENTION_DETERMINISTIC — we patch it on directly.
+    # flash-attn is a separate CUDA extension torch's flag can't reach; patch it on.
     backend = args.fsdp_attention_backend
     if backend is not None and "flash" in backend.lower():
         _enable_deterministic_flash_attention()
 
 
 def _enable_deterministic_flash_attention() -> None:
-    """Wrap diffusers' flash entry points so they run with deterministic=True.
-
-    diffusers never forwards deterministic to flash-attn, so we patch the module
-    globals it dispatches through. Only the backward differs, so the flash forward
-    (and train/rollout consistency) is unchanged. The set of patchable functions
-    is already validated up front by load_fsdp_args. Idempotent across re-inits.
-    """
+    """Patch diffusers' flash globals to run deterministic=True (backward only;
+    forward unchanged). Idempotent."""
     import diffusers.models.attention_dispatch as ad
 
     if getattr(ad, "_miles_deterministic_flash_patched", False):

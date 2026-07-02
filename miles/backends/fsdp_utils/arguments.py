@@ -53,11 +53,8 @@ class FSDPArgs:
         "gloo"  # CPU backend for FSDP CPU offload (e.g., "gloo"). Set to None to disable hybrid backend.
     )
 
-    # Train-actor deterministic mode. Turns on process-global torch determinism
-    # (use_deterministic_algorithms + cudnn.deterministic + CUBLAS_WORKSPACE_CONFIG)
-    # and, for attention backends torch's global flag can't reach, the per-backend
-    # knob (flash-attn's deterministic=). See validate_attention_args for the
-    # backend support matrix. Name kept identical to Megatron's.
+    # Train-actor deterministic mode; see validate_attention_args for the backend
+    # support matrix. Name kept identical to Megatron's.
     deterministic_mode: bool = False
 
     # Context Parallelism
@@ -93,25 +90,14 @@ def parse_fsdp_cli(extra_args_provider=None):
     return args
 
 
-# ---------------------------------------------------------------------------
-# Deterministic-mode attention support matrix. KEEP THIS IN SYNC when adding a
-# backend: torch.use_deterministic_algorithms only governs torch-native ops, so
-# a custom attention kernel that is not listed here runs a nondeterministic
-# backward *silently* under deterministic mode.
-#
-#   native / _native_* (torch SDPA) : deterministic backward via torch's global flag
-#                                      — but only with warn_only=False (see actor
-#                                      _enable_deterministic_training and aten
-#                                      attention_backward.cu). Nothing else to do.
-#   flash* / _flash_3* (flash-attn) : flash-attn's per-call `deterministic=` is NOT
-#                                      reached by torch's global flag and diffusers
-#                                      never forwards it -> we monkey-patch it on.
-#   sage* / xformers / flex / aiter : custom kernels opaque to torch's flag with no
-#                                      deterministic hook here -> refuse (validate).
-# ---------------------------------------------------------------------------
+# Deterministic-mode attention support matrix — KEEP IN SYNC. torch's flag only
+# governs torch-native ops, so an unlisted custom kernel runs nondeterministic
+# silently under deterministic mode.
+#   native / _native_*  (SDPA)      : torch's flag (needs warn_only=False)
+#   flash* / _flash_3*  (flash-attn): patch deterministic= on (flag can't reach it)
+#   sage / xformers / flex / aiter  : opaque to torch, no hook -> reject (validate)
 
-# diffusers' flash backends dispatch through these module globals; the FA3
-# custom op reads them at call time too.
+# diffusers dispatches flash through these module globals (FA3 op reads them too).
 _FLASH_ATTN_DISPATCH_FNS = (
     "flash_attn_func",
     "flash_attn_varlen_func",
