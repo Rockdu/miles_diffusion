@@ -19,7 +19,6 @@ from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.memory_utils import clear_memory, print_memory
 from miles.utils.metric_utils import compute_rollout_step
 from miles.utils.profile_utils import TrainProfiler
-from miles.utils.sde_log_prob import sde_step_with_logprob
 from miles.utils.timer import Timer, inverse_timer, timer
 from miles.utils.tracking_utils import init_tracking
 from miles.utils.train_data_utils import (
@@ -162,6 +161,13 @@ class FSDPTrainRayActor(TrainRayActor):
             self.model = next(iter(self.models.values()))
         else:
             self.model = torch.nn.ModuleDict(self.models)
+
+        from miles.utils.misc import load_function
+
+        sde_backend_path = args.sde_step_backend_path or (
+            "miles.backends.fsdp_utils.sde_step_backend.DiffusersSdeStepBackend"
+        )
+        self.sde_backend = load_function(sde_backend_path)(self.train_pipeline_config, self.scheduler)
 
         if args.optimizer == "adam":
             self.optimizer = torch.optim.AdamW(
@@ -602,8 +608,7 @@ class FSDPTrainRayActor(TrainRayActor):
 
         noise_pred_microbatch = _compute_noise_pred()
 
-        _, log_prob_new_microbatch, prev_sample_mean_new, std_dev_t_new = sde_step_with_logprob(
-            self.scheduler,
+        _, log_prob_new_microbatch, prev_sample_mean_new, std_dev_t_new = self.sde_backend.sde_step_logprob(
             noise_pred_microbatch.float(),
             timesteps_microbatch,
             latents_microbatch.float(),
@@ -625,8 +630,7 @@ class FSDPTrainRayActor(TrainRayActor):
             with torch.no_grad():
                 ref_noise_pred_microbatch = _compute_noise_pred(disable_adapter=True)
                 # TODO: unify sde_step_with_logprob with rollout and trainer forward paths.
-                _, _, prev_sample_mean_ref, _ = sde_step_with_logprob(
-                    self.scheduler,
+                _, _, prev_sample_mean_ref, _ = self.sde_backend.sde_step_logprob(
                     ref_noise_pred_microbatch.float(),
                     timesteps_microbatch,
                     latents_microbatch.float(),
