@@ -32,3 +32,4 @@ transformers==5.5.4
 typer==0.23.2
 uvicorn==0.39.0
 wandb==0.23.1
+ltx-core @ git+https://github.com/Lightricks/LTX-2.git@780984275fd47128b02bef9b5c085404276866ee#subdirectory=packages/ltx-core

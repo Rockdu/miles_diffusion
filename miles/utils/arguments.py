@@ -306,6 +306,18 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Number of diffusion inference steps for eval rollout. Defaults to diffusion-num-steps.",
             )
             parser.add_argument(
+                "--diffusion-fps",
+                type=float,
+                default=None,
+                help="Video fps for rollout; None for image models.",
+            )
+            parser.add_argument(
+                "--diffusion-sigma-min",
+                type=float,
+                default=None,
+                help="Override sigma_min for the rollout SDE step (flow_sde only).",
+            )
+            parser.add_argument(
                 "--diffusion-output-num-frames",
                 type=int,
                 default=1,
@@ -1132,6 +1144,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=str,
                 default=None,
                 help="Hugging Face processor path for PickScore. Required when --rm-type pickscore.",
+            )
+            parser.add_argument(
+                "--pickscore-num-frames",
+                type=int,
+                default=None,
+                help="Evenly spaced frames to score per video (None = every frame).",
             )
             parser.add_argument(
                 "--pickscore-model-path",

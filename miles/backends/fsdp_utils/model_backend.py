@@ -75,3 +75,36 @@ class DiffusersModelBackend(ModelBackend):
         scheduler = pipeline.scheduler
         del pipeline
         return raw_models, scheduler
+
+
+class LTXModelBackend(ModelBackend):
+    """Native LTX-2 loading via ltx_core; model instances stay unmodified."""
+
+    def load_models_and_scheduler(
+        self,
+        args,
+        *,
+        master_dtype: torch.dtype,
+    ) -> tuple[dict[str, torch.nn.Module], Any]:
+        from miles.backends.fsdp_utils.models.ltx2 import (
+            build_ltx_train_scheduler,
+            load_ltx_transformer_for_train,
+            resolve_transformer_checkpoint,
+        )
+
+        modules = list(args.update_weight_target_modules)
+        if modules != ["transformer"]:
+            raise ValueError(f"LTX trains the single DiT ('transformer'); got {modules}")
+        # TODO: meta-init on non-rank-0 before multi-node runs (每 rank 全量加载).
+        checkpoint = resolve_transformer_checkpoint(
+            str(args.diffusion_model),
+            explicit_path=getattr(args, "sglang_transformer_weights_path", None),
+        )
+        model = load_ltx_transformer_for_train(checkpoint, device="cpu", dtype=master_dtype)
+        return {"transformer": model}, build_ltx_train_scheduler(args)
+
+    def enable_gradient_checkpointing(self, model: torch.nn.Module) -> None:
+        model.set_gradient_checkpointing(True)
+
+    def fsdp_no_split_modules(self, model: torch.nn.Module) -> list[str]:
+        return ["BasicAVTransformerBlock"]

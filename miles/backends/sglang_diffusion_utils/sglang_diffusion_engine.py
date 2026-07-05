@@ -163,6 +163,13 @@ class SGLangDiffusionEngine(RayActor):
         patch_groups = []
         if getattr(self.args, "apply_sgld_monkey_patches", False):
             patch_groups.append("sgld")
+        cfg_path = getattr(self.args, "train_pipeline_config_path", None)
+        if cfg_path:
+            from miles.utils.misc import load_function
+
+            family_group = load_function(cfg_path).rollout_patch_group
+            if family_group:
+                patch_groups.append(family_group)
         if patch_groups:
             os.environ[ROLLOUT_PATCH_GROUPS_ENV] = ",".join(patch_groups)
             logger.info("Launching sglang-d with rollout patch groups: %s", patch_groups)

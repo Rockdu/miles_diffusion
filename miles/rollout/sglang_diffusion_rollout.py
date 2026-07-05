@@ -66,10 +66,28 @@ def build_rollout_sampling_params(
     if output_num_frames is not None:
         sampling_params["num_frames"] = int(output_num_frames)
 
+    if getattr(args, "diffusion_fps", None) is not None:
+        sampling_params["fps"] = int(args.diffusion_fps)
+
     guidance_scale_2 = getattr(args, "diffusion_guidance_scale_2", None)
     if guidance_scale_2 is not None:
         extra_sampling_params = dict(extra_sampling_params or {})
         extra_sampling_params["guidance_scale_2"] = float(guidance_scale_2)
+
+    cfg_path = getattr(args, "train_pipeline_config_path", None)
+    if cfg_path:
+        from miles.utils.misc import load_function
+
+        if not load_function(cfg_path).supports_cfg_training:
+            # Rollout must match the train side: no CFG, unguided single pass.
+            sampling_params["guidance_scale"] = 1.0
+            sampling_params["negative_prompt"] = None
+    if not evaluation:
+        # log_prob_no_const / sigma_min conventions are properties of the dynamics.
+        if args.diffusion_sde_type in ("cps", "ode"):
+            sampling_params["rollout_log_prob_no_const"] = True
+        elif args.diffusion_sde_type == "flow_sde" and getattr(args, "diffusion_sigma_min", None) is not None:
+            sampling_params["rollout_sigma_min"] = float(args.diffusion_sigma_min)
 
     if extra_sampling_params:
         sampling_params["extra_sampling_params"] = extra_sampling_params
@@ -85,8 +103,8 @@ def build_rollout_generate_payload(
 ) -> dict[str, Any]:
     """Build full JSON payload for ``POST /rollout/generate`` (``RolloutImageRequest``)."""
     sampling_params["prompt"] = prompt
-    if sampling_params["negative_prompt"] is None:
-        sampling_params["negative_prompt"] = " "  # FlowGRPO default
+    if sampling_params.get("negative_prompt") is None and float(sampling_params.get("guidance_scale", 1.0)) != 1.0:
+        sampling_params["negative_prompt"] = " "  # FlowGRPO default when CFG is on
     sampling_params["num_outputs_per_prompt"] = num_outputs_per_prompt
     return sampling_params
 
@@ -163,6 +181,9 @@ async def generate_microgroup(
             int(sampling_params["num_inference_steps"]),
             int(sampling_params["seed"]),
         )
+        # Keep return_step_indices None: sgl-d only filters trajectory latents by it, not
+        # log_probs, and the trainer needs the full trajectory for (x_i, x_{i+1}) pairs.
+        assert return_indices is None, "rollout_return_step_indices must be None for now"
         sampling_params["rollout_sde_step_indices"] = sde_indices
         sampling_params["rollout_return_step_indices"] = return_indices
     else:

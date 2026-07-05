@@ -21,11 +21,17 @@ def _feature_tensor(features):
     return features.pooler_output
 
 
-def _sample_to_rgb_hwc_uint8_frames(sample: Sample) -> list[np.ndarray]:
+def _sample_to_rgb_hwc_uint8_frames(sample: Sample, num_frames: int | None = None) -> list[np.ndarray]:
     clip_cfhw = sample.generated_output.detach().cpu()  # [C, F, H, W]
     needs_rescale = float(clip_cfhw.max()) <= 1.0 + 1e-3
+    total = clip_cfhw.shape[1]
+    if num_frames is not None and 0 < num_frames < total:
+        # Evenly spaced subset — long videos don't need every frame scored.
+        frame_indices = np.linspace(0, total - 1, num_frames).round().astype(int).tolist()
+    else:
+        frame_indices = range(total)
     frames = []
-    for frame_index in range(clip_cfhw.shape[1]):
+    for frame_index in frame_indices:
         hwc = clip_cfhw[:, frame_index, :, :].float().numpy().transpose(1, 2, 0)
         if needs_rescale:
             hwc = hwc * 255.0
@@ -157,7 +163,7 @@ async def pickscore_rm(args, samples: Sequence[Sample]) -> list[float]:
     prompts: list[str] = []
     frame_counts: list[int] = []
     for sample in samples:
-        frames = _sample_to_rgb_hwc_uint8_frames(sample)
+        frames = _sample_to_rgb_hwc_uint8_frames(sample, getattr(args, "pickscore_num_frames", None))
         images.extend(frames)
         prompts.extend([sample.prompt] * len(frames))
         frame_counts.append(len(frames))
