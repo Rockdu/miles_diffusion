@@ -46,6 +46,11 @@ def build_rollout_sampling_params(
         "guidance_scale": args.diffusion_guidance_scale,
         "true_cfg_scale": args.diffusion_true_cfg_scale,
     }
+    output_num_frames = getattr(args, "diffusion_output_num_frames", None)
+    if output_num_frames is not None:
+        sampling_params["num_frames"] = int(output_num_frames)
+    if getattr(args, "diffusion_fps", None) is not None:
+        sampling_params["fps"] = int(args.diffusion_fps)
 
     if evaluation:
         sampling_params["rollout"] = False
@@ -62,6 +67,20 @@ def build_rollout_sampling_params(
             }
         )
 
+    from miles.backends.fsdp_utils.configs.train_pipeline_config import get_train_pipeline_config_cls
+
+    family = getattr(args, "diffusion_model_family", None)
+    if family is not None and not get_train_pipeline_config_cls(family).supports_cfg_training:
+        # Rollout must match the train side: no CFG, unguided single pass.
+        sampling_params["guidance_scale"] = 1.0
+        sampling_params["negative_prompt"] = None
+    if not evaluation:
+        # log_prob_no_const / sigma_min conventions are properties of the dynamics.
+        if args.diffusion_sde_type in ("cps", "ode"):
+            sampling_params["rollout_log_prob_no_const"] = True
+        elif args.diffusion_sde_type == "flow_sde" and getattr(args, "diffusion_sigma_min", None) is not None:
+            sampling_params["rollout_sigma_min"] = float(args.diffusion_sigma_min)
+
     if extra_sampling_params:
         sampling_params["extra_sampling_params"] = extra_sampling_params
 
@@ -76,8 +95,8 @@ def build_rollout_generate_payload(
 ) -> dict[str, Any]:
     """Build full JSON payload for ``POST /rollout/generate`` (``RolloutImageRequest``)."""
     sampling_params["prompt"] = prompt
-    if sampling_params["negative_prompt"] is None:
-        sampling_params["negative_prompt"] = " "  # FlowGRPO default
+    if sampling_params.get("negative_prompt") is None and float(sampling_params.get("guidance_scale", 1.0)) != 1.0:
+        sampling_params["negative_prompt"] = " "  # FlowGRPO default when CFG is on
     sampling_params["num_outputs_per_prompt"] = num_outputs_per_prompt
     return sampling_params
 
@@ -102,6 +121,7 @@ class GenerateState(metaclass=SingletonMeta):
             scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=self.node_id, soft=False)
         ).remote()
 
+        self.rollout_id = 0
         self.reset()
 
     @contextmanager
@@ -120,6 +140,7 @@ class GenerateState(metaclass=SingletonMeta):
         self.remaining_batch_size = 0
         self.pendings = set()
         self.aborted = False
+        self.rollout_id = 0
 
     def submit_generate_tasks(self, samples: list[list[Sample]]) -> None:
         for group in samples:
@@ -153,6 +174,7 @@ async def generate_microgroup(
             microgroup[0],
             int(sampling_params["num_inference_steps"]),
             int(sampling_params["seed"]),
+            rollout_id=int(getattr(state, "rollout_id", 0) or 0),
         )
         sampling_params["rollout_sde_step_indices"] = sde_indices
         sampling_params["rollout_return_step_indices"] = return_indices
@@ -275,6 +297,7 @@ async def generate_rollout_async(
     assert args.rollout_global_dataset
 
     state = GenerateState(args)
+    state.rollout_id = int(rollout_id)
 
     # instantiate data filters
     dynamic_filter = (

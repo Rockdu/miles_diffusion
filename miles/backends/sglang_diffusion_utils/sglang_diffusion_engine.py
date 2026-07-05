@@ -15,6 +15,28 @@ from miles.utils.http_utils import get_host_info
 logger = logging.getLogger(__name__)
 
 
+def build_rollout_engine_env_vars(args) -> dict[str, str]:
+    """Env vars forwarded to Ray-spawned sglang-diffusion rollout engine workers."""
+    from miles.backends.fsdp_utils.configs.ltx import patch_rollout_engine_env_vars
+    from miles.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
+
+    env_vars = {name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST} | {
+        "SGL_JIT_DEEPGEMM_PRECOMPILE": "false",
+        "SGLANG_JIT_DEEPGEMM_PRECOMPILE": "false",
+        "SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK": "true",
+        "SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK": "true",
+        "SGLANG_MEMORY_SAVER_CUDA_GRAPH": "true",
+        "SGLANG_BATCH_INVARIANT_OPS_ENABLE_MM_FALLBACK_VARIANT": "true",
+        "SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION": "false",
+        "SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_IDLE": "false",
+    }
+    for passthrough in ("PYTHONPATH", "SGLANG_DIFFUSION_CACHE_ROOT", "HF_HOME", "TMPDIR"):
+        if os.environ.get(passthrough):
+            env_vars[passthrough] = os.environ[passthrough]
+    patch_rollout_engine_env_vars(env_vars, args)
+    return env_vars
+
+
 def _to_local_gpu_id(physical_gpu_id: int) -> int:
     cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
     if not cvd:
@@ -39,15 +61,23 @@ def _scheduler_process_with_sgld_monkey_patches(*args, **kwargs):
     # any monkey patches done in the middle child are gone. Apply them HERE,
     # before calling the real run_scheduler_process, so the DiT that's
     # constructed inside the grandchild sees the patched classes.
-    from miles.backends.sglang_diffusion_utils.monkey_patches import apply_sgld_monkey_patches
+    from miles.backends.sglang_diffusion_utils.monkey_patches import (
+        LTX_ROLLOUT_PATCHES_ENV,
+        apply_ltx2_rollout_patches,
+        apply_sgld_monkey_patches,
+    )
 
-    apply_sgld_monkey_patches()
+    if os.environ.get("MILES_APPLY_SGLD_MONKEY_PATCHES") == "1":
+        apply_sgld_monkey_patches()
+    if os.environ.get(LTX_ROLLOUT_PATCHES_ENV, "0") == "1":
+        apply_ltx2_rollout_patches()
+
     from sglang.multimodal_gen.runtime.managers.gpu_worker import run_scheduler_process
 
     return run_scheduler_process(*args, **kwargs)
 
 
-def _launch_server_target(server_args, apply_sgld_monkey_patches: bool = False):
+def _launch_server_target(server_args, apply_rollout_patches: bool = False):
     # addict.Dict used by SGL-D loses its `__frozen` instance attribute across spawn pickle.
     # Reconstruct a fresh one from the unpickled (broken) instance
     import addict
@@ -55,7 +85,7 @@ def _launch_server_target(server_args, apply_sgld_monkey_patches: bool = False):
     if server_args.attention_backend_config is not None:
         server_args.attention_backend_config = addict.Dict(server_args.attention_backend_config)
 
-    if apply_sgld_monkey_patches:
+    if apply_rollout_patches:
         # launch_server spawns its scheduler via mp.Process(target=run_scheduler_process).
         # Under spawn, target is pickled by qualname and re-imported in the grandchild,
         # so patching in THIS process doesn't help. Instead, rebind the name inside
@@ -73,14 +103,14 @@ def _launch_server_target(server_args, apply_sgld_monkey_patches: bool = False):
 
 def launch_server_process(
     server_args: ServerArgs,
-    apply_sgld_monkey_patches: bool = False,
+    apply_rollout_patches: bool = False,
 ) -> multiprocessing.Process:
     # use spawn to avoid potential risks of fork in terms of subthreads or CUDA.
     multiprocessing.set_start_method("spawn", force=True)
     server_args.host = server_args.host.strip("[]")
     p = multiprocessing.Process(
         target=_launch_server_target,
-        args=(server_args, apply_sgld_monkey_patches),
+        args=(server_args, apply_rollout_patches),
     )
     p.start()
 
@@ -157,12 +187,21 @@ class SGLangDiffusionEngine(RayActor):
     def _init_normal(self, server_args_dict):
         logger.info(f"Launch HttpServerEngineAdapter at: {self.server_host}:{self.server_port}")
         self._pin_to_assigned_gpu()
-        apply_sgld_monkey_patches = self.args.apply_sgld_monkey_patches
-        if apply_sgld_monkey_patches:
+        from miles.backends.fsdp_utils.configs.train_pipeline_config import get_train_pipeline_config_cls
+
+        apply_sgld = bool(getattr(self.args, "apply_sgld_monkey_patches", False))
+        family = getattr(self.args, "diffusion_model_family", None)
+        patch_env = get_train_pipeline_config_cls(family).rollout_patch_env if family else None
+        use_rollout_patches = apply_sgld or patch_env is not None
+        if apply_sgld:
+            os.environ["MILES_APPLY_SGLD_MONKEY_PATCHES"] = "1"
             logger.info("Launching sglang-d with sgl-d → diffusers monkey patches " "(--apply-sgld-monkey-patches)")
+        if patch_env:
+            os.environ[patch_env] = "1"
+            logger.info("Launching sglang-d with %s rollout monkey patches", family)
         self.process = launch_server_process(
             ServerArgs.from_kwargs(**server_args_dict),
-            apply_sgld_monkey_patches=apply_sgld_monkey_patches,
+            apply_rollout_patches=use_rollout_patches,
         )
 
         if self.node_rank == 0 and self.router_ip and self.router_port:
@@ -322,6 +361,7 @@ def _compute_server_args(args, host, port, nccl_port):
         # Force-skip warmup to prevent warmup timeout during RL rollouts.
         "warmup": False,
     }
+
 
     # Forward every `args.sglang_<field>` the user set via --sglang-* CLI for
     # ServerArgs fields not already hardcoded above. Picks up ulysses_degree /

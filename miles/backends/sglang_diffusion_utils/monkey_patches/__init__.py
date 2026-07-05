@@ -1,29 +1,45 @@
-"""sgl-d → diffusers numerical-parity monkey patches.
+"""sgl-d numerical-parity monkey patches for miles training alignment.
 
-Patches sgl-d's generic op classes (RMSNorm, LayerNormScaleShift, MulAdd,
-USPAttention, etc.) to match diffusers' bf16 cast/op order. Apply once at
-sglang-d scheduler startup so DiT forwards on the rollout side agree with
-diffusers-style training-side forwards down to bf16 ULPs.
+The engine parent sets the env flags below; the sglang scheduler grandchild
+re-reads them and calls the matching ``apply_*`` before model construction.
 
-Patches are at the op layer, not the model layer — they apply to every sgl-d
-DiT that uses these generic classes. Adding alignment for a new op = drop a
-new ``patch_<op>.py`` file and add it to ``apply_sgld_monkey_patches``.
+- ``sgld``: diffusers / SD3 op parity (RMSNorm, RoPE, attention, …).
+- ``ltx``:  LTX rollout cond kwargs + AV cross-off (video-only train parity).
+
+Patch modules are imported inside ``apply_*`` only so ``RolloutManager`` (a
+CPU-only Ray actor) can import this package without pulling sglang triton kernels.
 """
 
-from miles.backends.sglang_diffusion_utils.monkey_patches import (
-    patch_layernorm_scale_shift,
-    patch_mul_add,
-    patch_qk_norm_rope,
-    patch_rmsnorm,
-    patch_scale_residual_layernorm,
-    patch_usp_attention,
-)
+from __future__ import annotations
+
+# Propagated into Ray rollout workers (see miles/ray/rollout.py).
+LTX_ROLLOUT_PATCHES_ENV = "MILES_APPLY_LTX_ROLLOUT_PATCHES"
 
 
 def apply_sgld_monkey_patches() -> None:
+    from miles.backends.sglang_diffusion_utils.monkey_patches import (
+        patch_layernorm_scale_shift,
+        patch_mul_add,
+        patch_qk_norm_rope,
+        patch_rmsnorm,
+        patch_scale_residual_layernorm,
+        patch_usp_attention,
+    )
+
     patch_rmsnorm.apply()
     patch_layernorm_scale_shift.apply()
     patch_scale_residual_layernorm.apply()
     patch_mul_add.apply()
     patch_usp_attention.apply()
     patch_qk_norm_rope.apply()
+
+
+def apply_ltx2_rollout_patches() -> None:
+    """LTX rollout: cond kwargs + disable AV cross-attn (video-only train parity)."""
+    from miles.backends.sglang_diffusion_utils.monkey_patches import (
+        patch_ltx2_disable_av_cross,
+        patch_ltx2_rollout_cond_kwargs,
+    )
+
+    patch_ltx2_rollout_cond_kwargs.apply()
+    patch_ltx2_disable_av_cross.apply()

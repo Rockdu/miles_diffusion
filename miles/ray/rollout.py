@@ -6,13 +6,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import ray
 import torch
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from sglang.srt.constants import GPU_MEMORY_TYPE_WEIGHTS
 
-from miles.backends.sglang_diffusion_utils.sglang_diffusion_engine import SGLangDiffusionEngine
+from miles.backends.sglang_diffusion_utils.sglang_diffusion_engine import (
+    SGLangDiffusionEngine,
+    build_rollout_engine_env_vars,
+)
 from miles.rollout.base_types import call_rollout_fn
 from miles.utils import tracking_utils
 from miles.utils.health_monitor import RolloutHealthMonitor
@@ -26,7 +28,7 @@ from miles.utils.ray_utils import Box
 from miles.utils.tracking_utils import init_tracking
 from miles.utils.types import Sample
 
-from .utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, Lock
+from .utils import Lock
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -154,7 +156,6 @@ class RolloutManager:
 
     def eval(self, rollout_id):
         if self.args.debug_train_only:
-            # if debug train only, we don't generate evaluation data
             return
         self.health_monitoring_resume()
 
@@ -403,18 +404,18 @@ class RolloutManager:
         own namespace at least groups them in one UI section.
         """
         import wandb
+        from miles.rollout.rm_hub.pickscore import first_frame_for_wandb
 
         log_dict: dict = {}
         for media_key, samples in media_key_to_samples.items():
             images = []
             for s in samples[:max_images]:
                 t = s.generated_output
-                if t is None or t.ndim != 4:
+                if t is None:
                     continue
-                frame = t[:, 0, :, :].float().cpu().numpy().transpose(1, 2, 0)
-                if frame.max() <= 1.0 + 1e-3:
-                    frame = frame * 255.0
-                frame = np.clip(frame, 0, 255).astype(np.uint8)
+                frame = first_frame_for_wandb(t)
+                if frame is None:
+                    continue
                 reward = s.reward if not reward_key else (s.reward or {}).get(reward_key)
                 images.append(wandb.Image(frame, caption=f"{str(s.prompt)[:160]} | reward={reward}"))
             if images:
@@ -479,16 +480,7 @@ def init_rollout_engines(args, pg, all_rollout_engines):
             placement_group_bundle_index=reordered_bundle_indices[i * num_gpu_per_engine],
         )
 
-        env_vars = {name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST} | {
-            "SGL_JIT_DEEPGEMM_PRECOMPILE": "false",
-            "SGLANG_JIT_DEEPGEMM_PRECOMPILE": "false",
-            "SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK": "true",
-            "SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK": "true",
-            "SGLANG_MEMORY_SAVER_CUDA_GRAPH": "true",
-            "SGLANG_BATCH_INVARIANT_OPS_ENABLE_MM_FALLBACK_VARIANT": "true",
-            "SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION": "false",
-            "SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_IDLE": "false",
-        }
+        env_vars = build_rollout_engine_env_vars(args)
 
         rollout_engine = RolloutRayActor.options(
             num_cpus=num_cpus,
