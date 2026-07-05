@@ -36,6 +36,9 @@ class CondKwargs:
     freqs_cis: list[torch.Tensor] | None = None
     img_shapes: list[list[tuple[int, int, int]]] | None = None
     encoder_hidden_states: list[torch.Tensor] | None = None
+    audio_encoder_hidden_states: list[torch.Tensor] | None = None
+    encoder_attention_mask: torch.Tensor | None = None
+    audio_encoder_attention_mask: torch.Tensor | None = None
     pooled_projections: list[torch.Tensor] | None = None
 
 
@@ -57,6 +60,7 @@ class DiTTrajectory:
     # σ * 1000 / 1000 in fp32 and drifts 1-2 ULPs, amplifying to ~3e-5
     # log_prob diff.
     sigmas: torch.Tensor | None = None
+    sde_step_indices: torch.Tensor | None = None
 
 
 @dataclass
@@ -85,7 +89,9 @@ class Sample:
     inference_time_s: float | None = None
     peak_memory_mb: float | None = None
 
-    reward: dict[str, Any] | None = None
+    # Scalar from single RM (e.g. pickscore) or dict when combining multiple RMs
+    # (--reward-key selects the scalar used for GRPO / logging).
+    reward: float | dict[str, Any] | None = None
     weight_versions: list[str] = field(default_factory=list)
 
     class Status(Enum):

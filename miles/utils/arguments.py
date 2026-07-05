@@ -395,10 +395,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=False,
                 help=(
                     "Apply miles.backends.sglang_diffusion_utils.monkey_patches at "
-                    "sglang-d startup so its DiT forward is bit-exact with diffusers' "
-                    "implementation. Makes rollout (sglang-d path) and training-side "
-                    "log-prob agree on noise_pred down to bf16 ULPs. Small perf hit on "
-                    "the rollout engine."
+                    "sglang-d startup for SD3 diffusers bf16 parity. Small perf hit."
                 ),
             )
             parser.add_argument(
@@ -444,6 +441,48 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "Name of the sglang-d pipeline module to push updated weights to. "
                     "Defaults to 'transformer', the DiT component for diffusers-based pipelines."
                 ),
+            )
+            parser.add_argument(
+                "--train-pipeline-config-path",
+                type=str,
+                default=None,
+                help="TrainPipelineConfig class path; default resolved from the model family.",
+            )
+            parser.add_argument(
+                "--model-backend-path",
+                type=str,
+                default=None,
+                help="ModelBackend class path; default from the train pipeline config.",
+            )
+            parser.add_argument(
+                "--sde-step-backend-path",
+                type=str,
+                default=None,
+                help="SdeStepBackend class path; default from the train pipeline config.",
+            )
+            parser.add_argument(
+                "--diffusion-output-num-frames",
+                type=int,
+                default=None,
+                help="Requested decoded video frame count for diffusion video rollout; None for image models.",
+            )
+            parser.add_argument(
+                "--diffusion-fps",
+                type=float,
+                default=None,
+                help="Video fps for rollout; None for image models.",
+            )
+            parser.add_argument(
+                "--diffusion-sde-candidate-steps",
+                type=str,
+                default=None,
+                help="Comma-separated step indices forming the SDE candidate set for rollout.",
+            )
+            parser.add_argument(
+                "--diffusion-sigma-min",
+                type=float,
+                default=None,
+                help="Override sigma_min for the rollout/train SDE step.",
             )
             parser.add_argument(
                 "--rollout-seed",
@@ -942,7 +981,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=False,
                 help=(
                     "Whether to only run the training without sglang servers. "
-                    "This is useful for debugging the rollout generation function."
+                    "Typically used with --load-debug-rollout-data to replay saved rollouts."
                 ),
             )
             parser.add_argument(
@@ -1068,6 +1107,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=str,
                 default=None,
                 help="Hugging Face processor path for PickScore. Required when --rm-type pickscore.",
+            )
+            parser.add_argument(
+                "--pickscore-num-frames",
+                type=int,
+                default=3,
+                help="Number of evenly spaced frames to score per video (video PickScore reward).",
             )
             parser.add_argument(
                 "--pickscore-model-path",
@@ -1293,6 +1338,29 @@ def miles_validate_args(args):
     assert not (args.debug_rollout_only and args.debug_train_only), (
         "debug_rollout_only and debug_train_only cannot be set at the same time, " "please set only one of them."
     )
+
+    # Resolve the model family once from the model ref, then fill the pluggable
+    # component paths (miles custom-function style); Ray actors inherit via args.
+    from miles.backends.fsdp_utils.configs.train_pipeline_config import (
+        get_train_pipeline_config_cls,
+        resolve_diffusion_model_family,
+    )
+    from miles.utils.misc import load_function
+
+    args.diffusion_model_family = resolve_diffusion_model_family(args.diffusion_model or args.hf_checkpoint)
+    if args.train_pipeline_config_path is None:
+        cfg_cls = get_train_pipeline_config_cls(args.diffusion_model_family)
+        args.train_pipeline_config_path = f"{cfg_cls.__module__}.{cfg_cls.__name__}"
+    else:
+        cfg_cls = load_function(args.train_pipeline_config_path)
+    if args.model_backend_path is None:
+        args.model_backend_path = cfg_cls.model_backend_path
+    if args.sde_step_backend_path is None:
+        args.sde_step_backend_path = cfg_cls.sde_step_backend_path
+    if args.diffusion_model_family == "ltx":
+        from miles.backends.fsdp_utils.configs.ltx import validate_args as validate_ltx_args
+
+        validate_ltx_args(args)
 
     # always true on offload for colocate at the moment.
     if args.colocate:
