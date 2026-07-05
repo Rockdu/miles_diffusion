@@ -176,6 +176,9 @@ async def generate_microgroup(
             int(sampling_params["seed"]),
             rollout_id=int(getattr(state, "rollout_id", 0) or 0),
         )
+        # Keep return_step_indices None: sgl-d only filters trajectory latents by it, not
+        # log_probs, and the trainer needs the full trajectory for (x_i, x_{i+1}) pairs.
+        assert return_indices is None, "rollout_return_step_indices must be None for now"
         sampling_params["rollout_sde_step_indices"] = sde_indices
         sampling_params["rollout_return_step_indices"] = return_indices
     else:
