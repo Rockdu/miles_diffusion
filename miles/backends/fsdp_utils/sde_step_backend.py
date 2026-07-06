@@ -27,8 +27,12 @@ class SdeStepBackend(abc.ABC):
         self.scheduler = scheduler
 
     @abc.abstractmethod
-    def resolve_sigmas(self, timesteps: torch.Tensor, *, ndim: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """σ-locating layer: map trajectory timesteps to (sigma, sigma_next), broadcast to ndim."""
+    def resolve_sigmas(
+        self, timesteps: torch.Tensor, next_timesteps: torch.Tensor, *, ndim: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Map the pair's own (timestep, next_timestep) — the actual rollout values, not a
+        positional index — to (sigma, sigma_next), broadcast to ndim. Families with a linear
+        timestep<->σ relation resolve from the values directly, off the scheduler."""
 
     @abc.abstractmethod
     def prev_sample_mean_and_std(
@@ -65,6 +69,7 @@ class SdeStepBackend(abc.ABC):
         self,
         model_output: torch.Tensor,
         timesteps: torch.Tensor,
+        next_timesteps: torch.Tensor,
         sample: torch.Tensor,
         *,
         prev_sample: torch.Tensor,
@@ -73,7 +78,7 @@ class SdeStepBackend(abc.ABC):
         model_output = model_output.float()
         sample = sample.float()
         prev_sample = prev_sample.float()
-        sigma, sigma_prev = self.resolve_sigmas(timesteps, ndim=sample.ndim)
+        sigma, sigma_prev = self.resolve_sigmas(timesteps, next_timesteps, ndim=sample.ndim)
         prev_mean, noise_std, std_dev_t = self.prev_sample_mean_and_std(
             model_output, sample, sigma, sigma_prev, noise_level=noise_level
         )
@@ -83,7 +88,12 @@ class SdeStepBackend(abc.ABC):
 class DiffusersSdeStepBackend(SdeStepBackend):
     """Flow-matching SDE over diffusers scheduler sigmas (current default)."""
 
-    def resolve_sigmas(self, timesteps: torch.Tensor, *, ndim: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def resolve_sigmas(
+        self, timesteps: torch.Tensor, next_timesteps: torch.Tensor, *, ndim: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Diffusers σ needs the scheduler's (shifted) timestep->σ map; look it up by the
+        # actual rollout timestep value, then take the neighbouring σ (scheduler is filled
+        # from the rollout snapshot, so +1 lands on the recorded next step / terminal 0).
         step_index = [self.scheduler.index_for_timestep(t) for t in timesteps]
         prev_step_index = [s + 1 for s in step_index]
         view = (-1, *([1] * (ndim - 1)))

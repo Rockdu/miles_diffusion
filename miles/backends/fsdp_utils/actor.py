@@ -486,6 +486,7 @@ class FSDPTrainRayActor(TrainRayActor):
         latents_microbatch = _stack("latent")  # (bsz, *latent_dims)
         next_latents_microbatch = _stack("next_latent")  # (bsz, *latent_dims)
         timesteps_microbatch = _stack("timestep")  # (bsz,) -- per-pair timestep is scalar
+        next_timesteps_microbatch = _stack("next_timestep")  # (bsz,) -- next rollout timestep (0 at terminal)
         log_prob_old_microbatch = _stack("log_prob_old")  # (bsz,) -- per-pair log_prob is scalar
 
         advantage = torch.tensor(  # (bsz,)
@@ -611,6 +612,7 @@ class FSDPTrainRayActor(TrainRayActor):
         _, log_prob_new_microbatch, prev_sample_mean_new, std_dev_t_new = self.sde_backend.sde_step_logprob(
             noise_pred_microbatch.float(),
             timesteps_microbatch,
+            next_timesteps_microbatch,
             latents_microbatch.float(),
             prev_sample=next_latents_microbatch.float(),
             noise_level=noise_level,
@@ -633,6 +635,7 @@ class FSDPTrainRayActor(TrainRayActor):
                 _, _, prev_sample_mean_ref, _ = self.sde_backend.sde_step_logprob(
                     ref_noise_pred_microbatch.float(),
                     timesteps_microbatch,
+                    next_timesteps_microbatch,
                     latents_microbatch.float(),
                     prev_sample=next_latents_microbatch.float(),
                     noise_level=noise_level,
