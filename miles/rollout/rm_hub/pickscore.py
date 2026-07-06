@@ -21,10 +21,39 @@ def _feature_tensor(features):
     return features.pooler_output
 
 
+def _generated_output_to_fchw(t: torch.Tensor) -> torch.Tensor:
+    """Normalize any video/image tensor layout to ``[F, C, H, W]`` float in ``[0, 1]``.
+
+    Detects the channel axis by C in {1, 3} rather than assuming a fixed order,
+    so LTX (frames-first) and diffusers/Wan ([C, F, H, W]) both resolve correctly.
+    """
+    t = t.detach().cpu().float()
+    if t.ndim == 3:
+        if t.shape[0] not in (1, 3):
+            raise ValueError(f"expected [C, H, W] with C in {{1, 3}}, got {tuple(t.shape)}")
+        t = t.unsqueeze(0)
+    elif t.ndim == 4:
+        if t.shape[-1] in (1, 3):
+            t = t.permute(0, 3, 1, 2)
+        elif t.shape[0] in (1, 3):
+            t = t.permute(1, 0, 2, 3)
+        elif t.shape[1] not in (1, 3):
+            raise ValueError(f"unrecognized 4D video layout: {tuple(t.shape)}")
+    elif t.ndim == 5:
+        if t.shape[0] == 1 and t.shape[-1] in (1, 3):
+            t = t[0].permute(0, 3, 1, 2)
+        else:
+            raise ValueError(f"unrecognized 5D video layout: {tuple(t.shape)}")
+    else:
+        raise ValueError(f"generated_output must be 3D-5D, got {tuple(t.shape)}")
+    if float(t.max()) > 1.0 + 1e-3:
+        t = t / 255.0
+    return t.clamp(0.0, 1.0)
+
+
 def _sample_to_rgb_hwc_uint8_frames(sample: Sample, num_frames: int | None = None) -> list[np.ndarray]:
-    clip_cfhw = sample.generated_output.detach().cpu()  # [C, F, H, W]
-    needs_rescale = float(clip_cfhw.max()) <= 1.0 + 1e-3
-    total = clip_cfhw.shape[1]
+    fchw = _generated_output_to_fchw(sample.generated_output)  # [F, C, H, W] in [0, 1]
+    total = fchw.shape[0]
     if num_frames is not None and 0 < num_frames < total:
         # Evenly spaced subset — long videos don't need every frame scored.
         frame_indices = np.linspace(0, total - 1, num_frames).round().astype(int).tolist()
@@ -32,9 +61,7 @@ def _sample_to_rgb_hwc_uint8_frames(sample: Sample, num_frames: int | None = Non
         frame_indices = range(total)
     frames = []
     for frame_index in frame_indices:
-        hwc = clip_cfhw[:, frame_index, :, :].float().numpy().transpose(1, 2, 0)
-        if needs_rescale:
-            hwc = hwc * 255.0
+        hwc = fchw[frame_index].permute(1, 2, 0).numpy() * 255.0
         frames.append(np.ascontiguousarray(hwc.clip(0, 255).astype(np.uint8)))
     return frames
 
