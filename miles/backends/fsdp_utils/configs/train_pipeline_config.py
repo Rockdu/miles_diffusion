@@ -82,7 +82,7 @@ class TrainPipelineConfig(abc.ABC):
     # Default component paths (miles custom-function style); CLI args override.
     model_backend_path: str = "miles.backends.fsdp_utils.model_backend.DiffusersModelBackend"
 
-    @classmethod
+    @classmethod  # noqa: B027 — optional hook, deliberately non-abstract
     def validate_args(cls, args) -> None:
         """Family-specific arg validation/defaults; runs once at arg validation."""
 
