@@ -224,12 +224,18 @@ def build_ltx_train_scheduler(args):
     from ltx_core.components.schedulers import LTX2Scheduler
 
     @dataclass
+    class _SchedulerConfig:
+        # LTX rollout timesteps are σ×1000, so σ = timestep / num_train_timesteps needs 1000.
+        num_train_timesteps: int = 1000
+
+    @dataclass
     class _LTXSchedulerHolder:
         sigmas: torch.Tensor = field(default_factory=lambda: torch.tensor([]))
         timesteps: torch.Tensor = field(default_factory=lambda: torch.tensor([]))
         num_inference_steps: int = 0
         _step_index: int | None = None
         _begin_index: int | None = None
+        config: _SchedulerConfig = field(default_factory=_SchedulerConfig)
 
         def to(self, device):
             self.sigmas = self.sigmas.to(device)
