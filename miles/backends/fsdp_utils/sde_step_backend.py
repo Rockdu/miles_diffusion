@@ -22,9 +22,12 @@ import torch
 
 
 class SdeStepBackend(abc.ABC):
-    def __init__(self, train_pipeline_config, scheduler):
-        self.config = train_pipeline_config
+    def __init__(self, scheduler=None, *, sde_timestep_divisor: float = 1.0):
+        # Primitive params only (no train pipeline config) so the rollout process — which has
+        # no train pipeline — can load and construct the same backend for shared stepping.
+        # The dynamics is encoded by the concrete subclass, not passed in.
         self.scheduler = scheduler
+        self.sde_timestep_divisor = sde_timestep_divisor
 
     @abc.abstractmethod
     def resolve_sigmas(

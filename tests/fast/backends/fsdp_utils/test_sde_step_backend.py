@@ -2,8 +2,6 @@ from tests.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=30, suite="stage-a-cpu", labels=[])
 
-from types import SimpleNamespace
-
 import torch
 
 from miles.backends.fsdp_utils.sde_step_backend import DiffusersSdeStepBackend
@@ -28,7 +26,7 @@ class TestDiffusersSdeStepBackend:
         nt = sched.sigmas[[3, 6]]  # per-pair next timestep (ignored by the diffusers +1 path)
         v, x, nxt = (torch.randn(2, 4, 6) for _ in range(3))
 
-        backend = DiffusersSdeStepBackend(SimpleNamespace(), sched)
+        backend = DiffusersSdeStepBackend(sched)
         got = backend.sde_step_logprob(v, t, nt, x, prev_sample=nxt, noise_level=0.7)
         want = sde_step_with_logprob(sched, v, t, x, prev_sample=nxt, noise_level=0.7)
         for g, w in zip(got, want, strict=True):

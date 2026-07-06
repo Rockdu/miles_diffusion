@@ -167,7 +167,10 @@ class FSDPTrainRayActor(TrainRayActor):
         sde_backend_path = args.sde_step_backend_path or (
             "miles.backends.fsdp_utils.sde_step_backend.DiffusersSdeStepBackend"
         )
-        self.sde_backend = load_function(sde_backend_path)(self.train_pipeline_config, self.scheduler)
+        self.sde_backend = load_function(sde_backend_path)(
+            self.scheduler,
+            sde_timestep_divisor=getattr(self.train_pipeline_config, "sde_timestep_divisor", 1.0),
+        )
 
         if args.optimizer == "adam":
             self.optimizer = torch.optim.AdamW(
