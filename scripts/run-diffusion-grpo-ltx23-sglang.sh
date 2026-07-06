@@ -89,7 +89,7 @@ fi
   --diffusion-clip-range "${CLIP_RANGE:-1e-4}" \
   --diffusion-kl-beta 0.0 \
   --diffusion-num-steps "${NUM_STEPS:-24}" \
-  --diffusion-step-strategy-path miles.rollout.step_strategy_hub.ltx_sde_candidates \
+  --diffusion-step-strategy-path miles.rollout.step_strategy_hub.epoch_global_window \
   --diffusion-sde-window-size "${LTX_NUM_SDE_STEPS:-3}" \
   --diffusion-sde-candidate-steps "${LTX_SDE_STEP_CANDIDATES:-0,1,2,3,4,5,6,7,8,9}" \
   --diffusion-sde-type cps \
