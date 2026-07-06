@@ -19,8 +19,8 @@ class _FakeScheduler:
 
 
 class TestDiffusersSdeStepBackend:
-    # The layered backend (mean/std kernel + Gaussian log_prob) must reproduce the
-    # monolithic sde_step_with_logprob bit-for-bit — that's the whole refactor contract.
+    # The layered backend (sigma resolution + mean/std kernel + Gaussian log_prob) must
+    # reproduce the monolithic sde_step_with_logprob bit-for-bit — the refactor contract.
     def test_matches_monolithic_reference(self):
         torch.manual_seed(0)
         sched = _FakeScheduler()
