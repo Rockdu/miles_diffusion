@@ -8,7 +8,32 @@ import pytest
 import torch
 
 from miles.backends.fsdp_utils.ltx_geometry import build_ltx_t2v_geometry
+from miles.backends.fsdp_utils.model_backend import LTXModelBackend
 from miles.backends.fsdp_utils.sde_step_backend import CpsSdeStepBackend
+
+
+class TestLTXAttentionBackend:
+    # LTX maps --fsdp-attention-backend to ltx_core's AttentionFunction instead of the
+    # diffusers set_attention_backend(str) method its native transformers don't have.
+    def test_unknown_backend_raises(self):
+        pytest.importorskip("ltx_core")
+        with pytest.raises(ValueError, match="not an ltx_core backend"):
+            LTXModelBackend(None).set_attention_backend(torch.nn.Linear(2, 2), "bogus")
+
+    def test_alias_noops_without_attention_submodule(self):
+        pytest.importorskip("ltx_core")
+        # "sdpa"/"native" alias -> PYTORCH; a model with no Attention submodule is a no-op
+        LTXModelBackend(None).set_attention_backend(torch.nn.Linear(2, 2), "sdpa")  # no raise
+
+    def test_swaps_callable_on_attention_submodule(self):
+        pytest.importorskip("ltx_core")
+        from ltx_core.model.transformer.attention import Attention
+
+        model = torch.nn.Sequential(Attention(query_dim=16, heads=1, dim_head=8))
+        LTXModelBackend(None).set_attention_backend(model, "sdpa_math")
+        # SDPA_MATH resolves to a PytorchAttention callable on both paths
+        assert type(model[0].attention_function).__name__ == "PytorchAttention"
+        assert type(model[0].masked_attention_function).__name__ == "PytorchAttention"
 
 
 class TestCpsSdeStepBackend:
