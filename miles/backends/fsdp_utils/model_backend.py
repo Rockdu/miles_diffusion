@@ -108,3 +108,26 @@ class LTXModelBackend(ModelBackend):
 
     def fsdp_no_split_modules(self, model: torch.nn.Module) -> list[str]:
         return ["BasicAVTransformerBlock"]
+
+    def set_attention_backend(self, model: torch.nn.Module, backend: str) -> None:
+        # ltx_core picks attention via its AttentionFunction enum per Attention submodule,
+        # not diffusers' set_attention_backend(str); FA3/FA4 switch only the unmasked path.
+        from ltx_core.model.transformer.attention import Attention, AttentionFunction, MaskedAttentionFunction
+
+        aliases = {"fa3": "FLASH_ATTENTION_3", "fa4": "FLASH_ATTENTION_4", "sdpa": "PYTORCH", "native": "PYTORCH"}
+        name = aliases.get(backend.strip().lower(), backend.strip().upper())
+        if name not in AttentionFunction.__members__:
+            valid = ", ".join(m.name.lower() for m in AttentionFunction)
+            raise ValueError(
+                f"LTX --fsdp-attention-backend='{backend}' is not an ltx_core backend; "
+                f"choose one of {{{valid}}} (aliases: fa3, fa4, sdpa)."
+            )
+        attn_fn = AttentionFunction[name].to_callable()
+        masked_fn = (
+            MaskedAttentionFunction[name].to_callable() if name in MaskedAttentionFunction.__members__ else None
+        )
+        for module in model.modules():
+            if isinstance(module, Attention):
+                module.attention_function = attn_fn
+                if masked_fn is not None:
+                    module.masked_attention_function = masked_fn
