@@ -12,7 +12,9 @@ omegaconf==2.3.0
 openai==2.6.1
 opencv-python-headless==4.10.0.84
 paddleocr==2.9.1
-paddlepaddle-gpu==2.6.2; platform_system == "Linux"
+paddlepaddle-gpu==2.6.2; platform_system == "Linux" and platform_machine == "x86_64"
+# paddlepaddle-gpu ships no aarch64 wheels; the OCR reward runs paddle on CPU anyway
+paddlepaddle==2.6.2; platform_system == "Linux" and platform_machine == "aarch64"
 peft==0.18.1
 pillow==11.3.0
 pydantic==2.12.5

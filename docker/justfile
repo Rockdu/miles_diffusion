@@ -4,11 +4,14 @@ SGLANG_IMAGE_TAG_CU13 := "v0.5.14-cu130"
 #   cu12 — original behaviour: cu129 base, reads docker/version.txt, owns `latest`.
 #   cu13 — cu130 base via SGLANG_IMAGE_TAG, reads docker/version-cu13.txt,
 #          `-cu13` tag postfix, and does NOT move `latest` (still experimental).
+#   cu13-aarch64 — cu13 built for linux/arm64 (GB300 Grace hosts), `-cu13-aarch64` postfix.
 
 release-primary variant="cu12":
     #!/bin/bash
     if [ "{{variant}}" = "cu13" ]; then
         ARG_TAG_POSTFIX="-cu13" ARG_BUILD_EXTRA_ARGS="--build-arg SGLANG_IMAGE_TAG={{SGLANG_IMAGE_TAG_CU13}}" ARG_VERSION_FILE="docker/version-cu13.txt" just _release-raw
+    elif [ "{{variant}}" = "cu13-aarch64" ]; then
+        ARG_TAG_POSTFIX="-cu13-aarch64" ARG_BUILD_EXTRA_ARGS="--platform linux/arm64 --build-arg SGLANG_IMAGE_TAG={{SGLANG_IMAGE_TAG_CU13}}" ARG_VERSION_FILE="docker/version-cu13.txt" just _release-raw
     else
         ARG_TAG_POSTFIX="" ARG_BUILD_EXTRA_ARGS="" just _release-raw
     fi
@@ -36,6 +39,8 @@ debug variant="cu12":
 
     if [ "{{variant}}" = "cu13" ]; then
         EXTRA="--build-arg SGLANG_IMAGE_TAG={{SGLANG_IMAGE_TAG_CU13}}"; VFILE="docker/version-cu13.txt"; POSTFIX="-cu13"
+    elif [ "{{variant}}" = "cu13-aarch64" ]; then
+        EXTRA="--platform linux/arm64 --build-arg SGLANG_IMAGE_TAG={{SGLANG_IMAGE_TAG_CU13}}"; VFILE="docker/version-cu13.txt"; POSTFIX="-cu13-aarch64"
     else
         EXTRA=""; VFILE="docker/version.txt"; POSTFIX=""
     fi
@@ -59,6 +64,8 @@ build-local variant="cu12":
 
     if [ "{{variant}}" = "cu13" ]; then
         EXTRA="--build-arg SGLANG_IMAGE_TAG={{SGLANG_IMAGE_TAG_CU13}}"; VFILE="docker/version-cu13.txt"; POSTFIX="-cu13"
+    elif [ "{{variant}}" = "cu13-aarch64" ]; then
+        EXTRA="--platform linux/arm64 --build-arg SGLANG_IMAGE_TAG={{SGLANG_IMAGE_TAG_CU13}}"; VFILE="docker/version-cu13.txt"; POSTFIX="-cu13-aarch64"
     else
         EXTRA=""; VFILE="docker/version.txt"; POSTFIX=""
     fi
