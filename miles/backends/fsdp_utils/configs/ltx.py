@@ -34,6 +34,21 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
     hf_ckpt_name_patterns = ("ltx",)
     model_backend_path = "miles.backends.fsdp_utils.model_backend.LTXModelBackend"
 
+    # T2V geometry constants this config reads (see _build_geometry); snapshotted by from_args.
+    diffusion_height: int | None = None
+    diffusion_width: int | None = None
+    diffusion_output_num_frames: int | None = None
+    diffusion_fps: float | None = None
+
+    @classmethod
+    def from_args(cls, args):
+        config = cls()
+        config.diffusion_height = getattr(args, "diffusion_height", None)
+        config.diffusion_width = getattr(args, "diffusion_width", None)
+        config.diffusion_output_num_frames = getattr(args, "diffusion_output_num_frames", None)
+        config.diffusion_fps = getattr(args, "diffusion_fps", None)
+        return config
+
     @classmethod
     def validate_args(cls, args: Namespace) -> None:
         # LTX family defaults for the generic diffusion args.
@@ -146,19 +161,18 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
         return self.forward_velocity(model, latents_input, timesteps_input, cond)
 
     def _build_geometry(self, latents_input: torch.Tensor) -> dict:
-        """T2V geometry is a pure function of latent shape + request constants (args)."""
+        """T2V geometry is a pure function of latent shape + the request constants (snapshotted fields)."""
         from miles.backends.fsdp_utils.ltx_geometry import build_ltx_t2v_geometry
 
-        args = self.args
         batch_size, num_tokens, latent_dim = latents_input.shape
         return build_ltx_t2v_geometry(
             batch_size=batch_size,
             num_tokens=num_tokens,
             latent_dim=latent_dim,
-            height=int(getattr(args, "diffusion_height", 512)),
-            width=int(getattr(args, "diffusion_width", 512)),
-            num_frames=int(getattr(args, "diffusion_output_num_frames", 25)),
-            fps=float(getattr(args, "diffusion_fps", 24.0)),
+            height=int(self.diffusion_height),
+            width=int(self.diffusion_width),
+            num_frames=int(self.diffusion_output_num_frames),
+            fps=float(self.diffusion_fps),
             device=latents_input.device,
             dtype=latents_input.dtype,
         )

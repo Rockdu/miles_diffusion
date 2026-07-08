@@ -105,8 +105,7 @@ class FSDPTrainRayActor(TrainRayActor):
 
         from miles.utils.misc import load_function
 
-        self.train_pipeline_config = load_function(args.train_pipeline_config_path)()
-        self.train_pipeline_config.configure(args)
+        self.train_pipeline_config = load_function(args.train_pipeline_config_path).from_args(args)
         self.model_backend = load_function(args.model_backend_path)(self.train_pipeline_config)
         raw_models, self.scheduler = self.model_backend.load_models_and_scheduler(
             args, master_dtype=self._master_dtype

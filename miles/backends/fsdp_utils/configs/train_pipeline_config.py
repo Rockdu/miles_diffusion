@@ -89,9 +89,11 @@ class TrainPipelineConfig(abc.ABC):
     def validate_args(cls, args) -> None:
         """Family-specific arg validation/defaults; runs once at arg validation."""
 
-    def configure(self, args) -> None:
-        """Bind CLI args once (called by the trainer); hooks may read request constants."""
-        self.args = args
+    @classmethod
+    def from_args(cls, args):
+        """Build the config for a run. Default snapshots nothing; families that read run
+        constants override this to grab their own fields explicitly (see LTX)."""
+        return cls()
 
     def compute_noise_pred(
         self,
