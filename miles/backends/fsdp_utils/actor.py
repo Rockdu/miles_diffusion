@@ -107,9 +107,21 @@ class FSDPTrainRayActor(TrainRayActor):
 
         self.train_pipeline_config = load_function(args.train_pipeline_config_path)()
         self.model_backend = load_function(args.model_backend_path)(self.train_pipeline_config)
-        raw_models, self.scheduler = self.model_backend.load_models_and_scheduler(
-            args, master_dtype=self._master_dtype
-        )
+
+        # Rank 0 loads real weights on CPU; every other rank builds an
+        # architecture-only meta skeleton (no checkpoint IO). Weights reach the
+        # other ranks via broadcast in _fsdp2_load_full_state_dict below.
+        # Ref: miles/backends/experimental/fsdp_utils/actor.py (LLM backend).
+        if dist.get_rank() == 0:
+            logger.info("[Rank 0] loading full weights on CPU (will broadcast to other ranks)")
+            raw_models, self.scheduler = self.model_backend.load_models_and_scheduler(
+                args, master_dtype=self._master_dtype
+            )
+        else:
+            logger.info(f"[Rank {dist.get_rank()}] building meta skeleton, no checkpoint weight IO")
+            raw_models, self.scheduler = self.model_backend.build_meta_models_and_scheduler(
+                args, master_dtype=self._master_dtype
+            )
 
         self.models: dict[str, torch.nn.Module] = {}
         for component, model in raw_models.items():
@@ -125,9 +137,9 @@ class FSDPTrainRayActor(TrainRayActor):
             if args.gradient_checkpointing:
                 self.model_backend.enable_gradient_checkpointing(model)
 
-            model.to(torch.cuda.current_device())
-
-            self.train_pipeline_config.preprocess_model_before_fsdp(model)
+            # Capture the full state dict (real tensors on rank 0, meta elsewhere)
+            # BEFORE fully_shard turns the params into DTensor shards.
+            full_state = model.state_dict()
 
             model = apply_fsdp2(
                 model,
@@ -136,6 +148,20 @@ class FSDPTrainRayActor(TrainRayActor):
                 args=self.args,
                 no_split_modules=self.model_backend.fsdp_no_split_modules(model),
             )
+
+            model = self._fsdp2_load_full_state_dict(
+                model,
+                full_state,
+                self.parallel_state.dp_mesh,
+                cpu_offload=True if self.args.fsdp_cpu_offload else None,
+            )
+            del full_state
+
+            # Runs after materialization: the qwen_image hook rebuilds RoPE caches
+            # on the params' device, which must be CUDA — before the broadcast
+            # above, non-rank-0 params are meta and the hook would silently no-op.
+            self.train_pipeline_config.preprocess_model_before_fsdp(model)
+
             self.models[component] = model
         # Force a sync to ensure sharding is complete and old memory is freed.
         torch.cuda.synchronize()
@@ -201,6 +227,44 @@ class FSDPTrainRayActor(TrainRayActor):
 
     def _get_parallel_config(self) -> dict:
         return {"dp_size": getattr(self.parallel_state, "dp_size", 1)}
+
+    def _fsdp2_load_full_state_dict(self, model, full_state, device_mesh, cpu_offload):
+        """Load the full state dict into the FSDP2 model, broadcasting from rank 0.
+
+        Rank 0 holds the only real copy of the weights (other ranks built meta
+        skeletons); after fully_shard, rank 0 broadcasts and each rank keeps just
+        its own DTensor shard — no rank ever materializes the whole model on GPU.
+
+        Args:
+            model: FSDP2-wrapped model (params: DTensor on cpu for rank 0, meta elsewhere)
+            full_state: state dict captured before fully_shard (real on rank 0)
+            device_mesh: FSDP device mesh
+            cpu_offload: if not None, offload params back to CPU (CPUOffloadPolicy)
+
+        Ref: miles/backends/experimental/fsdp_utils/actor.py::_fsdp2_load_full_state_dict
+             (itself from verl/utils/fsdp_utils.py::fsdp2_load_full_state_dict)
+        """
+        from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
+
+        if dist.get_rank() == 0:
+            model = model.to(device=torch.cuda.current_device(), non_blocking=True)
+        else:
+            model = model.to_empty(device=torch.cuda.current_device())
+
+        is_cpu_offload = cpu_offload is not None
+        options = StateDictOptions(full_state_dict=True, cpu_offload=is_cpu_offload, broadcast_from_rank0=True)
+        set_model_state_dict(model, full_state, options=options)
+
+        # set_model_state_dict does not broadcast buffers; do it manually.
+        for _, buf in model.named_buffers():
+            dist.broadcast(buf, src=0)
+
+        if is_cpu_offload:
+            model.to("cpu", non_blocking=True)
+            for buf in model.buffers():
+                buf.data = buf.data.to(torch.cuda.current_device())
+
+        return model
 
     @timer
     def sleep(self) -> None:
