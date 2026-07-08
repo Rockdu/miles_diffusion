@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import abc
 import os
+from dataclasses import dataclass, fields
+from typing import ClassVar
 
 import torch
 from miles.utils.types import CondKwargs
@@ -71,27 +73,49 @@ def get_train_pipeline_config_cls(family: str) -> type[TrainPipelineConfig]:
     return cls
 
 
-class TrainPipelineConfig(abc.ABC):
-    """Base class. Subclass per model family."""
+def update_config_from_args(config: TrainPipelineConfig, args) -> TrainPipelineConfig:
+    """Fill a config's dataclass fields from matching non-None CLI args (sgl-d style)."""
+    for f in fields(config):
+        value = getattr(args, f.name, None)
+        if value is not None:
+            setattr(config, f.name, value)
+    return config
 
-    lora_target_modules: list[str] = ["to_q", "to_k", "to_v", "to_out.0"]
-    needs_timestep_scaling: bool = True
-    optimizer_state_allowed_missing: list[str] = []
+
+@dataclass
+class TrainPipelineConfig(abc.ABC):
+    """Per-family train-side denoising/parity scorer.
+
+    Scorer inputs the config reads are dataclass fields, filled from CLI args by
+    ``update_config_from_args``. Family metadata (fixed per subclass, never from args)
+    are ``ClassVar``s. Backend selection is an arg, not a config concern.
+    """
+
+    # Scorer inputs (generic defaults; runs expose real values via CLI args).
+    diffusion_height: int = 512
+    diffusion_width: int = 512
+    diffusion_output_num_frames: int = 1
+    diffusion_fps: float = 24.0
+
+    # Family metadata — fixed per subclass, not filled from args.
+    lora_target_modules: ClassVar[list[str]] = ["to_q", "to_k", "to_v", "to_out.0"]
+    needs_timestep_scaling: ClassVar[bool] = True
+    optimizer_state_allowed_missing: ClassVar[list[str]] = []
     # Case-insensitive substrings matched against the checkpoint name (--diffusion-model).
-    hf_ckpt_name_patterns: tuple[str, ...] = ()
-    supports_cfg_training: bool = True
+    hf_ckpt_name_patterns: ClassVar[tuple[str, ...]] = ()
+    supports_cfg_training: ClassVar[bool] = True
     # Rollout parity patch group applied by the engine (see monkey_patches; None = none).
-    rollout_patch_group: str | None = None
-    # Default component paths (miles custom-function style); CLI args override.
-    model_backend_path: str = "miles.backends.fsdp_utils.model_backend.DiffusersModelBackend"
+    rollout_patch_group: ClassVar[str | None] = None
+
+    @classmethod
+    def from_args(cls, args) -> TrainPipelineConfig:
+        """Construct with generic field defaults, then fill fillable fields from args."""
+        return update_config_from_args(cls(), args)
 
     @classmethod  # noqa: B027 — optional hook, deliberately non-abstract
     def validate_args(cls, args) -> None:
-        """Family-specific arg validation/defaults; runs once at arg validation."""
-
-    def configure(self, args) -> None:
-        """Bind CLI args once (called by the trainer); hooks may read request constants."""
-        self.args = args
+        """Family-specific arg VALIDATION; runs once at arg validation. Raise on an invalid
+        combination — do NOT fill or mutate args (runs expose values in their scripts)."""
 
     def compute_noise_pred(
         self,
@@ -183,6 +207,6 @@ class TrainPipelineConfig(abc.ABC):
     ) -> torch.Tensor:
         """Apply classifier-free guidance. Model-specific (e.g. rescale or not)."""
 
-    @abc.abstractmethod
-    def preprocess_model_before_fsdp(self, model: torch.nn.Module) -> None:
-        """Preprocess the model before FSDP."""
+    def preprocess_model_before_fsdp(self, model: torch.nn.Module) -> None:  # noqa: B027 — optional hook
+        """Optional per-family model tweak for train↔rollout parity (e.g. Qwen's RoPE cache
+        rebuild). Default no-op; only families that need it override."""

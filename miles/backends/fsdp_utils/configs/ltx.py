@@ -32,31 +32,17 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
     sde_timestep_divisor = 1000.0
     rollout_patch_group = "ltx"
     hf_ckpt_name_patterns = ("ltx",)
-    model_backend_path = "miles.backends.fsdp_utils.model_backend.LTXModelBackend"
 
     @classmethod
     def validate_args(cls, args: Namespace) -> None:
-        # LTX family defaults for the generic diffusion args.
-        if getattr(args, "diffusion_output_num_frames", None) is None:
-            args.diffusion_output_num_frames = 25
-        if getattr(args, "diffusion_fps", None) is None:
-            args.diffusion_fps = 24.0
-        if not getattr(args, "diffusion_sde_window_size", 0):
-            args.diffusion_sde_window_size = 3
-        # --diffusion-sde-type "sde" (the generic default) maps to LTX's CPS dynamics.
-        if getattr(args, "diffusion_sde_type", "sde") in (None, "sde"):
-            args.diffusion_sde_type = "cps"
-        args.diffusion_sde_type = _normalize_ltx_dynamics_type(args.diffusion_sde_type)
-        # The SDE step dynamics is set by the rollout (sgl-d SchedulerRLMixin.flow_sde_sampling);
-        # LTX GRPO runs CPS, and the train scorer (CpsSdeStepBackend) must replicate it, so the
-        # rollout sde_type is pinned to cps.
-        if args.diffusion_sde_type != "cps":
-            raise NotImplementedError(
-                f"LTX GRPO runs CPS rollout dynamics; --diffusion-sde-type must be cps "
-                f"(got {args.diffusion_sde_type!r})"
+        # LTX GRPO runs CPS rollout dynamics and the train scorer (CpsSdeStepBackend) must
+        # replicate it; both are set in the LTX example script, not defaulted here.
+        sde_type = getattr(args, "diffusion_sde_type", None)
+        if sde_type is None or _normalize_ltx_dynamics_type(sde_type) != "cps":
+            raise ValueError(
+                "LTX GRPO requires --diffusion-sde-type cps and "
+                "--sde-step-backend-path ...CpsSdeStepBackend (set both in the LTX script)."
             )
-        if getattr(args, "sde_step_backend_path", None) is None:
-            args.sde_step_backend_path = "miles.backends.fsdp_utils.sde_step_backend.CpsSdeStepBackend"
         ltx_gs = float(getattr(args, "diffusion_guidance_scale", 1.0))
         if ltx_gs != 1.0:
             logger.warning(
@@ -146,19 +132,18 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
         return self.forward_velocity(model, latents_input, timesteps_input, cond)
 
     def _build_geometry(self, latents_input: torch.Tensor) -> dict:
-        """T2V geometry is a pure function of latent shape + request constants (args)."""
+        """T2V geometry is a pure function of latent shape + the request constants (fields)."""
         from miles.backends.fsdp_utils.ltx_geometry import build_ltx_t2v_geometry
 
-        args = self.args
         batch_size, num_tokens, latent_dim = latents_input.shape
         return build_ltx_t2v_geometry(
             batch_size=batch_size,
             num_tokens=num_tokens,
             latent_dim=latent_dim,
-            height=int(getattr(args, "diffusion_height", 512)),
-            width=int(getattr(args, "diffusion_width", 512)),
-            num_frames=int(getattr(args, "diffusion_output_num_frames", 25)),
-            fps=float(getattr(args, "diffusion_fps", 24.0)),
+            height=int(self.diffusion_height),
+            width=int(self.diffusion_width),
+            num_frames=int(self.diffusion_output_num_frames),
+            fps=float(self.diffusion_fps),
             device=latents_input.device,
             dtype=latents_input.dtype,
         )
@@ -238,6 +223,3 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
         if scale == 1.0:
             return noise_pred_pos
         return noise_pred_neg + scale * (noise_pred_pos - noise_pred_neg)
-
-    def preprocess_model_before_fsdp(self, model: torch.nn.Module) -> None:
-        return None

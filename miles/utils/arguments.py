@@ -267,8 +267,8 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--model-backend-path",
                 type=str,
-                default=None,
-                help="Model loading function path; default from the family config.",
+                default="miles.backends.fsdp_utils.model_backend.DiffusersModelBackend",
+                help="ModelBackend class path (loads the DiT). Non-diffusers models override in their script.",
             )
             parser.add_argument(
                 "--diffusion-device",
@@ -380,8 +380,8 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--sde-step-backend-path",
                 type=str,
-                default=None,
-                help="SdeStepBackend class path; default = flow-matching SDE over scheduler sigmas.",
+                default="miles.backends.fsdp_utils.sde_step_backend.DiffusersSdeStepBackend",
+                help="SdeStepBackend class path (train-side scorer dynamics). Custom families override in their script.",
             )
             parser.add_argument(
                 "--diffusion-sde-window-size",
@@ -1375,8 +1375,8 @@ def miles_validate_args(args):
             args.diffusion_model_family = resolve_diffusion_model_family(args.diffusion_model)
             cfg_cls = get_train_pipeline_config_cls(args.diffusion_model_family)
             args.train_pipeline_config_path = f"{cfg_cls.__module__}.{cfg_cls.__qualname__}"
-        if args.model_backend_path is None:
-            args.model_backend_path = cfg_cls.model_backend_path
+        # Backends are independent, args-selected modules (defaults populated in the parser);
+        # the config only validates the run, it does not fill or mutate args.
         cfg_cls.validate_args(args)
 
     if args.dump_details is not None:

@@ -105,8 +105,7 @@ class FSDPTrainRayActor(TrainRayActor):
 
         from miles.utils.misc import load_function
 
-        self.train_pipeline_config = load_function(args.train_pipeline_config_path)()
-        self.train_pipeline_config.configure(args)
+        self.train_pipeline_config = load_function(args.train_pipeline_config_path).from_args(args)
         self.model_backend = load_function(args.model_backend_path)(self.train_pipeline_config)
         raw_models, self.scheduler = self.model_backend.load_models_and_scheduler(
             args, master_dtype=self._master_dtype
@@ -149,10 +148,7 @@ class FSDPTrainRayActor(TrainRayActor):
 
         from miles.utils.misc import load_function
 
-        sde_backend_path = args.sde_step_backend_path or (
-            "miles.backends.fsdp_utils.sde_step_backend.DiffusersSdeStepBackend"
-        )
-        self.sde_backend = load_function(sde_backend_path)(
+        self.sde_backend = load_function(args.sde_step_backend_path)(
             self.scheduler,
             sde_timestep_divisor=getattr(self.train_pipeline_config, "sde_timestep_divisor", 1.0),
         )

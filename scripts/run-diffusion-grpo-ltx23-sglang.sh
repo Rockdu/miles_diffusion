@@ -93,6 +93,8 @@ fi
   --diffusion-sde-window-size "${LTX_NUM_SDE_STEPS:-3}" \
   --diffusion-sde-candidate-steps "${LTX_SDE_STEP_CANDIDATES:-0,1,2,3,4,5,6,7,8,9}" \
   --diffusion-sde-type cps \
+  --model-backend-path miles.backends.fsdp_utils.model_backend.LTXModelBackend \
+  --sde-step-backend-path miles.backends.fsdp_utils.sde_step_backend.CpsSdeStepBackend \
   --diffusion-noise-level 0.8 \
   --diffusion-sigma-min 0.001 \
   --diffusion-guidance-scale 1.0 \

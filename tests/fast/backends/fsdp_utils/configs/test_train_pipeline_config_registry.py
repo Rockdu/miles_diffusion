@@ -54,7 +54,7 @@ class TestComputeNoisePred:
     # The forward hoisted from the actor: no-CFG = one pos pass; CFG joint-batch
     # (cat->chunk) must be numerically identical to the two-pass path.
     def setup_method(self):
-        self.cfg = _MinimalConfig()
+        self.cfg = _MinimalConfig()  # dataclass defaults; compute_noise_pred reads no fields
         self.h = torch.arange(12.0).reshape(2, 6)
         self.pos = {"bias": torch.full((2, 1), 1.0)}
         self.neg = {"bias": torch.full((2, 1), -1.0)}
