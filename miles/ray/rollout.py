@@ -207,6 +207,12 @@ class RolloutManager:
     def load(self, rollout_id=None):
         self.data_source.load(rollout_id)
 
+    def wait_ready(self):
+        """Barrier for callers: a ray actor serves calls in order, so this returns
+        only after __init__ — including engine init and the colocate initial
+        memory release — has completed."""
+        return True
+
     def offload(self):
         self.health_monitoring_pause()
         return ray.get(
