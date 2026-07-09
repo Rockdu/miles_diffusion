@@ -65,7 +65,33 @@ class ModelBackend(abc.ABC):
 
 
 class DiffusersModelBackend(ModelBackend):
-    """Load trainable components from a diffusers pipeline checkpoint."""
+    """Load exactly the ``--update-weight-target-module`` components (plus the
+    scheduler) straight from the checkpoint; no pipeline-level loading."""
+
+    @staticmethod
+    def _component_class(pipeline_config, component: str, hf_checkpoint: str):
+        import diffusers
+
+        entry = pipeline_config.get(component)
+        if entry is None:
+            raise ValueError(
+                f"--update-weight-target-module: pipeline {hf_checkpoint} " f"has no component '{component}'"
+            )
+        _, class_name = entry
+        cls = getattr(diffusers, class_name, None)
+        if cls is None:
+            raise ValueError(
+                f"component '{component}' class '{class_name}' is not diffusers-native; "
+                "override the loader in a custom ModelBackend"
+            )
+        return cls
+
+    @staticmethod
+    def _load_scheduler(args, pipeline_config):
+        import diffusers
+
+        _, scheduler_class = pipeline_config["scheduler"]
+        return getattr(diffusers, scheduler_class).from_pretrained(args.hf_checkpoint, subfolder="scheduler")
 
     def load_models_and_scheduler(
         self,
@@ -73,25 +99,14 @@ class DiffusersModelBackend(ModelBackend):
         *,
         master_dtype: torch.dtype,
     ) -> tuple[dict[str, torch.nn.Module], Any]:
-        pipeline = DiffusionPipeline.from_pretrained(
-            args.hf_checkpoint,
-            torch_dtype=master_dtype,
-            trust_remote_code=True,
-            text_encoder=None,
-            vae=None,
-            tokenizer=None,
-        )
+        pipeline_config = DiffusionPipeline.load_config(args.hf_checkpoint)
         raw_models: dict[str, torch.nn.Module] = {}
         for component in args.update_weight_target_modules:
-            sub_model = getattr(pipeline, component, None)
-            if sub_model is None:
-                raise ValueError(
-                    f"--update-weight-target-module: pipeline {args.hf_checkpoint} " f"has no component '{component}'"
-                )
-            raw_models[component] = sub_model
-        scheduler = pipeline.scheduler
-        del pipeline
-        return raw_models, scheduler
+            cls = self._component_class(pipeline_config, component, args.hf_checkpoint)
+            raw_models[component] = cls.from_pretrained(
+                args.hf_checkpoint, subfolder=component, torch_dtype=master_dtype
+            )
+        return raw_models, self._load_scheduler(args, pipeline_config)
 
     def build_meta_models_and_scheduler(
         self,
@@ -100,31 +115,14 @@ class DiffusersModelBackend(ModelBackend):
         master_dtype: torch.dtype,
     ) -> tuple[dict[str, torch.nn.Module], Any]:
         # from_pretrained ignores an outer init_empty_weights, so build from configs.
-        import diffusers
         from accelerate import init_empty_weights
 
         pipeline_config = DiffusionPipeline.load_config(args.hf_checkpoint)
-
         raw_models: dict[str, torch.nn.Module] = {}
         for component in args.update_weight_target_modules:
-            entry = pipeline_config.get(component)
-            if entry is None:
-                raise ValueError(
-                    f"--update-weight-target-module: pipeline {args.hf_checkpoint} " f"has no component '{component}'"
-                )
-            _, class_name = entry
-            cls = getattr(diffusers, class_name, None)
-            if cls is None:
-                raise ValueError(
-                    f"component '{component}' class '{class_name}' is not diffusers-native; "
-                    "override build_meta_models_and_scheduler in a custom ModelBackend"
-                )
-            sub_config = cls.load_config(args.hf_checkpoint, subfolder=component)
+            cls = self._component_class(pipeline_config, component, args.hf_checkpoint)
             with init_empty_weights():
-                model = cls.from_config(sub_config)
+                model = cls.from_config(cls.load_config(args.hf_checkpoint, subfolder=component))
             model.to(master_dtype)
             raw_models[component] = model
-
-        _, scheduler_class = pipeline_config["scheduler"]
-        scheduler = getattr(diffusers, scheduler_class).from_pretrained(args.hf_checkpoint, subfolder="scheduler")
-        return raw_models, scheduler
+        return raw_models, self._load_scheduler(args, pipeline_config)
