@@ -19,7 +19,8 @@
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2,3}"
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# expandable_segments crashes cross-process weight sync on GB300/aarch64 (fabric handles)
+[ "$(uname -m)" = "aarch64" ] || export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 RUN_NAME="diffusion_grpo_ocr_2gpu_flowgrpo_aligned_$(date +%Y%m%d_%H%M%S)"
 SAVE_DIR="${ROOT_DIR}/logs/${RUN_NAME}/ckpt"
 

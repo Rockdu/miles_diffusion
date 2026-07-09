@@ -41,7 +41,8 @@ set -euo pipefail
 
 ROOT_DIR="${MILES_ROOT}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-6,7}"
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+# expandable_segments crashes cross-process weight sync on GB300/aarch64 (fabric handles)
+[ "$(uname -m)" = "aarch64" ] || export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 # Use master_sglang (with native SD3 /rollout/generate support) instead of
 # the default installed sglang. Prepending to PYTHONPATH shadows the editable
