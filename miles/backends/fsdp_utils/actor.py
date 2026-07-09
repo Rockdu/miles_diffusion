@@ -108,12 +108,11 @@ class FSDPTrainRayActor(TrainRayActor):
         self.train_pipeline_config = load_function(args.train_pipeline_config_path)()
         self.model_backend = load_function(args.model_backend_path)(self.train_pipeline_config)
 
-        # Rank 0 loads real weights on CPU; every other rank builds an
-        # architecture-only meta skeleton (no checkpoint IO). Weights reach the
-        # other ranks via broadcast in _fsdp2_load_full_state_dict below.
-        # Ref: miles/backends/experimental/fsdp_utils/actor.py (LLM backend).
-        if dist.get_rank() == 0:
-            logger.info("[Rank 0] loading full weights on CPU (will broadcast to other ranks)")
+        # dp-rank-0 loads real weights on CPU; other ranks build meta skeletons and
+        # receive weights via broadcast in _fsdp2_load_full_state_dict.
+        dp_rank = self.parallel_state.dp_mesh.get_local_rank()
+        if dp_rank == 0:
+            logger.info(f"[Rank {dist.get_rank()}] loading full weights on CPU (broadcast source)")
             raw_models, self.scheduler = self.model_backend.load_models_and_scheduler(
                 args, master_dtype=self._master_dtype
             )
@@ -137,8 +136,7 @@ class FSDPTrainRayActor(TrainRayActor):
             if args.gradient_checkpointing:
                 self.model_backend.enable_gradient_checkpointing(model)
 
-            # Capture the full state dict (real tensors on rank 0, meta elsewhere)
-            # BEFORE fully_shard turns the params into DTensor shards.
+            # Capture before fully_shard turns params into DTensor shards.
             full_state = model.state_dict()
 
             model = apply_fsdp2(
@@ -157,9 +155,7 @@ class FSDPTrainRayActor(TrainRayActor):
             )
             del full_state
 
-            # Runs after materialization: the qwen_image hook rebuilds RoPE caches
-            # on the params' device, which must be CUDA — before the broadcast
-            # above, non-rank-0 params are meta and the hook would silently no-op.
+            # After materialization: the qwen_image hook needs CUDA-resident params.
             self.train_pipeline_config.preprocess_model_before_fsdp(model)
 
             self.models[component] = model
@@ -229,24 +225,11 @@ class FSDPTrainRayActor(TrainRayActor):
         return {"dp_size": getattr(self.parallel_state, "dp_size", 1)}
 
     def _fsdp2_load_full_state_dict(self, model, full_state, device_mesh, cpu_offload):
-        """Load the full state dict into the FSDP2 model, broadcasting from rank 0.
-
-        Rank 0 holds the only real copy of the weights (other ranks built meta
-        skeletons); after fully_shard, rank 0 broadcasts and each rank keeps just
-        its own DTensor shard — no rank ever materializes the whole model on GPU.
-
-        Args:
-            model: FSDP2-wrapped model (params: DTensor on cpu for rank 0, meta elsewhere)
-            full_state: state dict captured before fully_shard (real on rank 0)
-            device_mesh: FSDP device mesh
-            cpu_offload: if not None, offload params back to CPU (CPUOffloadPolicy)
-
-        Ref: miles/backends/experimental/fsdp_utils/actor.py::_fsdp2_load_full_state_dict
-             (itself from verl/utils/fsdp_utils.py::fsdp2_load_full_state_dict)
-        """
+        """Broadcast dp-rank-0's full state dict into every rank's DTensor shards.
+        Ref: miles LLM experimental/fsdp_utils actor (from verl fsdp2_load_full_state_dict)."""
         from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 
-        if dist.get_rank() == 0:
+        if device_mesh.get_local_rank() == 0:
             model = model.to(device=torch.cuda.current_device(), non_blocking=True)
         else:
             model = model.to_empty(device=torch.cuda.current_device())
@@ -255,9 +238,9 @@ class FSDPTrainRayActor(TrainRayActor):
         options = StateDictOptions(full_state_dict=True, cpu_offload=is_cpu_offload, broadcast_from_rank0=True)
         set_model_state_dict(model, full_state, options=options)
 
-        # set_model_state_dict does not broadcast buffers; do it manually.
+        # set_model_state_dict does not broadcast buffers; do it over the dp group.
         for _, buf in model.named_buffers():
-            dist.broadcast(buf, src=0)
+            dist.broadcast(buf, group=device_mesh.get_group(), group_src=0)
 
         if is_cpu_offload:
             model.to("cpu", non_blocking=True)

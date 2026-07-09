@@ -43,18 +43,10 @@ class ModelBackend(abc.ABC):
         *,
         master_dtype: torch.dtype,
     ) -> tuple[dict[str, torch.nn.Module], Any]:
-        """Architecture-only twin of ``load_models_and_scheduler`` for non-rank-0
-        FSDP ranks: same components with every parameter on the meta device and no
-        checkpoint weight IO. Rank 0 loads real weights and broadcasts into the
-        sharded model (``actor._fsdp2_load_full_state_dict``), so state-dict keys
-        and param dtypes must match rank 0 exactly.
-
-        Default falls back to a full load (the pre-meta-init behavior) so custom
-        backends keep working; override for the memory/IO win.
-        """
+        """Meta-device twin of ``load_models_and_scheduler`` (same state-dict keys and
+        dtypes, no weight IO) for ranks that receive weights via broadcast."""
         logger.warning(
-            "%s does not implement build_meta_models_and_scheduler; "
-            "falling back to loading full weights on every rank",
+            "%s lacks build_meta_models_and_scheduler; every rank loads full weights",
             type(self).__name__,
         )
         return self.load_models_and_scheduler(args, master_dtype=master_dtype)
@@ -107,9 +99,7 @@ class DiffusersModelBackend(ModelBackend):
         *,
         master_dtype: torch.dtype,
     ) -> tuple[dict[str, torch.nn.Module], Any]:
-        # diffusers' from_pretrained materializes real weights even inside an outer
-        # accelerate.init_empty_weights (loading happens after __init__ via direct
-        # tensor assignment), so build skeletons from component configs instead.
+        # from_pretrained ignores an outer init_empty_weights, so build from configs.
         import diffusers
         from accelerate import init_empty_weights
 
@@ -126,7 +116,7 @@ class DiffusersModelBackend(ModelBackend):
             cls = getattr(diffusers, class_name, None)
             if cls is None:
                 raise ValueError(
-                    f"component '{component}' class '{class_name}' is not a diffusers-native class; "
+                    f"component '{component}' class '{class_name}' is not diffusers-native; "
                     "override build_meta_models_and_scheduler in a custom ModelBackend"
                 )
             sub_config = cls.load_config(args.hf_checkpoint, subfolder=component)

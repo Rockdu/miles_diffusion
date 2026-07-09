@@ -132,10 +132,8 @@ def allocate_train_group(args, num_nodes, num_gpus_per_node, pg):
 def create_training_models(args, pgs, rollout_manager):
     logger.info("Initializing actor model...")
     if args.colocate and not args.debug_train_only:
-        # Colocated engines grab their full GPU memory pool during init and only
-        # release it at the end; actor GPU materialization must not overlap that
-        # window. RolloutManager.__init__ blocks on engine init, so one ordered
-        # call is a sufficient barrier.
+        # Colocated engines hold their full GPU pool until init ends; wait so
+        # actor GPU materialization never overlaps that window.
         logger.info("Waiting for rollout engines to finish init (colocate)...")
         ray.get(rollout_manager.wait_ready.remote())
     actor_model = allocate_train_group(
