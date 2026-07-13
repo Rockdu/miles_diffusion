@@ -15,10 +15,10 @@ from miles.utils.types import Sample
 logger = logging.getLogger(__name__)
 
 
-def sample_frame_indices(num_total_frames: int, num_frames: int) -> list[int]:
+def sample_frame_indices(num_total_frames: int, num_frames: int | None) -> list[int]:
     if num_total_frames <= 0:
         raise ValueError(f"video has no frames: {num_total_frames}")
-    if num_total_frames <= num_frames:
+    if num_frames is None or num_total_frames <= num_frames:
         return list(range(num_total_frames))
     if num_frames == 1:
         return [num_total_frames // 2]
@@ -288,7 +288,7 @@ class AsyncPickScorePool(metaclass=SingletonMeta):
         num_workers = args.pickscore_num_workers
         num_gpus_per_worker = args.pickscore_num_gpus_per_worker
         self._batch_size = args.pickscore_batch_size
-        self._num_frames = int(getattr(args, "pickscore_num_frames", 3) or 3)
+        self._num_frames = args.pickscore_num_frames
         self._actors = [
             PickScoreRewardActor.options(
                 num_cpus=1,

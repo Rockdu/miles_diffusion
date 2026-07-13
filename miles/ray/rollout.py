@@ -393,7 +393,7 @@ class RolloutManager:
         n_samples = len(samples)
         if td and n_samples and len(td) % n_samples == 0:
             k = len(td) // n_samples
-            steps = max(1, int(getattr(self.args, "num_steps_per_rollout", 1)))
+            steps = self.args.num_steps_per_rollout
             if k > 1 and n_samples % steps == 0:
                 spb = n_samples // steps
                 reordered = []
