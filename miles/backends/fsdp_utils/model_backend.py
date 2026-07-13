@@ -153,7 +153,7 @@ class LTXModelBackend(ModelBackend):
         modules = list(args.update_weight_target_modules)
         if modules != ["transformer"]:
             raise ValueError(f"LTX trains the single DiT ('transformer'); got {modules}")
-        # TODO: meta-init on non-rank-0 before multi-node runs (每 rank 全量加载).
+        # TODO: meta-init on non-rank-0 before multi-node runs (every rank loads the full weights).
         checkpoint = resolve_transformer_checkpoint(
             str(args.diffusion_model),
             explicit_path=getattr(args, "sglang_transformer_weights_path", None),
