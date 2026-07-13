@@ -137,7 +137,7 @@ def _rgb_hwc_from_generated(sample: Sample) -> np.ndarray:
     if t.shape[1] != 1:
         raise ValueError(f"generated_output frame dim F must be 1 for image models, got F={t.shape[1]}")
     frame_chw = t[:, 0, :, :]
-    hwc = frame_chw.numpy().transpose(1, 2, 0)
+    hwc = frame_chw.float().numpy().transpose(1, 2, 0)  # compat shim: new sglang returns bf16
     if float(hwc.max()) <= 1.0 + 1e-3:
         out = np.round(hwc * 255.0).clip(0, 255).astype(np.uint8)
     else:
