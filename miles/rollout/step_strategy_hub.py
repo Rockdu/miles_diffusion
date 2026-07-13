@@ -62,7 +62,8 @@ def epoch_global_window(
     epoch = group_index // int(args.rollout_batch_size)
     generator = torch.Generator().manual_seed(epoch + int(args.rollout_seed))
     selected = torch.randperm(len(candidates), generator=generator)[:window_size]
-    return sorted(candidates[i] for i in selected.tolist()), None
+    # Keep randperm draw order; the train-side tstep axis follows this list order.
+    return [candidates[i] for i in selected.tolist()], None
 
 
 def _sde_candidate_steps(args: Namespace, num_steps: int) -> list[int]:
