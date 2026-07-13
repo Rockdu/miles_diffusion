@@ -11,14 +11,6 @@ from miles.utils.types import CondKwargs
 from .train_pipeline_config import TrainPipelineConfig, register_train_pipeline_config
 
 
-def _normalize_ltx_dynamics_type(name: str) -> str:
-    key = str(name).strip().lower().replace("-", "_")
-    allowed = ("flow_sde", "cps", "ode", "dance_sde")
-    if key not in allowed:
-        raise ValueError(f"Unknown ltx dynamics_type {name!r}; expected one of {allowed}")
-    return key
-
-
 @register_train_pipeline_config("ltx")
 class LTXTrainPipelineConfig(TrainPipelineConfig):
     """LTX-2.3 video GRPO: unguided velocity forward over ltx_core."""
@@ -39,11 +31,10 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
 
     @classmethod
     def validate_args(cls, args: Namespace) -> None:
-        args.diffusion_sde_type = _normalize_ltx_dynamics_type(args.diffusion_sde_type)
-        # The train scorer (CpsSdeStepBackend) replicates the rollout dynamics, which is CPS only.
+        # The train scorer (CpsSdeStepBackend) replicates the rollout dynamics; only cps is scored correctly.
         if args.diffusion_sde_type != "cps":
             raise NotImplementedError(
-                f"LTX GRPO runs CPS rollout dynamics; --diffusion-sde-type must be cps "
+                f"LTX GRPO train scorer implements cps only; set --diffusion-sde-type cps "
                 f"(got {args.diffusion_sde_type!r})"
             )
 
