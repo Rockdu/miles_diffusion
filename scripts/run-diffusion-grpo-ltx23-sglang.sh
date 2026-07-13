@@ -70,6 +70,7 @@ fi
   --num-rollout "${NUM_ROLLOUT}" \
   --micro-batch-size-sample "${MICRO_BATCH_SIZE_SAMPLE:-1}" \
   --micro-batch-size-tstep "${MICRO_BATCH_SIZE_TSTEP:-1}" \
+  --diffusion-microgroup-size "${MICROGROUP_SIZE:-1}" \
   --gradient-checkpointing \
   --colocate \
   --actor-num-gpus-per-node "${NUM_GPUS}" \
@@ -92,6 +93,7 @@ fi
   --diffusion-step-strategy-path miles.rollout.step_strategy_hub.epoch_global_window \
   --diffusion-sde-window-size "${LTX_NUM_SDE_STEPS:-3}" \
   --diffusion-sde-candidate-steps "${LTX_SDE_STEP_CANDIDATES:-0,1,2,3,4,5,6,7,8,9}" \
+  --fsdp-attention-backend "${FSDP_ATTENTION_BACKEND:-sdpa_math}" \
   --diffusion-sde-type cps \
   --diffusion-noise-level 0.8 \
   --diffusion-sigma-min 0.001 \
@@ -112,8 +114,9 @@ fi
   --pickscore-model-path "${PICKSCORE_MODEL:-yuvalkirstain/PickScore_v1}" \
   --pickscore-num-frames "${PICKSCORE_NUM_FRAMES:-3}" \
   --pickscore-num-gpus-per-worker "${PICKSCORE_NUM_GPUS_PER_WORKER:-0}" \
-  --pickscore-batch-size 8 \
-  --update-weight-buffer-size 2147483648 \
+  --pickscore-num-workers "${PICKSCORE_NUM_WORKERS:-1}" \
+  --pickscore-batch-size "${PICKSCORE_BATCH_SIZE:-8}" \
+  --update-weight-buffer-size "${UPDATE_WEIGHT_BUFFER_SIZE:-2147483648}" \
   --save "${SAVE_DIR}" \
   --save-interval "${SAVE_INTERVAL}" \
   "${WANDB_ARGS[@]}" \
