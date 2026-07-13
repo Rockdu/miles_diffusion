@@ -1432,6 +1432,19 @@ def miles_validate_args(args):
     if args.eval_function_path is None:
         args.eval_function_path = args.rollout_function_path
 
+    # The train-side scorer must replicate the rollout dynamics; derive it from the same knob.
+    if args.sde_step_backend_path is None:
+        sde_step_backends = {
+            "sde": "miles.backends.fsdp_utils.sde_step_backend.DiffusersSdeStepBackend",
+            "cps": "miles.backends.fsdp_utils.sde_step_backend.CpsSdeStepBackend",
+        }
+        if args.diffusion_sde_type not in sde_step_backends:
+            raise ValueError(
+                f"no train-side sde step backend for --diffusion-sde-type {args.diffusion_sde_type!r}; "
+                f"implemented: {sorted(sde_step_backends)}; pass --sde-step-backend-path for a custom one"
+            )
+        args.sde_step_backend_path = sde_step_backends[args.diffusion_sde_type]
+
     if args.num_steps_per_rollout is not None:
         samples_per_rollout = args.rollout_batch_size * args.n_samples_per_prompt
         derived_gbs = samples_per_rollout // args.num_steps_per_rollout

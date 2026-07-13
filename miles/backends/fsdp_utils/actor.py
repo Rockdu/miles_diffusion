@@ -130,12 +130,9 @@ class FSDPTrainRayActor(TrainRayActor):
 
         from miles.utils.misc import load_function
 
-        sde_backend_path = args.sde_step_backend_path or (
-            "miles.backends.fsdp_utils.sde_step_backend.DiffusersSdeStepBackend"
-        )
-        self.sde_backend = load_function(sde_backend_path)(
+        self.sde_backend = load_function(args.sde_step_backend_path)(
             self.scheduler,
-            sde_timestep_divisor=getattr(self.train_pipeline_config, "sde_timestep_divisor", 1.0),
+            sde_timestep_divisor=self.train_pipeline_config.sde_timestep_divisor,
         )
 
         if args.optimizer == "adam":

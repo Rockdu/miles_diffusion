@@ -89,6 +89,8 @@ class TrainPipelineConfig(abc.ABC):
     def validate_args(cls, args) -> None:
         """Family-specific arg validation/defaults; runs once at arg validation."""
 
+    sde_timestep_divisor = 1.0
+
     def configure(self, args) -> None:
         """Bind the request constants a family needs at train time; default binds none."""
 

@@ -29,15 +29,6 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
         self._num_frames = args.diffusion_output_num_frames
         self._fps = args.diffusion_fps
 
-    @classmethod
-    def validate_args(cls, args: Namespace) -> None:
-        # The train scorer (CpsSdeStepBackend) replicates the rollout dynamics; only cps is scored correctly.
-        if args.diffusion_sde_type != "cps":
-            raise NotImplementedError(
-                f"LTX GRPO train scorer implements cps only; set --diffusion-sde-type cps "
-                f"(got {args.diffusion_sde_type!r})"
-            )
-
     lora_target_modules = [
         "to_q",
         "to_k",
