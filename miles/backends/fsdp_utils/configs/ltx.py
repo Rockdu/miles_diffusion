@@ -31,6 +31,12 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
     hf_ckpt_name_patterns = ("ltx",)
     model_backend_path = "miles.backends.fsdp_utils.model_backend.LTXModelBackend"
 
+    def configure(self, args: Namespace) -> None:
+        self._height = args.diffusion_height
+        self._width = args.diffusion_width
+        self._num_frames = args.diffusion_output_num_frames
+        self._fps = args.diffusion_fps
+
     @classmethod
     def validate_args(cls, args: Namespace) -> None:
         args.diffusion_sde_type = _normalize_ltx_dynamics_type(args.diffusion_sde_type)
@@ -120,16 +126,15 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
         """T2V geometry is a pure function of latent shape + request constants (args)."""
         from miles.backends.fsdp_utils.ltx_geometry import build_ltx_t2v_geometry
 
-        args = self.args
         batch_size, num_tokens, latent_dim = latents_input.shape
         return build_ltx_t2v_geometry(
             batch_size=batch_size,
             num_tokens=num_tokens,
             latent_dim=latent_dim,
-            height=int(getattr(args, "diffusion_height", 512)),
-            width=int(getattr(args, "diffusion_width", 512)),
-            num_frames=int(getattr(args, "diffusion_output_num_frames", 25)),
-            fps=float(getattr(args, "diffusion_fps", 24.0)),
+            height=self._height,
+            width=self._width,
+            num_frames=self._num_frames,
+            fps=self._fps,
             device=latents_input.device,
             dtype=latents_input.dtype,
         )

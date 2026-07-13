@@ -90,8 +90,7 @@ class TrainPipelineConfig(abc.ABC):
         """Family-specific arg validation/defaults; runs once at arg validation."""
 
     def configure(self, args) -> None:
-        """Bind CLI args once (called by the trainer); hooks may read request constants."""
-        self.args = args
+        """Bind the request constants a family needs at train time; default binds none."""
 
     def compute_noise_pred(
         self,
