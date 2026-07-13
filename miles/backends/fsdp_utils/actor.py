@@ -1,4 +1,3 @@
-import functools
 import logging
 from argparse import Namespace
 from collections import defaultdict
@@ -27,7 +26,6 @@ from miles.utils.train_data_utils import (
     validate_same_microbatch_counts_across_dp,
 )
 from . import checkpoint
-from .arguments import deterministic_capable_flash_fns
 from .diffusion_update_weight_utils import DiffusionUpdateWeightFromTensor, DiffusionUpdateWeightFromTensorLoRA
 from .lr_scheduler import get_lr_scheduler
 from .parallel import create_fsdp_parallel_state
@@ -43,26 +41,6 @@ def _enable_deterministic_training(args: Namespace) -> None:
     # warn_only=False is required: SDPA's deterministic backward is gated on
     # !warnOnly (aten attention_backward.cu), so warn_only=True is a no-op on native.
     torch.use_deterministic_algorithms(True, warn_only=False)
-
-    # flash-attn is a separate CUDA extension torch's flag can't reach; patch it on.
-    backend = args.fsdp_attention_backend
-    if backend is not None and "flash" in backend.lower():
-        _enable_deterministic_flash_attention()
-
-
-def _enable_deterministic_flash_attention() -> None:
-    """Patch diffusers' flash globals to run deterministic=True (backward only;
-    forward unchanged). Idempotent."""
-    import diffusers.models.attention_dispatch as ad
-
-    if getattr(ad, "_miles_deterministic_flash_patched", False):
-        return
-
-    names = deterministic_capable_flash_fns()
-    for name in names:
-        setattr(ad, name, functools.partial(getattr(ad, name), deterministic=True))
-    ad._miles_deterministic_flash_patched = True
-    logger.info("Enabled deterministic flash attention backward for: %s", ", ".join(names))
 
 
 class FSDPTrainRayActor(TrainRayActor):
@@ -108,6 +86,9 @@ class FSDPTrainRayActor(TrainRayActor):
         self.train_pipeline_config = load_function(args.train_pipeline_config_path)()
         self.train_pipeline_config.configure(args)
         self.model_backend = load_function(args.model_backend_path)(self.train_pipeline_config)
+        if args.deterministic_mode:
+            # flash-attn is opaque to torch's determinism flag; backends patch their own dispatch.
+            self.model_backend.enable_deterministic_attention(args.fsdp_attention_backend)
         raw_models, self.scheduler = self.model_backend.load_models_and_scheduler(
             args, master_dtype=self._master_dtype
         )
