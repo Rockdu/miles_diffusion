@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from argparse import Namespace
 
 import torch
@@ -10,8 +9,6 @@ import torch
 from miles.utils.types import CondKwargs
 
 from .train_pipeline_config import TrainPipelineConfig, register_train_pipeline_config
-
-logger = logging.getLogger(__name__)
 
 
 def _normalize_ltx_dynamics_type(name: str) -> str:
@@ -36,38 +33,12 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
 
     @classmethod
     def validate_args(cls, args: Namespace) -> None:
-        # LTX family defaults for the generic diffusion args.
-        if getattr(args, "diffusion_output_num_frames", None) is None:
-            args.diffusion_output_num_frames = 25
-        if getattr(args, "diffusion_fps", None) is None:
-            args.diffusion_fps = 24.0
-        if not getattr(args, "diffusion_sde_window_size", 0):
-            args.diffusion_sde_window_size = 3
-        # --diffusion-sde-type "sde" (the generic default) maps to LTX's CPS dynamics.
-        if getattr(args, "diffusion_sde_type", "sde") in (None, "sde"):
-            args.diffusion_sde_type = "cps"
         args.diffusion_sde_type = _normalize_ltx_dynamics_type(args.diffusion_sde_type)
-        # The SDE step dynamics is set by the rollout (sgl-d SchedulerRLMixin.flow_sde_sampling);
-        # LTX GRPO runs CPS, and the train scorer (CpsSdeStepBackend) must replicate it, so the
-        # rollout sde_type is pinned to cps.
+        # The train scorer (CpsSdeStepBackend) replicates the rollout dynamics, which is CPS only.
         if args.diffusion_sde_type != "cps":
             raise NotImplementedError(
                 f"LTX GRPO runs CPS rollout dynamics; --diffusion-sde-type must be cps "
                 f"(got {args.diffusion_sde_type!r})"
-            )
-        if getattr(args, "sde_step_backend_path", None) is None:
-            args.sde_step_backend_path = "miles.backends.fsdp_utils.sde_step_backend.CpsSdeStepBackend"
-        ltx_gs = float(getattr(args, "diffusion_guidance_scale", 1.0))
-        if ltx_gs != 1.0:
-            logger.warning(
-                "LTX rollout/train alignment expects --diffusion-guidance-scale 1.0 "
-                "(no CFG); using %s may break log_prob parity.",
-                ltx_gs,
-            )
-        if getattr(args, "fsdp_master_dtype", "fp32") == "fp32":
-            logger.warning(
-                "LTX with fsdp_master_dtype=fp32 is unlikely to fit "
-                "on small GPU counts; consider --fsdp-master-dtype bf16."
             )
 
     lora_target_modules = [

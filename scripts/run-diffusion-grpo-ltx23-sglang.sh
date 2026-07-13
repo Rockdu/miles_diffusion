@@ -95,6 +95,7 @@ fi
   --diffusion-sde-candidate-steps "${LTX_SDE_STEP_CANDIDATES:-0,1,2,3,4,5,6,7,8,9}" \
   --fsdp-attention-backend "${FSDP_ATTENTION_BACKEND:-sdpa_math}" \
   --diffusion-sde-type cps \
+  --sde-step-backend-path miles.backends.fsdp_utils.sde_step_backend.CpsSdeStepBackend \
   --diffusion-noise-level 0.8 \
   --diffusion-sigma-min 0.001 \
   --diffusion-guidance-scale 1.0 \
