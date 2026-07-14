@@ -60,29 +60,6 @@ def fchw_frame_to_hwc_uint8(frame_chw: torch.Tensor) -> np.ndarray:
     return np.ascontiguousarray(hwc.clip(0, 255).astype(np.uint8))
 
 
-def first_frame_for_wandb(t: torch.Tensor) -> np.ndarray | None:
-    """First frame as HWC uint8 for wandb logging; None if layout is unsupported."""
-    try:
-        return fchw_frame_to_hwc_uint8(generated_output_to_fchw(t)[0])
-    except (ValueError, TypeError):
-        if t.ndim != 4:
-            return None
-        frame = t[:, 0, :, :].float().cpu().numpy().transpose(1, 2, 0)
-        if float(frame.max()) <= 1.0 + 1e-3:
-            frame = frame * 255.0
-        return np.clip(frame, 0, 255).astype(np.uint8)
-
-
-def fchw_to_pil_frames(video_fchw: torch.Tensor, frame_indices: Sequence[int]) -> list[Image.Image]:
-    return [Image.fromarray(fchw_frame_to_hwc_uint8(video_fchw[idx])) for idx in frame_indices]
-
-
-def is_video_generated_output(t: torch.Tensor) -> bool:
-    """True when output carries multiple temporal frames (LTX / sglang video)."""
-    fchw = generated_output_to_fchw(t)
-    return fchw.shape[0] > 1
-
-
 def _feature_tensor(features):
     if isinstance(features, torch.Tensor):
         return features
@@ -102,9 +79,9 @@ def _feature_tensor(features):
     raise TypeError(f"Cannot extract embedding tensor from {type(features)!r}")
 
 
-def _sample_to_rgb_hwc_uint8(sample: Sample) -> np.ndarray:
+def _sample_to_rgb_hwc_uint8_frames(sample: Sample, num_frames: int | None) -> list[np.ndarray]:
     fchw = generated_output_to_fchw(sample.generated_output)
-    return fchw_frame_to_hwc_uint8(fchw[fchw.shape[0] // 2])
+    return [fchw_frame_to_hwc_uint8(fchw[i]) for i in sample_frame_indices(fchw.shape[0], num_frames)]
 
 
 class PickScoreScorer(torch.nn.Module):
@@ -233,26 +210,19 @@ class AsyncPickScorePool(metaclass=SingletonMeta):
 
 async def pickscore_rm(args, samples: Sequence[Sample]) -> list[float]:
     pool = AsyncPickScorePool(args)
-    prompts = [sample.prompt for sample in samples]
-    if not any(is_video_generated_output(sample.generated_output) for sample in samples):
-        images = [_sample_to_rgb_hwc_uint8(sample) for sample in samples]
-        return await pool.score(images, prompts)
-
-    # Video: N evenly spaced frames per sample, scored flat, then mean per sample.
-    flat_frames: list[Image.Image] = []
-    flat_prompts: list[str] = []
+    images: list[np.ndarray] = []
+    prompts: list[str] = []
     frame_counts: list[int] = []
-    for sample, prompt in zip(samples, prompts, strict=True):
-        video_fchw = generated_output_to_fchw(sample.generated_output)
-        frame_indices = sample_frame_indices(video_fchw.shape[0], args.pickscore_num_frames)
-        frame_counts.append(len(frame_indices))
-        flat_frames.extend(fchw_to_pil_frames(video_fchw, frame_indices))
-        flat_prompts.extend([prompt] * len(frame_indices))
+    for sample in samples:
+        frames = _sample_to_rgb_hwc_uint8_frames(sample, args.pickscore_num_frames)
+        images.extend(frames)
+        prompts.extend([sample.prompt] * len(frames))
+        frame_counts.append(len(frames))
 
-    flat_scores = await pool.score(flat_frames, flat_prompts, fp16=args.pickscore_fp16)
-    rewards: list[float] = []
+    flat_scores = await pool.score(images, prompts, fp16=args.pickscore_fp16)
+    scores: list[float] = []
     offset = 0
     for count in frame_counts:
-        rewards.append(float(sum(flat_scores[offset : offset + count]) / count))
+        scores.append(float(sum(flat_scores[offset : offset + count]) / count))
         offset += count
-    return rewards
+    return scores
