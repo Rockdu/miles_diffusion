@@ -9,6 +9,7 @@ model-behavior adaptation (grad-ckpt API, FSDP wrap classes) lives on
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 

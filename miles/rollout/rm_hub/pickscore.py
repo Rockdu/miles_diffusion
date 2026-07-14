@@ -27,27 +27,13 @@ def sample_frame_indices(num_total_frames: int, num_frames: int | None) -> list[
 
 
 def generated_output_to_fchw(t: torch.Tensor) -> torch.Tensor:
-    """Return ``[F, C, H, W]`` float tensor in ``[0, 1]``."""
+    """Engine contract: per-sample [C, H, W] or [C, F, H, W] (rollout api normalizes layouts)."""
     t = t.detach().cpu().float()
     if t.ndim == 3:
-        if t.shape[0] not in (1, 3):
-            raise ValueError(f"expected [C, H, W] with C in {{1, 3}}, got {tuple(t.shape)}")
-        t = t.unsqueeze(0)
-    elif t.ndim == 4:
-        if t.shape[-1] in (1, 3):
-            t = t.permute(0, 3, 1, 2)
-        elif t.shape[0] in (1, 3):
-            t = t.permute(1, 0, 2, 3)
-        elif t.shape[1] not in (1, 3):
-            raise ValueError(f"unrecognized 4D video layout: {tuple(t.shape)}")
-    elif t.ndim == 5:
-        if t.shape[0] == 1 and t.shape[-1] in (1, 3):
-            t = t[0].permute(0, 3, 1, 2)
-        else:
-            raise ValueError(f"unrecognized 5D video layout: {tuple(t.shape)}")
-    else:
-        raise ValueError(f"generated_output must be 3D–5D, got {tuple(t.shape)}")
-
+        t = t.unsqueeze(1)
+    if t.ndim != 4 or t.shape[0] not in (1, 3):
+        raise ValueError(f"expected [C, F, H, W] with C in {{1, 3}}, got {tuple(t.shape)}")
+    t = t.permute(1, 0, 2, 3)
     if float(t.max()) > 1.0 + 1e-3:
         t = t / 255.0
     return t.clamp(0.0, 1.0)
