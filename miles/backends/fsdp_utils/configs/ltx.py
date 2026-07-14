@@ -106,7 +106,7 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
 
     def _build_geometry(self, latents_input: torch.Tensor) -> dict:
         """T2V geometry is a pure function of latent shape + request constants (args)."""
-        from miles.backends.fsdp_utils.configs.ltx_geometry import build_ltx_t2v_geometry
+        from miles.backends.fsdp_utils.models.ltx_geometry import build_ltx_t2v_geometry
 
         batch_size, num_tokens, latent_dim = latents_input.shape
         return build_ltx_t2v_geometry(
