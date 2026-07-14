@@ -176,23 +176,15 @@ def resolve_materialized_model_dir(
 def resolve_transformer_checkpoint(
     diffusion_model: str | None,
     *,
-    explicit_path: str | None = None,
     materialize: bool = True,
 ) -> str:
     """Resolve the single-file DiT checkpoint used by FSDP train.
 
     Resolution order:
-    1. Explicit ``--sglang-transformer-weights-path`` / env override
-    2. ``--diffusion-model`` pointing at a ``.safetensors`` file
-    3. Overlay materialized ``transformer/model.safetensors`` for a HF model id
+    1. ``--diffusion-model`` pointing at a ``.safetensors`` file
+    2. Overlay materialized ``transformer/model.safetensors`` for a HF model id
        (materializes via sglang on cache miss when ``materialize=True``)
     """
-    if explicit_path:
-        path = Path(explicit_path).expanduser()
-        if path.is_file():
-            return str(path)
-        raise FileNotFoundError(f"LTX transformer checkpoint not found: {path}")
-
     if diffusion_model:
         path = Path(str(diffusion_model)).expanduser()
         if path.is_file() and path.suffix == ".safetensors":

@@ -148,10 +148,7 @@ class LTXModelBackend(ModelBackend):
         if modules != ["transformer"]:
             raise ValueError(f"LTX trains the single DiT ('transformer'); got {modules}")
         # TODO: meta-init on non-rank-0 before multi-node runs (every rank loads the full weights).
-        checkpoint = resolve_transformer_checkpoint(
-            str(args.diffusion_model),
-            explicit_path=getattr(args, "sglang_transformer_weights_path", None),
-        )
+        checkpoint = resolve_transformer_checkpoint(str(args.diffusion_model))
         model = load_ltx_transformer_for_train(checkpoint, device="cpu", dtype=master_dtype)
         return {"transformer": model}, build_ltx_train_scheduler(args)
 
