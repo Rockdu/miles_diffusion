@@ -10,6 +10,7 @@ import torch
 from PIL import Image
 
 from miles.utils.misc import SingletonMeta
+from miles.utils.process_utils import cfhw_to_fhwc, image_or_video_to_uint8
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
@@ -26,26 +27,6 @@ def sample_frame_indices(num_total_frames: int, num_frames: int | None) -> list[
     return [int(round(i * step)) for i in range(num_frames)]
 
 
-def generated_output_to_fchw(t: torch.Tensor) -> torch.Tensor:
-    """Engine contract: per-sample [C, H, W] or [C, F, H, W] (rollout api normalizes layouts)."""
-    t = t.detach().cpu().float()
-    if t.ndim == 3:
-        t = t.unsqueeze(1)
-    if t.ndim != 4 or t.shape[0] not in (1, 3):
-        raise ValueError(f"expected [C, F, H, W] with C in {{1, 3}}, got {tuple(t.shape)}")
-    t = t.permute(1, 0, 2, 3)
-    if float(t.max()) > 1.0 + 1e-3:
-        t = t / 255.0
-    return t.clamp(0.0, 1.0)
-
-
-def fchw_frame_to_hwc_uint8(frame_chw: torch.Tensor) -> np.ndarray:
-    hwc = frame_chw.numpy().transpose(1, 2, 0)
-    if float(hwc.max()) <= 1.0 + 1e-3:
-        hwc = hwc * 255.0
-    return np.ascontiguousarray(hwc.clip(0, 255).astype(np.uint8))
-
-
 def _feature_tensor(features):
     # transformers <5.0 returns a plain tensor; >=5.0 returns BaseModelOutputWithPooling.
     if isinstance(features, torch.Tensor):
@@ -56,8 +37,13 @@ def _feature_tensor(features):
 
 
 def _sample_to_rgb_hwc_uint8_frames(sample: Sample, num_frames: int | None) -> list[np.ndarray]:
-    fchw = generated_output_to_fchw(sample.generated_output)
-    return [fchw_frame_to_hwc_uint8(fchw[i]) for i in sample_frame_indices(fchw.shape[0], num_frames)]
+    cfhw = sample.generated_output
+    if cfhw is None:
+        raise ValueError("generated_output is None")
+
+    fhwc = image_or_video_to_uint8(cfhw_to_fhwc(cfhw.detach().cpu()))
+    indices = sample_frame_indices(fhwc.shape[0], num_frames)
+    return [np.ascontiguousarray(fhwc[i].numpy()) for i in indices]
 
 
 class PickScoreScorer(torch.nn.Module):
@@ -69,22 +55,20 @@ class PickScoreScorer(torch.nn.Module):
         device: str = "cuda",
         processor_path: str,
         model_path: str,
-        dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__()
-        from transformers import AutoModel, AutoProcessor
+        from transformers import CLIPModel, CLIPProcessor
 
         self.device = torch.device(device)
-        self.dtype = dtype
-        self.processor = AutoProcessor.from_pretrained(processor_path)
-        self.model = AutoModel.from_pretrained(model_path).eval().to(device=self.device, dtype=dtype)
+        self.processor = CLIPProcessor.from_pretrained(processor_path)
+        self.model = CLIPModel.from_pretrained(model_path).eval().to(device=self.device, dtype=torch.float32)
 
     @torch.no_grad()
     def forward(self, prompts: Sequence[str], images: Sequence[Image.Image]) -> list[float]:
         image_inputs = self.processor(images=list(images), return_tensors="pt", padding=True)
         image_inputs = {k: v.to(device=self.device) for k, v in image_inputs.items()}
         if "pixel_values" in image_inputs:
-            image_inputs["pixel_values"] = image_inputs["pixel_values"].to(self.dtype)
+            image_inputs["pixel_values"] = image_inputs["pixel_values"].float()
 
         text_inputs = self.processor(
             text=list(prompts),
@@ -120,26 +104,15 @@ class PickScoreRewardActor:
         if use_cuda:
             torch.cuda.set_device(0)
         device = "cuda" if use_cuda else "cpu"
-        self.device = device
-        self._processor_path = processor_path
-        self._model_path = model_path
-        self._scorers: dict[torch.dtype, PickScoreScorer] = {}
+        self.scorer = PickScoreScorer(
+            device=device,
+            processor_path=processor_path,
+            model_path=model_path,
+        )
 
-    def _scorer(self, dtype: torch.dtype) -> PickScoreScorer:
-        if self.device == "cpu":
-            dtype = torch.float32
-        if dtype not in self._scorers:
-            self._scorers[dtype] = PickScoreScorer(
-                device=self.device,
-                processor_path=self._processor_path,
-                model_path=self._model_path,
-                dtype=dtype,
-            )
-        return self._scorers[dtype]
-
-    def score_batch(self, images: list, prompts: list[str], *, fp16: bool = False) -> list[float]:
+    def score_batch(self, images: list, prompts: list[str]) -> list[float]:
         pil_images = [Image.fromarray(image) if isinstance(image, np.ndarray) else image for image in images]
-        return self._scorer(torch.float16 if fp16 else torch.float32)(prompts, pil_images)
+        return self.scorer(prompts, pil_images)
 
 
 class AsyncPickScorePool(metaclass=SingletonMeta):
@@ -173,11 +146,11 @@ class AsyncPickScorePool(metaclass=SingletonMeta):
         self._round_robin_index += 1
         return self._actors[i]
 
-    async def score(self, images: list, prompts: list[str], *, fp16: bool = False) -> list[float]:
+    async def score(self, images: list, prompts: list[str]) -> list[float]:
         refs = []
         for start in range(0, len(images), self._batch_size):
             end = start + self._batch_size
-            refs.append(self._next_actor().score_batch.remote(images[start:end], prompts[start:end], fp16=fp16))
+            refs.append(self._next_actor().score_batch.remote(images[start:end], prompts[start:end]))
 
         loop = asyncio.get_running_loop()
         chunked_scores = await loop.run_in_executor(None, ray.get, refs)
@@ -195,7 +168,7 @@ async def pickscore_rm(args, samples: Sequence[Sample]) -> list[float]:
         prompts.extend([sample.prompt] * len(frames))
         frame_counts.append(len(frames))
 
-    flat_scores = await pool.score(images, prompts, fp16=args.pickscore_fp16)
+    flat_scores = await pool.score(images, prompts)
     scores: list[float] = []
     offset = 0
     for count in frame_counts:
