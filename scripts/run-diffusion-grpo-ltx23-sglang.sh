@@ -113,6 +113,7 @@ fi
   --pickscore-processor-path "${PICKSCORE_PROCESSOR:-laion/CLIP-ViT-H-14-laion2B-s32B-b79K}" \
   --pickscore-model-path "${PICKSCORE_MODEL:-yuvalkirstain/PickScore_v1}" \
   --pickscore-num-frames "${PICKSCORE_NUM_FRAMES:-3}" \
+  --pickscore-fp16 \
   --pickscore-num-gpus-per-worker "${PICKSCORE_NUM_GPUS_PER_WORKER:-0}" \
   --pickscore-num-workers "${PICKSCORE_NUM_WORKERS:-1}" \
   --pickscore-batch-size "${PICKSCORE_BATCH_SIZE:-8}" \

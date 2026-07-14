@@ -1152,6 +1152,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Evenly spaced frames to score per video (None = every frame).",
             )
             parser.add_argument(
+                "--pickscore-fp16",
+                action="store_true",
+                default=False,
+                help="Run the PickScore CLIP in fp16 (verl-omni video recipe).",
+            )
+            parser.add_argument(
                 "--pickscore-model-path",
                 type=str,
                 default=None,

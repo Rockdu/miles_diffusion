@@ -238,7 +238,7 @@ async def pickscore_rm(args, samples: Sequence[Sample]) -> list[float]:
         images = [_sample_to_rgb_hwc_uint8(sample) for sample in samples]
         return await pool.score(images, prompts)
 
-    # Video: N evenly spaced frames per sample, scored flat, then mean per sample (fp16 recipe).
+    # Video: N evenly spaced frames per sample, scored flat, then mean per sample.
     flat_frames: list[Image.Image] = []
     flat_prompts: list[str] = []
     frame_counts: list[int] = []
@@ -249,7 +249,7 @@ async def pickscore_rm(args, samples: Sequence[Sample]) -> list[float]:
         flat_frames.extend(fchw_to_pil_frames(video_fchw, frame_indices))
         flat_prompts.extend([prompt] * len(frame_indices))
 
-    flat_scores = await pool.score(flat_frames, flat_prompts, fp16=True)
+    flat_scores = await pool.score(flat_frames, flat_prompts, fp16=args.pickscore_fp16)
     rewards: list[float] = []
     offset = 0
     for count in frame_counts:
