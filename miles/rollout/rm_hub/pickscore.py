@@ -61,21 +61,11 @@ def fchw_frame_to_hwc_uint8(frame_chw: torch.Tensor) -> np.ndarray:
 
 
 def _feature_tensor(features):
+    # transformers <5.0 returns a plain tensor; >=5.0 returns BaseModelOutputWithPooling.
     if isinstance(features, torch.Tensor):
         return features
-    if hasattr(features, "pooler_output"):
-        pooled = features.pooler_output
-        if isinstance(pooled, torch.Tensor):
-            return pooled
-    for attr in ("image_embeds", "text_embeds"):
-        value = getattr(features, attr, None)
-        if isinstance(value, torch.Tensor):
-            return value
-    if isinstance(features, tuple):
-        for item in reversed(features):
-            if isinstance(item, torch.Tensor) and item.ndim == 2:
-                return item
-        raise TypeError(f"No 2-D tensor in model output tuple (len={len(features)})")
+    if hasattr(features, "pooler_output") and isinstance(features.pooler_output, torch.Tensor):
+        return features.pooler_output
     raise TypeError(f"Cannot extract embedding tensor from {type(features)!r}")
 
 
