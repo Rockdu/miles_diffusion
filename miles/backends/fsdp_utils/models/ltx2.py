@@ -9,7 +9,6 @@ model-behavior adaptation (grad-ckpt API, FSDP wrap classes) lives on
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +27,9 @@ def _is_hf_model_id(ref: str | None) -> bool:
 
 
 def _diffusion_cache_root() -> Path:
-    return Path(os.environ.get("SGLANG_DIFFUSION_CACHE_ROOT", "/data/wenhao/sgl_diffusion_cache"))
+    from sglang.multimodal_gen import envs
+
+    return Path(envs.SGLANG_DIFFUSION_CACHE_ROOT)
 
 
 def _find_cached_materialized_dir(hf_model_id: str) -> Path | None:
