@@ -108,7 +108,7 @@ def _sample_to_rgb_hwc_uint8(sample: Sample) -> np.ndarray:
 
 
 class PickScoreScorer(torch.nn.Module):
-    """PickScore for static images (SD3 / single-frame outputs)."""
+    """CLIP PickScore for (prompt, image) pairs; raw logits scaled to ~0-1."""
 
     def __init__(
         self,
@@ -116,54 +116,7 @@ class PickScoreScorer(torch.nn.Module):
         device: str = "cuda",
         processor_path: str,
         model_path: str,
-    ) -> None:
-        super().__init__()
-        from transformers import CLIPModel, CLIPProcessor
-
-        self.device = torch.device(device)
-        self.processor = CLIPProcessor.from_pretrained(processor_path)
-        self.model = CLIPModel.from_pretrained(model_path).eval().to(self.device)
-
-    @torch.no_grad()
-    def forward(self, prompts: Sequence[str], images: Sequence[Image.Image]) -> list[float]:
-        image_inputs = self.processor(
-            images=list(images),
-            padding=True,
-            truncation=True,
-            max_length=77,
-            return_tensors="pt",
-        )
-        text_inputs = self.processor(
-            text=list(prompts),
-            padding=True,
-            truncation=True,
-            max_length=77,
-            return_tensors="pt",
-        )
-        image_inputs = {key: value.to(device=self.device) for key, value in image_inputs.items()}
-        text_inputs = {key: value.to(device=self.device) for key, value in text_inputs.items()}
-
-        image_embs = _feature_tensor(self.model.get_image_features(**image_inputs))
-        image_embs = image_embs / image_embs.norm(p=2, dim=-1, keepdim=True).clamp_min(1e-12)
-
-        text_embs = _feature_tensor(self.model.get_text_features(**text_inputs))
-        text_embs = text_embs / text_embs.norm(p=2, dim=-1, keepdim=True).clamp_min(1e-12)
-
-        scores = self.model.logit_scale.exp() * (text_embs @ image_embs.T)
-        scores = scores.diag() / 26.0
-        return [float(score) for score in scores.detach().cpu()]
-
-
-class VideoPickScoreScorer(torch.nn.Module):
-    """Multi-frame PickScore for LTX video (matches trainer-rollout / verl-omni)."""
-
-    def __init__(
-        self,
-        *,
-        device: str = "cuda",
-        processor_path: str,
-        model_path: str,
-        dtype: torch.dtype = torch.float16,
+        dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__()
         from transformers import AutoModel, AutoProcessor
@@ -174,65 +127,31 @@ class VideoPickScoreScorer(torch.nn.Module):
         self.model = AutoModel.from_pretrained(model_path).eval().to(device=self.device, dtype=dtype)
 
     @torch.no_grad()
-    def score_videos(
-        self,
-        videos_fchw: Sequence[torch.Tensor],
-        prompts: Sequence[str],
-        *,
-        num_frames: int,
-        batch_size: int,
-    ) -> list[float]:
-        if len(videos_fchw) != len(prompts):
-            raise ValueError(f"#videos ({len(videos_fchw)}) != #prompts ({len(prompts)})")
+    def forward(self, prompts: Sequence[str], images: Sequence[Image.Image]) -> list[float]:
+        image_inputs = self.processor(images=list(images), return_tensors="pt", padding=True)
+        image_inputs = {k: v.to(device=self.device) for k, v in image_inputs.items()}
+        if "pixel_values" in image_inputs:
+            image_inputs["pixel_values"] = image_inputs["pixel_values"].to(self.dtype)
 
-        flat_images: list[Image.Image] = []
-        flat_prompts: list[str] = []
-        per_sample_counts: list[int] = []
+        text_inputs = self.processor(
+            text=list(prompts),
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=77,
+        )
+        text_inputs = {k: v.to(self.device) for k, v in text_inputs.items()}
 
-        for video_fchw, prompt in zip(videos_fchw, prompts, strict=True):
-            frame_indices = sample_frame_indices(video_fchw.shape[0], num_frames)
-            per_sample_counts.append(len(frame_indices))
-            flat_images.extend(fchw_to_pil_frames(video_fchw, frame_indices))
-            flat_prompts.extend([prompt] * len(frame_indices))
+        image_embs = _feature_tensor(self.model.get_image_features(**image_inputs))
+        image_embs = image_embs / image_embs.norm(p=2, dim=-1, keepdim=True).clamp_min(1e-12)
 
-        logit_scale = self.model.logit_scale.exp()
-        flat_scores: list[torch.Tensor] = []
-        for start in range(0, len(flat_images), batch_size):
-            image_chunk = flat_images[start : start + batch_size]
-            prompt_chunk = flat_prompts[start : start + batch_size]
+        text_embs = _feature_tensor(self.model.get_text_features(**text_inputs))
+        text_embs = text_embs / text_embs.norm(p=2, dim=-1, keepdim=True).clamp_min(1e-12)
 
-            image_inputs = self.processor(images=image_chunk, return_tensors="pt", padding=True)
-            image_inputs = {k: v.to(device=self.device) for k, v in image_inputs.items()}
-            if "pixel_values" in image_inputs:
-                image_inputs["pixel_values"] = image_inputs["pixel_values"].to(self.dtype)
-
-            text_inputs = self.processor(
-                text=prompt_chunk,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=77,
-            )
-            text_inputs = {k: v.to(self.device) for k, v in text_inputs.items()}
-
-            image_embs = _feature_tensor(self.model.get_image_features(**image_inputs))
-            image_embs = image_embs / image_embs.norm(p=2, dim=-1, keepdim=True).clamp_min(1e-12)
-
-            text_embs = _feature_tensor(self.model.get_text_features(**text_inputs))
-            text_embs = text_embs / text_embs.norm(p=2, dim=-1, keepdim=True).clamp_min(1e-12)
-
-            chunk_scores = logit_scale * (text_embs * image_embs).sum(dim=-1)
-            flat_scores.append(chunk_scores.float())
-
-        all_scores = torch.cat(flat_scores, dim=0)
+        scores = self.model.logit_scale.exp() * (text_embs * image_embs).sum(dim=-1)
         # Flow-Factory convention: scale raw PickScore logits (~0-26) to ~0-1.
-        all_scores = all_scores / 26.0
-        rewards: list[float] = []
-        offset = 0
-        for count in per_sample_counts:
-            rewards.append(float(all_scores[offset : offset + count].mean()))
-            offset += count
-        return rewards
+        scores = scores.float() / 26.0
+        return [float(score) for score in scores.detach().cpu()]
 
 
 @ray.remote
@@ -249,36 +168,25 @@ class PickScoreRewardActor:
             torch.cuda.set_device(0)
         device = "cuda" if use_cuda else "cpu"
         self.device = device
-        self.image_scorer = PickScoreScorer(
-            device=device,
-            processor_path=processor_path,
-            model_path=model_path,
-        )
-        self.video_scorer = VideoPickScoreScorer(
-            device=device,
-            processor_path=processor_path,
-            model_path=model_path,
-            dtype=torch.float16 if use_cuda else torch.float32,
-        )
+        self._processor_path = processor_path
+        self._model_path = model_path
+        self._scorers: dict[torch.dtype, PickScoreScorer] = {}
 
-    def score_batch(self, images: list[np.ndarray], prompts: list[str]) -> list[float]:
-        pil_images = [Image.fromarray(image) for image in images]
-        return self.image_scorer(prompts, pil_images)
+    def _scorer(self, dtype: torch.dtype) -> PickScoreScorer:
+        if self.device == "cpu":
+            dtype = torch.float32
+        if dtype not in self._scorers:
+            self._scorers[dtype] = PickScoreScorer(
+                device=self.device,
+                processor_path=self._processor_path,
+                model_path=self._model_path,
+                dtype=dtype,
+            )
+        return self._scorers[dtype]
 
-    def score_videos_batch(
-        self,
-        videos_fchw: list[torch.Tensor],
-        prompts: list[str],
-        *,
-        num_frames: int,
-        batch_size: int,
-    ) -> list[float]:
-        return self.video_scorer.score_videos(
-            videos_fchw,
-            prompts,
-            num_frames=num_frames,
-            batch_size=batch_size,
-        )
+    def score_batch(self, images: list, prompts: list[str], *, fp16: bool = False) -> list[float]:
+        pil_images = [Image.fromarray(image) if isinstance(image, np.ndarray) else image for image in images]
+        return self._scorer(torch.float16 if fp16 else torch.float32)(prompts, pil_images)
 
 
 class AsyncPickScorePool(metaclass=SingletonMeta):
@@ -288,7 +196,6 @@ class AsyncPickScorePool(metaclass=SingletonMeta):
         num_workers = args.pickscore_num_workers
         num_gpus_per_worker = args.pickscore_num_gpus_per_worker
         self._batch_size = args.pickscore_batch_size
-        self._num_frames = args.pickscore_num_frames
         self._actors = [
             PickScoreRewardActor.options(
                 num_cpus=1,
@@ -313,42 +220,39 @@ class AsyncPickScorePool(metaclass=SingletonMeta):
         self._round_robin_index += 1
         return self._actors[i]
 
-    async def score(self, images: list[np.ndarray], prompts: list[str]) -> list[float]:
+    async def score(self, images: list, prompts: list[str], *, fp16: bool = False) -> list[float]:
         refs = []
         for start in range(0, len(images), self._batch_size):
             end = start + self._batch_size
-            refs.append(self._next_actor().score_batch.remote(images[start:end], prompts[start:end]))
+            refs.append(self._next_actor().score_batch.remote(images[start:end], prompts[start:end], fp16=fp16))
 
         loop = asyncio.get_running_loop()
         chunked_scores = await loop.run_in_executor(None, ray.get, refs)
         return [float(score) for chunk in chunked_scores for score in chunk]
 
-    async def score_videos(
-        self,
-        videos_fchw: list[torch.Tensor],
-        prompts: list[str],
-    ) -> list[float]:
-        actor = self._next_actor()
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None,
-            ray.get,
-            actor.score_videos_batch.remote(
-                videos_fchw,
-                prompts,
-                num_frames=self._num_frames,
-                batch_size=self._batch_size,
-            ),
-        )
-
 
 async def pickscore_rm(args, samples: Sequence[Sample]) -> list[float]:
     pool = AsyncPickScorePool(args)
-    if any(is_video_generated_output(sample.generated_output) for sample in samples):
-        videos = [generated_output_to_fchw(sample.generated_output) for sample in samples]
-        prompts = [sample.prompt for sample in samples]
-        return await pool.score_videos(videos, prompts)
-
-    images = [_sample_to_rgb_hwc_uint8(sample) for sample in samples]
     prompts = [sample.prompt for sample in samples]
-    return await pool.score(images, prompts)
+    if not any(is_video_generated_output(sample.generated_output) for sample in samples):
+        images = [_sample_to_rgb_hwc_uint8(sample) for sample in samples]
+        return await pool.score(images, prompts)
+
+    # Video: N evenly spaced frames per sample, scored flat, then mean per sample (fp16 recipe).
+    flat_frames: list[Image.Image] = []
+    flat_prompts: list[str] = []
+    frame_counts: list[int] = []
+    for sample, prompt in zip(samples, prompts, strict=True):
+        video_fchw = generated_output_to_fchw(sample.generated_output)
+        frame_indices = sample_frame_indices(video_fchw.shape[0], args.pickscore_num_frames)
+        frame_counts.append(len(frame_indices))
+        flat_frames.extend(fchw_to_pil_frames(video_fchw, frame_indices))
+        flat_prompts.extend([prompt] * len(frame_indices))
+
+    flat_scores = await pool.score(flat_frames, flat_prompts, fp16=True)
+    rewards: list[float] = []
+    offset = 0
+    for count in frame_counts:
+        rewards.append(float(sum(flat_scores[offset : offset + count]) / count))
+        offset += count
+    return rewards
