@@ -1377,6 +1377,13 @@ def miles_validate_args(args):
             args.train_pipeline_config_path = f"{cfg_cls.__module__}.{cfg_cls.__qualname__}"
         if args.model_backend_path is None:
             args.model_backend_path = cfg_cls.model_backend_path
+        if not cfg_cls.supports_cfg_training and (
+            args.diffusion_guidance_scale != 1.0 or args.diffusion_negative_prompt is not None
+        ):
+            raise ValueError(
+                f"{cfg_cls.__name__} trains unguided (supports_cfg_training=False); set "
+                f"--diffusion-guidance-scale 1.0 and drop --diffusion-negative-prompt"
+            )
         cfg_cls.validate_args(args)
 
     if args.dump_details is not None:
@@ -1431,6 +1438,10 @@ def miles_validate_args(args):
 
     if args.eval_function_path is None:
         args.eval_function_path = args.rollout_function_path
+
+    # cps/ode log_probs drop Gaussian constants on both the engine and trainer sides.
+    if args.diffusion_sde_type in ("cps", "ode"):
+        args.diffusion_log_prob_no_const = True
 
     # The train-side scorer must replicate the rollout dynamics; derive it from the same knob.
     if args.sde_step_backend_path is None:
