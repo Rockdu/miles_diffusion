@@ -25,8 +25,6 @@ from diffusers import DiffusionPipeline
 
 logger = logging.getLogger(__name__)
 
-_deterministic_flash_patched: set[str] = set()
-
 
 class ModelBackend(abc.ABC):
     def __init__(self, train_pipeline_config):
@@ -75,12 +73,9 @@ class DiffusersModelBackend(ModelBackend):
 
         from .arguments import deterministic_capable_flash_fns
 
-        if "diffusers" in _deterministic_flash_patched:
-            return
         names = deterministic_capable_flash_fns()
         for fn_name in names:
             setattr(ad, fn_name, functools.partial(getattr(ad, fn_name), deterministic=True))
-        _deterministic_flash_patched.add("diffusers")
         logger.info("Enabled deterministic flash attention backward for: %s", ", ".join(names))
 
     def load_models_and_scheduler(
@@ -117,8 +112,6 @@ class LTXModelBackend(ModelBackend):
         # ltx_core binds flash kernels via module globals; wrap them with deterministic=True.
         import ltx_core.model.transformer.attention as ltx_attn
 
-        if "ltx_core" in _deterministic_flash_patched:
-            return
         patched: list[str] = []
         f3 = ltx_attn.flash_attn_interface
         if f3 is not None and "deterministic" in inspect.signature(f3.flash_attn_func).parameters:
@@ -135,7 +128,6 @@ class LTXModelBackend(ModelBackend):
                 f"is unavailable or exposes no deterministic argument (patched: {patched or None}). "
                 f"Use --fsdp-attention-backend math for a deterministic backward."
             )
-        _deterministic_flash_patched.add("ltx_core")
         logger.info("Enabled deterministic ltx_core flash attention backward for: %s", ", ".join(patched))
 
     def load_models_and_scheduler(
