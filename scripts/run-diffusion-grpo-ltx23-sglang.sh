@@ -70,6 +70,7 @@ fi
   --num-rollout "${NUM_ROLLOUT}" \
   --micro-batch-size-sample "${MICRO_BATCH_SIZE_SAMPLE:-1}" \
   --micro-batch-size-tstep "${MICRO_BATCH_SIZE_TSTEP:-1}" \
+  --diffusion-train-iter-order "${TRAIN_ITER_ORDER:-sample_major}" \
   --diffusion-microgroup-size "${MICROGROUP_SIZE:-1}" \
   --gradient-checkpointing \
   --colocate \
