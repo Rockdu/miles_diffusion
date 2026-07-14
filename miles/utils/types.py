@@ -62,7 +62,6 @@ class DiTTrajectory:
     # σ * 1000 / 1000 in fp32 and drifts 1-2 ULPs, amplifying to ~3e-5
     # log_prob diff.
     sigmas: torch.Tensor | None = None
-    sde_step_indices: torch.Tensor | None = None
 
 
 @dataclass

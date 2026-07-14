@@ -117,7 +117,6 @@ def _parse_dit_trajectory(
         latents=deserialize_func(data.get("latents")),
         timesteps=deserialize_func(data.get("timesteps")),
         sigmas=deserialize_func(data.get("sigmas")),
-        sde_step_indices=deserialize_func(data.get("sde_step_indices")),
     )
 
 
