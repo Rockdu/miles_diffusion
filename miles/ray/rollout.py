@@ -387,21 +387,7 @@ class RolloutManager:
                 reward_key=self.args.reward_key,
             )
 
-        data = self.train_data_converter.convert_samples(samples, rewards, raw_rewards)
-        # Reorder train pairs tstep-major within each optim-step block to match the tile traversal.
-        td = data["train_data"]
-        n_samples = len(samples)
-        if td and n_samples and len(td) % n_samples == 0:
-            k = len(td) // n_samples
-            steps = self.args.num_steps_per_rollout
-            if k > 1 and n_samples % steps == 0:
-                spb = n_samples // steps
-                reordered = []
-                for b in range(steps):
-                    block = td[b * spb * k : (b + 1) * spb * k]
-                    reordered.extend(block[s_i * k + t_i] for t_i in range(k) for s_i in range(spb))
-                data["train_data"] = reordered
-        return data
+        return self.train_data_converter.convert_samples(samples, rewards, raw_rewards)
 
     def _log_images(
         self,
