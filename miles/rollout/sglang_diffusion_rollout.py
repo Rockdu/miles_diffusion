@@ -72,9 +72,6 @@ def build_rollout_sampling_params(
         extra_sampling_params = dict(extra_sampling_params or {})
         extra_sampling_params["guidance_scale_2"] = float(args.diffusion_guidance_scale_2)
 
-    if not evaluation and args.diffusion_sde_type == "flow_sde" and args.diffusion_sigma_min is not None:
-        sampling_params["rollout_sigma_min"] = float(args.diffusion_sigma_min)
-
     if extra_sampling_params:
         sampling_params["extra_sampling_params"] = extra_sampling_params
 

@@ -97,7 +97,6 @@ fi
   --fsdp-attention-backend "${FSDP_ATTENTION_BACKEND:-sdpa_math}" \
   --diffusion-sde-type cps \
   --diffusion-noise-level 0.8 \
-  --diffusion-sigma-min 0.001 \
   --diffusion-guidance-scale 1.0 \
   --diffusion-height "${HEIGHT:-512}" \
   --diffusion-width "${WIDTH:-768}" \

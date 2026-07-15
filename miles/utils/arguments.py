@@ -312,12 +312,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Video fps for rollout; None for image models.",
             )
             parser.add_argument(
-                "--diffusion-sigma-min",
-                type=float,
-                default=None,
-                help="Override sigma_min for the rollout SDE step (flow_sde only).",
-            )
-            parser.add_argument(
                 "--diffusion-output-num-frames",
                 type=int,
                 default=1,
