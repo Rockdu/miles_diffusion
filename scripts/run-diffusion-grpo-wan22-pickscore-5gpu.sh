@@ -115,7 +115,7 @@ WAN_LORA_TARGET_MODULES=(
   --diffusion-width 480 \
   --diffusion-flow-shift 3.0 \
   --diffusion-step-strategy-path miles.rollout.step_strategy_hub.epoch_global_random_choice \
-  --diffusion-sde-window-size 1 \
+  --diffusion-num-sde-steps 1 \
   --diffusion-sde-candidate-steps 1,2,3 \
   --diffusion-debug-mode \
   --save "${SAVE_DIR}" \

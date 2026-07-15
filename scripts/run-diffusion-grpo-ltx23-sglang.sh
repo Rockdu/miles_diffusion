@@ -116,7 +116,7 @@ fi
   --diffusion-kl-beta 0.0 \
   --diffusion-num-steps "${NUM_STEPS:-24}" \
   --diffusion-step-strategy-path miles.rollout.step_strategy_hub.epoch_global_random_choice \
-  --diffusion-sde-window-size "${LTX_NUM_SDE_STEPS:-3}" \
+  --diffusion-num-sde-steps "${LTX_NUM_SDE_STEPS:-3}" \
   --diffusion-sde-candidate-steps "${LTX_SDE_STEP_CANDIDATES:-0,1,2,3,4,5,6,7,8,9}" \
   --fsdp-attention-backend "${FSDP_ATTENTION_BACKEND:-sdpa_math}" \
   --diffusion-sde-type cps \

@@ -378,11 +378,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="SdeStepBackend class path; default = flow-matching SDE over scheduler sigmas.",
             )
             parser.add_argument(
-                "--diffusion-sde-window-size",
+                "--diffusion-num-sde-steps",
                 type=int,
                 default=0,
-                help="flow_grpo-style random SDE window; 0 disables. Steps outside "
-                "the window run ODE and are not returned for training.",
+                help="Number of SDE steps to train on; 0 disables. The step strategy "
+                "interprets it (contiguous window for sde_window, random subset for "
+                "epoch_global_random_choice); other steps run ODE and are not returned.",
             )
             parser.add_argument(
                 "--diffusion-sde-window-range",
@@ -405,7 +406,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=str,
                 default=None,
                 help="Dotted path to a factory(args) -> StepStrategy callable. "
-                "Overrides --diffusion-sde-window-size.",
+                "Overrides --diffusion-num-sde-steps.",
             )
             parser.add_argument(
                 "--diffusion-log-prob-no-const",
