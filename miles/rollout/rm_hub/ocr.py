@@ -10,7 +10,7 @@ from paddleocr import PaddleOCR
 from PIL import Image
 
 from miles.utils.misc import SingletonMeta
-from miles.utils.process_utils import cfhw_to_fhwc, image_or_video_to_uint8
+from miles.utils.processing_utils import cfhw_to_fhwc, image_or_video_to_uint8
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)

@@ -7,7 +7,7 @@ from typing import Any
 import ray
 import torch
 
-from miles.utils.process_utils import fhwc_to_cfhw
+from miles.utils.processing_utils import fhwc_to_cfhw
 from miles.utils.types import (
     CondKwargs,
     DenoisingEnv,

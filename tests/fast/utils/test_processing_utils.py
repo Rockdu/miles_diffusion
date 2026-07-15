@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from miles.utils.process_utils import cfhw_to_fhwc, fhwc_to_cfhw, image_or_video_to_uint8
+from miles.utils.processing_utils import cfhw_to_fhwc, fhwc_to_cfhw, image_or_video_to_uint8
 
 
 def test_cfhw_fhwc_round_trip():
