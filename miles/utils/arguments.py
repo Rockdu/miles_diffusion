@@ -397,7 +397,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help="Comma-separated step indices forming the SDE window candidate "
                 "set for step strategies that draw from a list (e.g. '1,2,3'). "
-                "Required by epoch_global_window: valid indices depend on the schedule, so "
+                "Required by epoch_global_random_choice: valid indices depend on the schedule, so "
                 "there is no safe default.",
             )
             parser.add_argument(
