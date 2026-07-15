@@ -91,7 +91,7 @@ class TrainPipelineConfig(abc.ABC):
 
     sde_timestep_divisor = 1.0
 
-    def configure(self, args) -> None:
+    def configure(self, args) -> None:  # noqa: B027  optional no-op hook, not abstract
         """Bind the request constants a family needs at train time; default binds none."""
 
     def compute_noise_pred(

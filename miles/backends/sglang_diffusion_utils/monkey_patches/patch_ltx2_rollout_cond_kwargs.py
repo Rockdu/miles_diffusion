@@ -29,9 +29,7 @@ def apply() -> None:
     try:
         from sglang.multimodal_gen.runtime.pipelines_core.stages.ltx_2_denoising import LTX2DenoisingStage
     except ImportError:  # niehen feat/ltx-rollout-miles layout: LTX uses the generic stage
-        from sglang.multimodal_gen.runtime.pipelines_core.stages.denoising import (
-            DenoisingStage as LTX2DenoisingStage,
-        )
+        from sglang.multimodal_gen.runtime.pipelines_core.stages.denoising import DenoisingStage as LTX2DenoisingStage
 
     if not hasattr(LTX2DenoisingStage, "_prepare_denoising_loop"):
         logger.warning(

@@ -40,10 +40,7 @@ def _normalize_generated_output(tensor: torch.Tensor | None) -> torch.Tensor | N
     if tensor is None:
         return None
     if tensor.ndim not in (3, 4):
-        raise ValueError(
-            "generated_output must be CHW/HWC or CFHW/FHWC, "
-            f"got shape {tuple(tensor.shape)}"
-        )
+        raise ValueError("generated_output must be CHW/HWC or CFHW/FHWC, " f"got shape {tuple(tensor.shape)}")
 
     first_is_channel = tensor.shape[0] in _IMAGE_CHANNEL_COUNTS
     last_is_channel = tensor.shape[-1] in _IMAGE_CHANNEL_COUNTS
