@@ -383,7 +383,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=0,
                 help="Number of SDE steps to train on; 0 disables. The step strategy "
                 "interprets it (contiguous window for sde_window, random subset for "
-                "epoch_global_random_choice); other steps run ODE and are not returned.",
+                "epoch_global_* subset); other steps run ODE and are not returned.",
             )
             parser.add_argument(
                 "--diffusion-sde-window-range",
@@ -398,7 +398,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help="Comma-separated step indices forming the SDE window candidate "
                 "set for step strategies that draw from a list (e.g. '1,2,3'). "
-                "Required by epoch_global_random_choice: valid indices depend on the schedule, so "
+                "Required by the epoch_global_* strategies: valid indices depend on the schedule, so "
                 "there is no safe default.",
             )
             parser.add_argument(
