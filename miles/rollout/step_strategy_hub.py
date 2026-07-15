@@ -45,29 +45,12 @@ def sde_window(
     return indices, None
 
 
-def epoch_global_window(
-    args: Namespace, sample: Sample, num_steps: int, seed: int
-) -> tuple[list[int] | None, list[int] | None]:
-    """Per-epoch global SDE window: a contiguous run of ``--diffusion-num-sde-steps``
-    candidate steps, drawn once per epoch so every sample in the epoch shares it."""
-    candidates = _sde_candidate_steps(args, num_steps)
-    num_sde_steps = int(args.diffusion_num_sde_steps)
-    if num_sde_steps <= 0:
-        raise ValueError("epoch_global_window requires --diffusion-num-sde-steps > 0")
-    if num_sde_steps >= len(candidates):
-        return candidates, None
-    epoch = int(sample.group_index or 0) // int(args.rollout_batch_size)
-    generator = torch.Generator().manual_seed(epoch + int(args.rollout_seed))
-    start = int(torch.randint(0, len(candidates) - num_sde_steps + 1, (1,), generator=generator))
-    return candidates[start : start + num_sde_steps], None
-
-
 def epoch_global_random_choice(
     args: Namespace, sample: Sample, num_steps: int, seed: int
 ) -> tuple[list[int] | None, list[int] | None]:
-    """Per-epoch global random SDE subset: ``--diffusion-num-sde-steps`` candidate
-    steps drawn at random once per epoch so every sample in the epoch shares them.
-    Keeps randperm draw order so the train-side tstep axis follows the draw."""
+    """Per-epoch global random SDE subset: draw ``--diffusion-num-sde-steps`` candidate
+    steps at random once per epoch so every sample in the epoch shares them. Keeps
+    randperm draw order so the train-side tstep axis follows the draw."""
     candidates = _sde_candidate_steps(args, num_steps)
     num_sde_steps = int(args.diffusion_num_sde_steps)
     if num_sde_steps <= 0:
