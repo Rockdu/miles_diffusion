@@ -7,8 +7,8 @@ import math
 import pytest
 import torch
 
-from miles.backends.fsdp_utils.models.ltx_geometry import build_ltx_t2v_geometry
 from miles.backends.fsdp_utils.model_backend import LTXModelBackend
+from miles.backends.fsdp_utils.models.ltx_geometry import build_ltx_t2v_geometry
 from miles.backends.fsdp_utils.sde_step_backend import CpsSdeStepBackend
 
 
