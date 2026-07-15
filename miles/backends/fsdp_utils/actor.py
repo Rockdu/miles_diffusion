@@ -27,7 +27,6 @@ from miles.utils.train_data_utils import (
     validate_same_microbatch_counts_across_dp,
 )
 from . import checkpoint
-from .arguments import deterministic_capable_flash_fns
 from .diffusion_update_weight_utils import (
     DiffusionUpdateWeightFromTensor,
     DiffusionUpdateWeightFromTensorLoRA,
