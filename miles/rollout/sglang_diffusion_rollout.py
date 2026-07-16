@@ -185,11 +185,9 @@ async def generate_microgroup(
         sampling_params, microgroup[0].prompt, num_outputs_per_prompt=len(microgroup)
     )
 
-    output = await post(url, payload)
-    refs = [
-        state.next_parser().apply.remote(sample, response) for sample, response in zip(microgroup, output, strict=True)
-    ]
-    microgroup = await asyncio.to_thread(ray.get, refs)
+    raw = await post(url, payload, raw=True)
+    ref = state.next_parser().apply_raw.remote(microgroup, raw)
+    microgroup = await asyncio.to_thread(ray.get, ref)
 
     # Stash the SDE/training step indices on each sample so _train_core can
     # slice the full-length trajectory & rollout_log_probs down to the window.
