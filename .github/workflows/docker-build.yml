@@ -1,0 +1,77 @@
+name: Docker Build
+
+# Build docker/Dockerfile on the self-hosted h200 runner (native amd64).
+#
+# Minimal first step: build-only by default (no registry push, no secrets
+# needed) so a Dockerfile / requirements.txt change can be validated end to
+# end on the real runner. Set the `push` input to publish; that path needs
+# DOCKERHUB_USERNAME / DOCKERHUB_TOKEN secrets, which are not yet configured
+# on this repo.
+
+on:
+  workflow_dispatch:
+    inputs:
+      push:
+        description: 'Push to the registry after building (needs DOCKERHUB_* secrets)'
+        type: boolean
+        default: false
+      image:
+        description: 'Image repository (namespace/name)'
+        type: string
+        default: 'rockdu/miles_diffusion'
+      tag:
+        description: 'Image tag (defaults to the contents of docker/version.txt)'
+        type: string
+        default: ''
+  push:
+    branches:
+      - main
+    paths:
+      - 'docker/Dockerfile'
+      - 'requirements.txt'
+  # Same-repo PRs (not forks) can use the self-hosted runner, so a PR touching
+  # the Dockerfile validates the build before merge. Fork PRs are gated by
+  # GitHub and will not run here.
+  pull_request:
+    paths:
+      - 'docker/Dockerfile'
+      - 'requirements.txt'
+      - '.github/workflows/docker-build.yml'
+
+jobs:
+  build:
+    # Bare (non-container) job so it uses the runner host's docker daemon.
+    runs-on: [self-hosted, h200]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve image + tag
+        id: meta
+        run: |
+          IMAGE="${{ inputs.image }}"
+          [ -z "$IMAGE" ] && IMAGE="rockdu/miles_diffusion"
+          TAG="${{ inputs.tag }}"
+          [ -z "$TAG" ] && TAG="$(tr -d '\n' < docker/version.txt)"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Building $IMAGE:$TAG (push=${{ inputs.push || false }})"
+
+      - name: Login to Docker Hub
+        if: ${{ inputs.push }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build (and optionally push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          push: ${{ inputs.push || false }}
+          tags: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
