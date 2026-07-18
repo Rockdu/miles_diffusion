@@ -1,4 +1,4 @@
-ARG SGLANG_IMAGE_TAG=v0.5.12-cu129
+ARG SGLANG_IMAGE_TAG=v0.5.15.post1-cu129
 FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG} AS sglang
 
 # ======================================== Setup =============================================
@@ -35,7 +35,7 @@ RUN cd /sgl-workspace/sglang && \
     fi && \
     git checkout --detach FETCH_HEAD && \
     SGLANG_BUILD_RUST_EXTS=none pip install -e python --no-deps
-# sgl main's FA3 wrappers need sglang-kernel 0.4.5 (only_qv kwarg); the base image ships 0.4.2.
+# sgl main's FA3 wrappers need sglang-kernel 0.4.5 (only_qv kwarg); the v0.5.15 base ships 0.4.4.
 RUN pip install --no-deps "sglang-kernel==0.4.5+cu129" --extra-index-url https://docs.sglang.io/whl/cu129
 # Bake the kernels lockfile like upstream so the FA3 hub loader never resolves a stale snapshot.
 RUN cd /sgl-workspace/sglang && \
