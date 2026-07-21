@@ -167,6 +167,8 @@ class SGLangDiffusionEngine(RayActor):
             return
         cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         if not cvd:
+            # No ambient device list (full-node multi-node ray start): pin to the physical GPU.
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(self.base_gpu_id)
             return
         visible = [x.strip() for x in cvd.split(",") if x.strip()]
         local_idx = _to_local_gpu_id(self.base_gpu_id)
