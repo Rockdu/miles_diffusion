@@ -67,6 +67,11 @@ class FSDPTrainRayActor(TrainRayActor):
         self.parallel_state = create_fsdp_parallel_state(args)
         torch.manual_seed(args.seed)
 
+        # Offline dashboard: record Timer phases + (rank 0) NVML GPU util; no-op unless --dump-details.
+        from miles.dashboard import hooks
+
+        hooks.register_train_actor(args, role)
+
         self.train_parallel_config = {
             "dp_size": self.parallel_state.dp_size,
         }
