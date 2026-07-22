@@ -12,6 +12,7 @@ import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from tqdm import tqdm
 
+from miles.dashboard import hooks
 from miles.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput
 from miles.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
 from miles.utils.async_utils import run
@@ -185,9 +186,13 @@ async def generate_microgroup(
         sampling_params, microgroup[0].prompt, num_outputs_per_prompt=len(microgroup)
     )
 
-    raw = await post(url, payload, raw=True)
-    ref = state.next_parser().apply_raw.remote(microgroup, raw)
-    microgroup = await asyncio.to_thread(ray.get, ref)
+    st = hooks.StageTimer()
+    with st.stage("generate"):
+        raw = await post(url, payload, raw=True)
+    with st.stage("deserialize"):
+        ref = state.next_parser().apply_raw.remote(microgroup, raw)
+        microgroup = await asyncio.to_thread(ray.get, ref)
+    st.attach(microgroup)
 
     # Stash the SDE/training step indices on each sample so _train_core can
     # slice the full-length trajectory & rollout_log_probs down to the window.
@@ -231,9 +236,13 @@ async def generate_and_rm_microgroup(
         return microgroup
 
     # calculate the reward for the microgroup
-    rewards = await batched_async_rm(args, microgroup)
+    st = hooks.StageTimer()
+    with st.stage("reward"):
+        rewards = await batched_async_rm(args, microgroup)
+    st.attach(microgroup)
     for sample, reward in zip(microgroup, rewards, strict=True):
         sample.reward = reward
+        hooks.record_trajectory(sample)
     return microgroup
 
 
