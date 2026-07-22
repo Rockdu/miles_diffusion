@@ -111,11 +111,19 @@ def init_wandb_secondary(args, router_addr=None):
     if offline:
         settings_kwargs = dict(mode="offline")
     else:
+        # Keep system-stats collection enabled on secondaries so that the
+        # GPU-bearing workers (training rank-0 actor, rollout manager) report
+        # per-GPU system metrics — including the NVML GPM family (SM Active,
+        # tensor/FP-pipe activity, DRAM/NVLink throughput) that wandb collects
+        # on Hopper+ GPUs. The CPU-only Ray driver is the wandb primary and has
+        # no GPU, so if stats were disabled here the System panel would show no
+        # GPU metrics at all. Only two single processes init as secondary
+        # (actor global rank 0 + the rollout manager), so this does not produce
+        # duplicate per-node sampling.
         settings_kwargs = dict(
             mode="shared",
             x_primary=False,
             x_update_finish_state=False,
-            x_disable_stats=True,
         )
 
     if getattr(args, "sglang_enable_metrics", False) and router_addr is not None:
