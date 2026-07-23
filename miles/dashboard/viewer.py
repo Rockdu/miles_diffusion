@@ -1,6 +1,6 @@
 """Render the JSONL from miles.dashboard.hooks into a self-contained HTML dashboard.
 
-Usage: python -m miles.dashboard.viewer --dump-dir <run>/dashboard --out dash.html
+Usage: python -m miles.dashboard.viewer --workspace <path> --out dash.html
 """
 
 from __future__ import annotations
@@ -53,10 +53,10 @@ def _fold_trajectory(events):
     return segments
 
 
-def load_streams(dump_dir: str):
-    phases = _read_jsonl(sorted(glob.glob(os.path.join(dump_dir, "phases", "*.jsonl"))))
-    gpu = _read_jsonl(sorted(glob.glob(os.path.join(dump_dir, "gpu_util", "*.jsonl"))))
-    traj = _read_jsonl(sorted(glob.glob(os.path.join(dump_dir, "trajectories", "*.jsonl"))))
+def load_streams(workspace: str):
+    phases = _read_jsonl(sorted(glob.glob(os.path.join(workspace, "phases", "*.jsonl"))))
+    gpu = _read_jsonl(sorted(glob.glob(os.path.join(workspace, "gpu_util", "*.jsonl"))))
+    traj = _read_jsonl(sorted(glob.glob(os.path.join(workspace, "trajectories", "*.jsonl"))))
     return phases, gpu, _fold_trajectory(traj)
 
 
@@ -256,12 +256,12 @@ draw();
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--dump-dir", required=True, help="the run's <dump_details>/dashboard directory")
+    ap.add_argument("--workspace", required=True, help="miles dashboard workspace")
     ap.add_argument("--out", default="dashboard.html")
     ap.add_argument("--title", default="miles-D rollout dashboard")
     args = ap.parse_args()
 
-    phases, gpu, life = load_streams(args.dump_dir)
+    phases, gpu, life = load_streams(args.workspace)
     html = build_html(phases, gpu, life, title=args.title)
     with open(args.out, "w") as f:
         f.write(html)

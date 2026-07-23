@@ -126,6 +126,9 @@ class RolloutManager:
                 logger.warning(f"CI Fault Injection failed: {e}")
 
     def dispose(self):
+        from miles.dashboard import hooks
+
+        hooks.detach_and_flush()
         if self._metric_checker is not None:
             self._metric_checker.dispose()
         if self._health_monitor is not None:

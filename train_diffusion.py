@@ -3,6 +3,7 @@ import sys
 
 import ray
 
+from miles.dashboard.backend import finish_dashboard, init_dashboard
 from miles.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
 from miles.utils.arguments import parse_args
 from miles.utils.logging_utils import configure_logger
@@ -17,6 +18,7 @@ def train(args):
     logger.info("train: creating placement groups")
     pgs = create_placement_groups(args)
     logger.info("train: placement groups ready")
+    args.use_miles_dashboard = init_dashboard(args)
     init_tracking(args)
 
     # create the rollout manager, with sglang engines inside.
@@ -82,7 +84,9 @@ def train(args):
         if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
             ray.get(rollout_manager.eval.remote(rollout_id))
 
+    actor_model.flush_dashboard()
     ray.get(rollout_manager.dispose.remote())
+    finish_dashboard()
 
 
 if __name__ == "__main__":

@@ -11,6 +11,21 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 
 
+@dataclass
+class PhaseEvent:
+    name: str
+    t0: float
+    t1: float
+    role: str
+    pid: int
+    node: str
+    gpus: list[int]
+    rank: int
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
 class TrajectoryEventKind(StrEnum):
     GEN_START = "gen_start"
     GEN_END = "gen_end"
@@ -47,6 +62,7 @@ class TrajectoryEvent:
     turn: int
     weight_version: str
     detail: str
+    rollout_id: int
 
     def to_dict(self) -> dict:
         return asdict(self)
