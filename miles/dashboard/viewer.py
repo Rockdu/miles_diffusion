@@ -66,7 +66,12 @@ def _compute_data(phases, gpu, life=None) -> dict:
     ts_candidates = [p["t0"] for p in phases] + [g["ts"] for g in gpu] + [x["t0"] for x in life]
     t0 = min(ts_candidates) if ts_candidates else 0.0
     ph = [
-        {"name": p.get("name", "?"), "role": p.get("role", "?"), "s": round(p["t0"] - t0, 3), "e": round(p["t1"] - t0, 3)}
+        {
+            "name": p.get("name", "?"),
+            "role": p.get("role", "?"),
+            "s": round(p["t0"] - t0, 3),
+            "e": round(p["t1"] - t0, 3),
+        }
         for p in phases
         if p.get("t1", 0) >= p.get("t0", 0)
     ]
@@ -322,7 +327,9 @@ def main():
     ap.add_argument("--workspace", required=True, help="miles dashboard workspace")
     ap.add_argument("--out", default="dashboard.html")
     ap.add_argument("--title", default="miles-D rollout dashboard")
-    ap.add_argument("--serve", action="store_true", help="run a live auto-updating server instead of writing a static file")
+    ap.add_argument(
+        "--serve", action="store_true", help="run a live auto-updating server instead of writing a static file"
+    )
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8000)
     args = ap.parse_args()

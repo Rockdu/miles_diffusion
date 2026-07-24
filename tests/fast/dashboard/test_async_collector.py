@@ -6,8 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from miles.dashboard import hooks
-from miles.dashboard import backend
+from miles.dashboard import backend, hooks
 from miles.dashboard.collector import CollectorConfig, DashboardCollector
 from miles.dashboard.events import PhaseEvent, TrajectoryEvent
 from miles.dashboard.store import DashboardStore, Stream
@@ -144,9 +143,7 @@ def test_store_partitions_by_utc_hour(tmp_path):
 
 
 def test_collector_disk_failure_keeps_buffer_bounded(tmp_path, monkeypatch, caplog):
-    collector = DashboardCollector(
-        CollectorConfig(workspace=str(tmp_path / "dashboard"), run_name="test", start_ts=0)
-    )
+    collector = DashboardCollector(CollectorConfig(workspace=str(tmp_path / "dashboard"), run_name="test", start_ts=0))
     monkeypatch.setattr(collector, "MAX_BUFFERED_PER_STREAM", 3)
     monkeypatch.setattr(collector._store, "flush", lambda: (_ for _ in ()).throw(OSError("disk full")))
     for index in range(5):
@@ -160,9 +157,7 @@ def test_collector_disk_failure_keeps_buffer_bounded(tmp_path, monkeypatch, capl
 
 def test_collector_output_loads_in_existing_viewer(tmp_path):
     workspace = tmp_path / "dashboard"
-    collector = DashboardCollector(
-        CollectorConfig(workspace=str(workspace), run_name="test", start_ts=0)
-    )
+    collector = DashboardCollector(CollectorConfig(workspace=str(workspace), run_name="test", start_ts=0))
     collector.push_phases([_phase(11.0)])
     collector.push_trajectories([_trajectory(10.0, "gen_start"), _trajectory(12.0, "gen_end")])
     collector.flush()
@@ -170,16 +165,12 @@ def test_collector_output_loads_in_existing_viewer(tmp_path):
     phases, gpu, lifecycle = load_streams(str(workspace))
     assert phases[0]["name"] == "actor_train"
     assert gpu == []
-    assert lifecycle == [
-        {"rollout_id": 5, "sample_index": 3, "stage": "gen", "t0": 10.0, "t1": 12.0}
-    ]
+    assert lifecycle == [{"rollout_id": 5, "sample_index": 3, "stage": "gen", "t0": 10.0, "t1": 12.0}]
 
 
 def test_collector_shutdown_flushes_tail(tmp_path):
     workspace = tmp_path / "dashboard"
-    collector = DashboardCollector(
-        CollectorConfig(workspace=str(workspace), run_name="test", start_ts=0)
-    )
+    collector = DashboardCollector(CollectorConfig(workspace=str(workspace), run_name="test", start_ts=0))
     collector.push_phases([_phase(11.0)])
     collector.shutdown()
     phases, _, _ = load_streams(str(workspace))

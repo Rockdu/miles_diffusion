@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 BATCH_MAX_EVENTS = 64
 BATCH_MAX_SECONDS = 2.0
 
+
 class PhaseSink:
     def __init__(self, handle, role: str) -> None:
         self.handle = handle
@@ -80,7 +81,7 @@ class TrajectorySink:
                 kinds = STAGE_KINDS.get(seg["stage"])
                 if kinds is None:
                     continue
-                for kind, ts in zip(kinds, (seg["t0"], seg["t1"])):
+                for kind, ts in zip(kinds, (seg["t0"], seg["t1"]), strict=True):
                     events.append(
                         TrajectoryEvent(
                             ts=ts,
