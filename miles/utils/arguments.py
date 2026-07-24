@@ -1095,6 +1095,18 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=("Dump all details of training for post-hoc analysis and visualization."),
             )
+            parser.add_argument(
+                "--use-miles-dashboard",
+                action="store_true",
+                default=False,
+                help="Collect phase and trajectory telemetry asynchronously.",
+            )
+            parser.add_argument(
+                "--miles-dashboard-workspace",
+                type=str,
+                default="./miles_dashboard",
+                help="Directory for miles dashboard telemetry.",
+            )
             return parser
 
         def add_network_arguments(parser):

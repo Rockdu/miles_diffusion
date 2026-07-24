@@ -24,8 +24,10 @@ from miles.utils.metric_checker import MetricChecker
 from miles.utils.metric_utils import compute_rollout_step, compute_statistics, dict_add_prefix
 from miles.utils.misc import load_function
 from miles.utils.ray_utils import Box
+from miles.utils.timer import timer
 from miles.utils.tracking_utils import init_tracking
 from miles.utils.train_data_utils import RolloutTrainDataConverter, TrainDataDPSplitter, reorder_train_pairs_for_tiling
+from miles.utils.train_metric_utils import log_perf_data_raw
 from miles.utils.types import Sample
 
 from .utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, Lock
@@ -46,6 +48,9 @@ class RolloutManager:
         logger.info("RolloutManager init start")
         self.args = args
         self.pg = pg
+        from miles.dashboard import hooks
+
+        hooks.register_rollout_manager(args)
         set_reward_placement_group(pg)
         logger.info("RolloutManager: starting router...")
         _start_router(args)
@@ -123,6 +128,9 @@ class RolloutManager:
                 logger.warning(f"CI Fault Injection failed: {e}")
 
     def dispose(self):
+        from miles.dashboard import hooks
+
+        hooks.detach_and_flush()
         if self._metric_checker is not None:
             self._metric_checker.dispose()
         if self._health_monitor is not None:
@@ -142,18 +150,25 @@ class RolloutManager:
         return len(self.data_source.dataset) // self.args.rollout_batch_size
 
     def generate(self, rollout_id):
+        from miles.dashboard import hooks
+
         start_time = time.time()
         self.rollout_id = rollout_id
+        hooks.set_rollout_id(rollout_id)
         self.health_monitoring_resume()
         logger.info("RolloutManager generate start: rollout_id=%s", rollout_id)
 
         if self.args.ci_test and self.args.use_fault_tolerance and rollout_id >= 2:
             self._try_ci_fault_injection()
 
-        data, metrics = self._get_rollout_data(rollout_id=rollout_id)
-        self._save_debug_rollout_data(data, rollout_id=rollout_id, evaluation=False)
+        with timer("rollout"):
+            data, metrics = self._get_rollout_data(rollout_id=rollout_id)
+        with timer("save_debug_dump"):
+            self._save_debug_rollout_data(data, rollout_id=rollout_id, evaluation=False)
         _log_rollout_data(rollout_id, self.args, data, metrics, time.time() - start_time)
-        data = self._convert_samples_to_train_data(data)
+        with timer("convert_train_pairs"):
+            data = self._convert_samples_to_train_data(data)
+        log_perf_data_raw(rollout_id, self.args, is_primary_rank=True)
         logger.info("RolloutManager generate done: rollout_id=%s", rollout_id)
         dp_size = self.train_parallel_config["dp_size"]
         # Legacy 2D compat: strided DP split + tile reorder reproduce the legacy
@@ -211,18 +226,20 @@ class RolloutManager:
 
     def offload(self):
         self.health_monitoring_pause()
-        return ray.get(
-            [engine.release_memory_occupation.remote() for engine in self.rollout_engines if engine is not None]
-        )
+        with timer("rollout_offload"):
+            return ray.get(
+                [engine.release_memory_occupation.remote() for engine in self.rollout_engines if engine is not None]
+            )
 
     def onload(self, tags: list[str] | None = None):
-        return ray.get(
-            [
-                engine.resume_memory_occupation.remote(tags=tags)
-                for engine in self.rollout_engines
-                if engine is not None
-            ]
-        )
+        with timer("rollout_onload"):
+            return ray.get(
+                [
+                    engine.resume_memory_occupation.remote(tags=tags)
+                    for engine in self.rollout_engines
+                    if engine is not None
+                ]
+            )
 
     def onload_weights(self):
         self.onload(tags=[GPU_MEMORY_TYPE_WEIGHTS])
