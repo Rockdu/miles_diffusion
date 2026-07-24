@@ -9,6 +9,9 @@ from . import wandb_utils
 def init_tracking(args, primary: bool = True, **kwargs):
     if primary:
         wandb_utils.init_wandb_primary(args, **kwargs)
+        from miles.dashboard.backend import init_dashboard
+
+        init_dashboard(args)
     else:
         wandb_utils.init_wandb_secondary(args, **kwargs)
 
