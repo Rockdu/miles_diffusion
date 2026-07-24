@@ -63,7 +63,11 @@ def init_dashboard(args) -> bool:
 
     _handle = handle
     _is_primary = True
-    logger.info("miles dashboard telemetry -> %s", config.workspace)
+    logger.info(
+        "miles dashboard telemetry -> %s | view: python -m miles.dashboard.viewer --serve --workspace %s",
+        config.workspace,
+        config.workspace,
+    )
     return True
 
 
