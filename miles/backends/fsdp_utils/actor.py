@@ -833,18 +833,35 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules
         "mesh": mesh,
     }
 
-    # diffusers' _keep_in_fp32_modules params must enter forward at fp32; exempt them
-    # from the param_dtype projection (they stay small unsharded fp32 replicas).
+    # diffusers' _keep_in_fp32_modules params must enter forward at fp32, but mp_policy
+    # projects every param in a group. Matched MODULES get their own no-cast group
+    # (sharded, grads reduced, fp32 all-gather); matched BARE params (e.g. Wan's
+    # scale_shift_table hangs directly on the block) have no module to wrap, so they
+    # stay as small unsharded fp32 replicas via ignored_params.
     keep_fp32 = getattr(model, "_keep_in_fp32_modules", None) or []
-    ignored_params = {p for n, p in model.named_parameters() if any(pat in n for pat in keep_fp32)}
+    fp32_kwargs = dict(fsdp_kwargs, mp_policy=MixedPrecisionPolicy(param_dtype=None, reduce_dtype=reduce_dtype))
+    fp32_module_params = set()
+    for name, module in model.named_modules():
+        last = name.rsplit(".", 1)[-1]
+        if any(pat in last for pat in keep_fp32) and any(True for _ in module.parameters()):
+            fully_shard(module, **fp32_kwargs)
+            fp32_module_params.update(module.parameters())
+    ignored_params = {
+        p
+        for n, p in model.named_parameters()
+        if any(pat in n for pat in keep_fp32) and p not in fp32_module_params
+    }
     if ignored_params:
-        trainable = [n for n, p in model.named_parameters() if p.requires_grad and any(m in n for m in keep_fp32)]
+        trainable = sum(p.requires_grad for p in ignored_params)
         if trainable:
-            # FSDP does not reduce gradients for ignored params; needs a manual
-            # grad all-reduce hook before full finetuning of these archs.
-            raise ValueError(f"_keep_in_fp32_modules params must be frozen for FSDP, got trainable: {trainable[:3]}")
-        logger.info(f"FSDP: {len(ignored_params)} params kept fp32 in forward ({keep_fp32})")
+            # FSDP does not reduce gradients for ignored params.
+            raise ValueError(f"{trainable} bare _keep_in_fp32_modules params are trainable; freeze them or wrap in a module")
         fsdp_kwargs["ignored_params"] = ignored_params
+    if keep_fp32:
+        logger.info(
+            f"FSDP: keep-fp32 forward — {len(fp32_module_params)} params in no-cast groups, "
+            f"{len(ignored_params)} bare params replicated ({keep_fp32})"
+        )
 
     if args.gradient_checkpointing:
         # MixedPrecisionPolicy does not cast buffers; a buffer above param_dtype
