@@ -833,6 +833,19 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules
         "mesh": mesh,
     }
 
+    # diffusers' _keep_in_fp32_modules params must enter forward at fp32; exempt them
+    # from the param_dtype projection (they stay small unsharded fp32 replicas).
+    keep_fp32 = getattr(model, "_keep_in_fp32_modules", None) or []
+    ignored_params = {p for n, p in model.named_parameters() if any(pat in n for pat in keep_fp32)}
+    if ignored_params:
+        trainable = [n for n, p in model.named_parameters() if p.requires_grad and any(m in n for m in keep_fp32)]
+        if trainable:
+            # FSDP does not reduce gradients for ignored params; needs a manual
+            # grad all-reduce hook before full finetuning of these archs.
+            raise ValueError(f"_keep_in_fp32_modules params must be frozen for FSDP, got trainable: {trainable[:3]}")
+        logger.info(f"FSDP: {len(ignored_params)} params kept fp32 in forward ({keep_fp32})")
+        fsdp_kwargs["ignored_params"] = ignored_params
+
     if args.gradient_checkpointing:
         # MixedPrecisionPolicy does not cast buffers; a buffer above param_dtype
         # makes the ckpt recompute dtype-diverge from the forward and abort.
