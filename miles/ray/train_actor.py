@@ -113,11 +113,6 @@ class TrainRayActor(RayActor):
         clear_memory()
         print_memory("after TrainRayActor.clear_memory")
 
-    def flush_dashboard(self):
-        from miles.dashboard import hooks
-
-        hooks.detach_and_flush()
-
     @abc.abstractmethod
     def sleep(self, tags):
         raise NotImplementedError

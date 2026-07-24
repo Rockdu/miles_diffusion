@@ -134,8 +134,5 @@ class RayTrainGroup:
     def clear_memory(self):
         return ray.get([actor.clear_memory.remote() for actor in self._actor_handlers])
 
-    def flush_dashboard(self):
-        return ray.get([actor.flush_dashboard.remote() for actor in self._actor_handlers])
-
     def set_rollout_manager(self, rollout_manager):
         return ray.get([actor.set_rollout_manager.remote(rollout_manager) for actor in self._actor_handlers])

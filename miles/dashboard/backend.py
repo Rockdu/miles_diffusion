@@ -13,13 +13,12 @@ GET_ACTOR_TIMEOUT_SECONDS = 60.0
 GET_ACTOR_INTERVAL_SECONDS = 2.0
 
 _handle = None
-_is_primary = False
 _resolution_failed = False
 
 
 def init_dashboard(args) -> bool:
     """Create the collector on the driver. Failure disables dashboard telemetry."""
-    global _handle, _is_primary
+    global _handle
     if not args.use_miles_dashboard:
         return False
 
@@ -58,11 +57,9 @@ def init_dashboard(args) -> bool:
             except Exception:
                 pass
         _handle = None
-        _is_primary = False
         return False
 
     _handle = handle
-    _is_primary = True
     logger.info(
         "miles dashboard telemetry -> %s | view: python -m miles.dashboard.viewer --serve --workspace %s",
         config.workspace,
@@ -93,25 +90,3 @@ def resolve_collector():
                 _resolution_failed = True
                 return None
             time.sleep(GET_ACTOR_INTERVAL_SECONDS)
-
-
-def finish_dashboard() -> None:
-    """Flush the driver's sinks, then synchronously stop the collector."""
-    global _handle, _is_primary, _resolution_failed
-    from miles.dashboard import hooks
-
-    hooks.detach_and_flush()
-    if _handle is not None and _is_primary:
-        import ray
-
-        try:
-            ray.get(_handle.shutdown.remote(), timeout=30)
-        except Exception:
-            logger.warning("dashboard collector shutdown incomplete", exc_info=True)
-        try:
-            ray.kill(_handle)
-        except Exception:
-            logger.warning("dashboard collector actor could not be killed", exc_info=True)
-    _handle = None
-    _is_primary = False
-    _resolution_failed = False
