@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import yaml
 
+from .sequence_parallel.topology import validate_sp_config
+
 
 @dataclass
 class FSDPArgs:
@@ -32,8 +34,7 @@ class FSDPArgs:
 
     attn_implementation: str = "flash_attention_2"
 
-    # DiT attention backend, passed to diffusers set_attention_backend (e.g.
-    # "flash", "sage", "native"). None keeps the diffusers default.
+    # diffusers set_attention_backend value; None keeps the default. Ring attention accepts the RING_KERNELS subset.
     fsdp_attention_backend: str | None = None
 
     # Logging
@@ -57,8 +58,12 @@ class FSDPArgs:
     # support matrix. Name kept identical to Megatron's.
     deterministic_mode: bool = False
 
-    # Context Parallelism
-    context_parallel_size: int = 1  # Context Parallelism size
+    # Sequence Parallelism (USP = Ulysses x Ring)
+    sequence_parallel_size: int = 1
+    # 0=auto: ulysses fills sp; ring = sp // ulysses. Ring degrees > 1 run on
+    # torch's experimental (private) ring-attention implementation and require
+    # torch >= 2.11 (the CI image's pin).
+    ulysses_degree: int = 0
 
     # YAML bookkeeping
     config: str | None = None
@@ -151,6 +156,33 @@ def validate_attention_args(args):
         f"torch.use_deterministic_algorithms with no deterministic hook here. Use a "
         f"flash (flash/_flash_3) or native (SDPA) backend."
     )
+
+
+def validate_sp_args(args) -> None:
+    """Validate the finalized train topology and SP/backend combination on the driver.
+
+    Model-instance constraints such as ``_cp_plan`` availability and attention
+    dispatch compatibility are checked later, after the model is loaded.
+    """
+    from miles.utils.misc import load_function
+
+    from .sequence_parallel.attention import RING_KERNELS
+
+    sp_size, _, ring_degree = validate_sp_config(
+        args.actor_num_gpus_per_node * args.actor_num_nodes,
+        args.sequence_parallel_size,
+        args.ulysses_degree,
+    )
+    if sp_size == 1:
+        return
+    if ring_degree > 1 and args.fsdp_attention_backend not in RING_KERNELS:
+        raise ValueError(
+            f"--fsdp-attention-backend {args.fsdp_attention_backend!r} cannot drive ring attention; "
+            f"supported: {sorted(k for k in RING_KERNELS if k is not None)}"
+        )
+    backend_cls = load_function(args.model_backend_path)
+    if not backend_cls.supports_sequence_parallelism:
+        raise ValueError(f"{backend_cls.__name__} does not support sequence parallelism")
 
 
 def load_fsdp_args(extra_args_provider=None):

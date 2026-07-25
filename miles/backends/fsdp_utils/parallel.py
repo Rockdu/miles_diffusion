@@ -7,55 +7,70 @@ from torch.distributed.device_mesh import init_device_mesh
 from miles.utils.distributed_utils import get_gloo_group
 
 from ..training_utils.parallel import ParallelState
+from .sequence_parallel.topology import locate_rank, sp_subgroups, validate_sp_config
 
 logger = logging.getLogger(__name__)
 
 
 def create_fsdp_parallel_state(args: Namespace) -> ParallelState:
-    """Create a ParallelState instance for FSDP configuration."""
+    """ParallelState for FSDP + optional sequence parallelism.
+
+    SP gets its own process groups. FSDP shards parameters over every mesh
+    axis (dp x sp flattened) — should a replicate axis (HSDP) ever be added,
+    flatten only the shard axes, not the whole world. Data dispatch is by
+    dp_rank; sp peers share samples.
+    """
     world_size = dist.get_world_size()
     rank = dist.get_rank()
 
-    cp_size = args.context_parallel_size
-    dp_rank = rank // cp_size
-    cp_rank = rank % cp_size
-
-    mesh = init_device_mesh("cuda", mesh_shape=(world_size // cp_size, cp_size), mesh_dim_names=("dp", "cp"))
-
-    logger.info(
-        f"[Rank {rank}] Device mesh (2D): world_size={world_size}, "
-        f"cp_size={cp_size}, dp_size={world_size // cp_size}"
+    sp_size, ulysses_degree, ring_degree = validate_sp_config(
+        world_size, args.sequence_parallel_size, args.ulysses_degree
     )
-    logger.info(f"[Rank {rank}] Mesh shape: {mesh.shape}, " f"dp_rank={dp_rank}, cp_rank={cp_rank}")
+    dp_rank, sp_rank, _, _ = locate_rank(rank, sp_size, ulysses_degree)
+    dp_size = world_size // sp_size
 
-    # Setup Ring Flash Attention with CP group from mesh (only when cp_size > 1).
-    # Lazy import to avoid a hard dependency on ring_flash_attn at module load;
-    # the package is incompatible with transformers>=5.4 for pure-DP runs.
-    if cp_size > 1:
-        from ring_flash_attn import substitute_hf_flash_attn
+    mesh = init_device_mesh("cuda", mesh_shape=(dp_size, sp_size), mesh_dim_names=("dp", "sp"))
+    dp_group = mesh.get_group("dp")
+    sp_group = mesh.get_group("sp")
+    logger.info(
+        f"[Rank {rank}] mesh dp={dp_size} sp={sp_size} (ulysses={ulysses_degree} ring={ring_degree}), "
+        f"dp_rank={dp_rank} sp_rank={sp_rank}"
+    )
 
-        substitute_hf_flash_attn(mesh.get_group("cp"), heads_k_stride=1)
-        logger.info(f"[Rank {rank}] CP initialized via device mesh")
-    else:
-        logger.info(f"[Rank {rank}] Pure DP mode (cp_size=1)")
+    # dist.new_group is collective: every rank must create every group.
+    # Degree-1 dimensions stay None (usp_attention treats None as local).
+    ulysses_group = ring_group = None
+    if sp_size > 1:
+        _, _, _, ulysses_groups, ring_groups = sp_subgroups(world_size, sp_size, ulysses_degree)
+        if ulysses_degree > 1:
+            for ranks in ulysses_groups:
+                group = dist.new_group(ranks)
+                if rank in ranks:
+                    ulysses_group = group
+        if ring_degree > 1:
+            for ranks in ring_groups:
+                group = dist.new_group(ranks)
+                if rank in ranks:
+                    ring_group = group
 
     parallel_state = ParallelState(
         dp_rank=dp_rank,
-        dp_src_rank=dp_rank // world_size,
-        dp_size=world_size // cp_size,
-        cp_rank=cp_rank,
-        cp_size=cp_size,
-        dp_cp_rank=rank,
-        dp_cp_size=world_size,
-        dp_group=mesh.get_group("dp"),
-        dp_cp_group=dist.group.WORLD,
-        dp_cp_group_gloo=get_gloo_group(),
-        cp_group=mesh.get_group("cp"),
+        dp_src_rank=0,
+        dp_size=dp_size,
+        dp_group=dp_group,
+        sp_rank=sp_rank,
+        sp_size=sp_size,
+        sp_group=sp_group,
+        ulysses_degree=ulysses_degree,
+        ring_degree=ring_degree,
+        ulysses_group=ulysses_group,
+        ring_group=ring_group,
+        dp_sp_rank=rank,
+        dp_sp_size=world_size,
+        dp_sp_group_gloo=get_gloo_group(),
         tp_size=1,
         tp_rank=0,
-        tp_group=dist.new_group([rank]),
+        tp_group=None,
     )
-
-    parallel_state.dp_mesh = mesh["dp"]
-
+    parallel_state.fsdp_mesh = mesh[("dp", "sp")]._flatten("dp_sp") if sp_size > 1 else mesh["dp"]
     return parallel_state

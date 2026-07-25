@@ -26,7 +26,7 @@ from miles.utils.train_data_utils import (
     build_microbatch_schedule,
     scheduler_meta_from_rollout,
     stack_train_pair_rollout_debug,
-    validate_same_microbatch_counts_across_dp,
+    validate_same_microbatch_counts_across_train_ranks,
 )
 from . import checkpoint
 from .diffusion_update_weight_utils import (
@@ -36,6 +36,7 @@ from .diffusion_update_weight_utils import (
 )
 from .lr_scheduler import get_lr_scheduler
 from .parallel import create_fsdp_parallel_state
+from .sequence_parallel.plan import apply_sequence_parallel
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,7 @@ class FSDPTrainRayActor(TrainRayActor):
             full_state = model.state_dict() if rank == 0 else {}
             model = apply_fsdp2(
                 model,
-                mesh=self.parallel_state.dp_mesh,
+                mesh=self.parallel_state.fsdp_mesh,
                 cpu_offload=self.args.fsdp_cpu_offload,
                 args=self.args,
                 no_split_modules=self.model_backend.fsdp_no_split_modules(model),
@@ -135,6 +136,17 @@ class FSDPTrainRayActor(TrainRayActor):
             del full_state
             self.train_pipeline_config.postprocess_model_after_materialize(model)
             self.models[component] = model
+
+        if self.parallel_state.sp_size > 1:
+            for model in self.models.values():
+                plan = self.model_backend.sequence_parallel_plan(model)
+                apply_sequence_parallel(
+                    model,
+                    self.parallel_state,
+                    plan,
+                    self.model_backend.install_sequence_parallel_attention,
+                )
+
         # Force a sync to ensure sharding is complete and old memory is freed.
         torch.cuda.synchronize()
         clear_memory()
@@ -273,14 +285,14 @@ class FSDPTrainRayActor(TrainRayActor):
                 log_dict["train/lr"] = float(self.optimizer.param_groups[0]["lr"])
             except Exception:
                 pass
-        if self.parallel_state.dp_cp_rank == 0:
-            dp_size = self.parallel_state.dp_cp_size
+        if self.parallel_state.dp_sp_rank == 0:
+            dp_size = self.parallel_state.dp_sp_size
             gathered = [None] * dp_size
             dist.gather_object(
                 log_dict,
                 gathered,
                 dst=self.parallel_state.dp_src_rank,
-                group=self.parallel_state.dp_cp_group_gloo,
+                group=self.parallel_state.dp_sp_group_gloo,
             )
             reduced = {k: sum(d[k] for d in gathered) / dp_size for k in log_dict}
             reduced["train/epoch"] = float(rollout_id)
@@ -301,7 +313,7 @@ class FSDPTrainRayActor(TrainRayActor):
                 log_dict,
                 None,
                 dst=self.parallel_state.dp_src_rank,
-                group=self.parallel_state.dp_cp_group_gloo,
+                group=self.parallel_state.dp_sp_group_gloo,
             )
 
     def train(self, rollout_id: int, rollout_data_ref) -> None:  # type: ignore[override]
@@ -381,7 +393,7 @@ class FSDPTrainRayActor(TrainRayActor):
             num_optim_steps_per_rollout=num_optim_steps_per_rollout,
             micro_batch_size=micro_bs,
         )
-        validate_same_microbatch_counts_across_dp(
+        validate_same_microbatch_counts_across_train_ranks(
             microbatch_schedule=microbatch_schedule,
             parallel_state=self.parallel_state,
         )

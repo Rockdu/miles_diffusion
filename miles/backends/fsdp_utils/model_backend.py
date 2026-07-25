@@ -1,15 +1,18 @@
 """Model backend: owns model-side behavior for the FSDP trainer.
 
 Selected via ``--model-backend-path`` (miles custom-function style); the
-family config declares the default. Three concerns, all properties of the
+family config declares the default. Four concerns, all properties of the
 concrete modeling rather than of the training loop:
 
   - ``load_component`` / ``load_scheduler``: checkpoint -> model components and scheduler
   - ``enable_gradient_checkpointing``: how this model turns on grad ckpt
   - ``fsdp_no_split_modules``: which block classes FSDP wraps
+  - ``sequence_parallel_plan`` / ``install_sequence_parallel_attention``:
+    the model's SP declaration and attention integration
 
-Defaults implement the diffusers protocol (see ``models/__init__.py``); a
-native model overrides methods here instead of retrofitting its instances.
+Defaults adapt the diffusers protocol (see ``models/__init__.py``); a native
+backend overrides the model-side seams and provides one plan for each model it
+supports under sequence parallelism.
 """
 
 from __future__ import annotations
@@ -24,10 +27,15 @@ import torch
 import torch.distributed as dist
 from diffusers import DiffusionPipeline
 
+from .sequence_parallel.diffusers_dispatch import install_diffusers_usp_patch
+from .sequence_parallel.plan import MILES_SP_PLAN_ATTR, SequenceParallelPlan
+
 logger = logging.getLogger(__name__)
 
 
 class ModelBackend:
+    supports_sequence_parallelism = False
+
     def __init__(self, train_pipeline_config):
         self.config = train_pipeline_config
 
@@ -68,12 +76,25 @@ class ModelBackend:
     def set_attention_backend(self, model: torch.nn.Module, backend: str) -> None:
         raise NotImplementedError
 
+    def sequence_parallel_plan(self, model: torch.nn.Module) -> SequenceParallelPlan:
+        """Return the model's declarative SequenceParallelPlan."""
+        raise NotImplementedError(f"{type(self).__name__} does not support sequence parallelism")
+
+    def install_sequence_parallel_attention(self, model: torch.nn.Module, parallel_state) -> None:
+        """Install this backend's model-specific sequence-parallel attention integration."""
+        raise NotImplementedError(f"{type(self).__name__} does not provide a sequence-parallel attention integration")
+
 
 class DiffusersModelBackend(ModelBackend):
     """Load trainable components from a diffusers pipeline checkpoint."""
 
+    supports_sequence_parallelism = True
+
     def set_attention_backend(self, model: torch.nn.Module, backend: str) -> None:
         model.set_attention_backend(backend)
+
+    def install_sequence_parallel_attention(self, model: torch.nn.Module, parallel_state) -> None:
+        install_diffusers_usp_patch(model, parallel_state)
 
     def _enable_deterministic_flash_attention(self, name: str) -> None:
         """Patch diffusers flash entrypoints to deterministic=True (backward only; idempotent)."""
@@ -156,6 +177,27 @@ class DiffusersModelBackend(ModelBackend):
             except ImportError:
                 return None
         return getattr(module, class_name, None)
+
+    def sequence_parallel_plan(self, model: torch.nn.Module) -> SequenceParallelPlan:
+        base = model.get_base_model() if hasattr(model, "get_base_model") else model
+        plan = getattr(base, MILES_SP_PLAN_ATTR, None)
+        if plan is not None:
+            if not isinstance(plan, SequenceParallelPlan):
+                raise TypeError(
+                    f"{base.__class__.__name__}.{MILES_SP_PLAN_ATTR} must be a SequenceParallelPlan, "
+                    f"got {type(plan).__name__}"
+                )
+            return plan
+
+        boundaries = getattr(base, "_cp_plan", None)
+        if not boundaries:
+            raise ValueError(f"{base.__class__.__name__} declares no _cp_plan; sequence parallelism unavailable")
+        plan = SequenceParallelPlan(
+            boundaries=boundaries,
+            num_attention_heads=base.config.num_attention_heads,
+        )
+        setattr(base, MILES_SP_PLAN_ATTR, plan)
+        return plan
 
 
 class LTXModelBackend(ModelBackend):
