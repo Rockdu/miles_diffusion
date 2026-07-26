@@ -1,7 +1,6 @@
 import logging
 import warnings
 from argparse import Namespace
-from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from itertools import chain
 
@@ -18,6 +17,7 @@ from miles.utils import tracking_utils, train_metric_utils
 from miles.utils.context_utils import with_defer
 from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.memory_utils import clear_memory, print_memory
+from miles.utils.metric_reduce import MetricBuffer
 from miles.utils.metric_utils import compute_rollout_step
 from miles.utils.profile_utils import TrainProfiler
 from miles.utils.timer import Timer, inverse_timer, timer
@@ -35,6 +35,7 @@ from .diffusion_update_weight_utils import (
     DiffusionUpdateWeightFromTensorLoRAIPC,
 )
 from .lr_scheduler import get_lr_scheduler
+from .metrics import new_metric_buffer, record_rollout_train_abs_diff
 from .parallel import create_fsdp_parallel_state
 from .sequence_parallel.plan import apply_sequence_parallel
 
@@ -278,43 +279,24 @@ class FSDPTrainRayActor(TrainRayActor):
         self.weight_updater.update_weights()
         clear_memory()
 
-    def _gather_and_log_metrics(self, rollout_id: int, log_dict: dict[str, float], step: int) -> None:
-        """Reduce per-rank scalars and log."""
-        if "train/lr" not in log_dict and hasattr(self, "optimizer"):
-            try:
-                log_dict["train/lr"] = float(self.optimizer.param_groups[0]["lr"])
-            except Exception:
-                pass
-        if self.parallel_state.dp_sp_rank == 0:
-            dp_size = self.parallel_state.dp_sp_size
-            gathered = [None] * dp_size
-            dist.gather_object(
-                log_dict,
-                gathered,
-                dst=self.parallel_state.dp_src_rank,
-                group=self.parallel_state.dp_sp_group_gloo,
-            )
-            reduced = {k: sum(d[k] for d in gathered) / dp_size for k in log_dict}
-            reduced["train/epoch"] = float(rollout_id)
-            reduced["rollout/step"] = compute_rollout_step(self.args, rollout_id)
-            reduced["train/step"] = float(step)
-            tracking_utils.log(self.args, reduced, step_key="train/step")
+    def _log_metrics(self, rollout_id: int, log_dict: dict[str, float], step: int) -> None:
+        """Emit already-reduced metrics; every DP group computed the same values."""
+        if dist.get_rank() != 0:
+            return
+        log_dict["train/lr"] = float(self.optimizer.param_groups[0]["lr"])
+        log_dict["train/epoch"] = float(rollout_id)
+        log_dict["rollout/step"] = compute_rollout_step(self.args, rollout_id)
+        log_dict["train/step"] = float(step)
+        tracking_utils.log(self.args, log_dict, step_key="train/step")
 
-            logger.info(
-                f"[train step {int(step)}] rollout={rollout_id} "
-                + " ".join(
-                    f"{k}={v:.6e}"
-                    for k, v in sorted(reduced.items())
-                    if k not in ("train/epoch", "rollout/step", "train/step")
-                )
+        logger.info(
+            f"[train step {int(step)}] rollout={rollout_id} "
+            + " ".join(
+                f"{k}={v:.6e}"
+                for k, v in sorted(log_dict.items())
+                if k not in ("train/epoch", "rollout/step", "train/step")
             )
-        else:
-            dist.gather_object(
-                log_dict,
-                None,
-                dst=self.parallel_state.dp_src_rank,
-                group=self.parallel_state.dp_sp_group_gloo,
-            )
+        )
 
     def train(self, rollout_id: int, rollout_data_ref) -> None:  # type: ignore[override]
         if self.args.offload_train:
@@ -401,6 +383,8 @@ class FSDPTrainRayActor(TrainRayActor):
         # ------------- Recompute old log-probs (impl-consistent PPO ratio) -------------
         if self.args.diffusion_recompute_old_log_prob:
             with timer("recompute_old_log_prob"), torch.no_grad():
+                # write_old_log_prob returns before recording; this is never reduced.
+                unused_metrics = new_metric_buffer(self.parallel_state.dp_group, device, self.models)
                 # Skip window 0: its training forward runs on the same pre-update weights and doubles as the recompute.
                 for microbatch_ranges in microbatch_schedule[1:]:
                     legacy_pad_to_len = self._maybe_legacy_window_pad_len(train_pairs, microbatch_ranges)
@@ -413,7 +397,7 @@ class FSDPTrainRayActor(TrainRayActor):
                             clip_range=clip_range,
                             noise_level=noise_level,
                             num_train_timesteps=num_train_timesteps,
-                            log_stats=defaultdict(list),
+                            metrics=unused_metrics,
                             device=device,
                             pad_to_len=legacy_pad_to_len,
                             write_old_log_prob=True,
@@ -431,7 +415,7 @@ class FSDPTrainRayActor(TrainRayActor):
                 # LEGACY 2D parity: pad cond to the whole-window width. TODO: remove with legacy 2D path.
                 legacy_pad_to_len = self._maybe_legacy_window_pad_len(train_pairs, microbatch_ranges)
 
-                log_stats: dict[str, list[torch.Tensor]] = defaultdict(list)
+                metrics = new_metric_buffer(self.parallel_state.dp_group, device, self.models)
 
                 for pair_lo, pair_hi in microbatch_ranges:
                     chunk = train_pairs[pair_lo:pair_hi]
@@ -443,7 +427,7 @@ class FSDPTrainRayActor(TrainRayActor):
                         clip_range=clip_range,
                         noise_level=noise_level,
                         num_train_timesteps=num_train_timesteps,
-                        log_stats=log_stats,
+                        metrics=metrics,
                         device=device,
                         kl_beta=kl_beta,
                         pad_to_len=legacy_pad_to_len,
@@ -462,7 +446,7 @@ class FSDPTrainRayActor(TrainRayActor):
                         # clip returns a lazily-reduced partial norm; materialize it,
                         # otherwise the logged metric leaks the local shard's value.
                         grad_norm = grad_norm.full_tensor()
-                    log_stats["grad_norm"].append(grad_norm.detach())
+                    metrics.add("grad_norm", grad_norm)
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                     self.lr_scheduler.step()
@@ -470,9 +454,8 @@ class FSDPTrainRayActor(TrainRayActor):
                     self.optimizer.zero_grad(set_to_none=True)
                 self.global_step += 1
 
-                # Do mean over all ranks for now, may need to be updated for p99, max, etc.
-                reduced = {f"train/{k}": torch.stack(v).mean().item() for k, v in log_stats.items()}
-                self._gather_and_log_metrics(rollout_id, reduced, step=self.global_step)
+                reduced = {f"train/{key}": value for key, value in metrics.reduce().items()}
+                self._log_metrics(rollout_id, reduced, step=self.global_step)
 
     def _maybe_legacy_window_pad_len(self, train_pairs: list, microbatch_ranges: list) -> int | None:
         """LEGACY 2D parity: the whole-window max cond seq_len (like the legacy tile path), or
@@ -498,7 +481,7 @@ class FSDPTrainRayActor(TrainRayActor):
         clip_range: float,
         noise_level: float,
         num_train_timesteps: int,
-        log_stats: dict[str, list[torch.Tensor]],
+        metrics: MetricBuffer,
         device: torch.device,
         kl_beta: float = 0.0,
         pad_to_len: int | None = None,
@@ -652,7 +635,7 @@ class FSDPTrainRayActor(TrainRayActor):
         loss_sum = per_pair_loss.sum()
 
         # ------------- KL loss (vs LoRA base model as reference) -------------
-        kl_loss = loss_sum.new_zeros(())
+        kl_sum = loss_sum.new_zeros(())
         if kl_beta > 0:
             with torch.no_grad():
                 ref_noise_pred_microbatch = _compute_noise_pred(disable_adapter=True)
@@ -670,55 +653,40 @@ class FSDPTrainRayActor(TrainRayActor):
                 keepdim=True,
             ) / (2 * std_dev_t_new**2)
             loss_sum = loss_sum + kl_beta * kl_per_pair.sum()
-            kl_loss = kl_per_pair.mean()
+            kl_sum = kl_per_pair.sum()
 
         with torch.no_grad():
-            log_stats["loss"].append((per_pair_loss.mean() + kl_beta * kl_loss).detach())
-            log_stats["policy_loss"].append(per_pair_loss.mean().detach())
-            log_stats["kl_loss"].append(kl_loss.detach())
-            log_stats["loss_abs_mean"].append(per_pair_loss.abs().mean().detach())
-            log_stats["adv_abs_mean"].append(advantage.abs().mean().detach())
-            log_stats["ratio_abs_minus_1"].append((ratio - 1.0).abs().mean().detach())
-            log_stats["approx_kl"].append(0.5 * torch.mean((log_prob_new - log_prob_old) ** 2).detach())
-            log_stats["clipfrac"].append(torch.mean((torch.abs(ratio - 1.0) > clip_range).float()).detach())
-            log_stats["log_prob_new_idx_0"].append(log_prob_new[0].detach())
-            log_stats["log_prob_old_idx_0"].append(log_prob_old[0].detach())
-            log_prob_mean_abs_diff = torch.mean(torch.abs(log_prob_new - log_prob_old)).detach()
-            log_stats["log_prob_mean_abs_diff"].append(log_prob_mean_abs_diff)
+            # Sums, not means: the flush divides by the globally summed pair count.
+            metrics.add("loss", loss_sum, bsz)
+            metrics.add("policy_loss", per_pair_loss.sum(), bsz)
+            metrics.add("kl_loss", kl_sum, bsz)
+            metrics.add("loss_abs_mean", per_pair_loss.abs().sum(), bsz)
+            metrics.add("adv_abs_mean", advantage.abs().sum(), bsz)
+            metrics.add("ratio_abs_minus_1", (ratio - 1.0).abs().sum(), bsz)
+            metrics.add("approx_kl", 0.5 * ((log_prob_new - log_prob_old) ** 2).sum(), bsz)
+            metrics.add("clipfrac", (torch.abs(ratio - 1.0) > clip_range).float().sum(), bsz)
+            # Single-pair probes: one observation per micro-batch, not a batch statistic.
+            metrics.add("log_prob_new_idx_0", log_prob_new[0], 1)
+            metrics.add("log_prob_old_idx_0", log_prob_old[0], 1)
+            log_prob_abs_diff_sum = torch.abs(log_prob_new - log_prob_old).sum()
+            metrics.add("log_prob_mean_abs_diff", log_prob_abs_diff_sum, bsz)
             if len(self.models) > 1:
-                log_stats[f"log_prob_mean_abs_diff_{component}"].append(log_prob_mean_abs_diff)
+                metrics.add(f"log_prob_mean_abs_diff_{component}", log_prob_abs_diff_sum, bsz)
 
             # model_output_* checks the train forward reproduces the rollout forward -- the only
             # model-dependent consistency metric (std_dev/prev_sample_mean are deterministic
             # functions of it). Matches the legacy actor metric name.
             rollout_model_output = stack_train_pair_rollout_debug(batch, "rollout_step_model_output")
             if rollout_model_output is not None:
-                mean_abs_diff = _append_rollout_train_abs_diff_stats(
-                    log_stats,
+                record_rollout_train_abs_diff(
+                    metrics,
                     "model_output",
                     noise_pred_microbatch.float(),
                     rollout_model_output.to(device=device, dtype=torch.float32),
+                    component=component if len(self.models) > 1 else None,
                 )
-                if len(self.models) > 1:
-                    log_stats[f"model_output_mean_abs_diff_{component}"].append(mean_abs_diff)
 
         return loss_sum
-
-
-def _append_rollout_train_abs_diff_stats(
-    log_stats: dict[str, list],
-    prefix: str,
-    train: torch.Tensor,
-    rollout: torch.Tensor,
-) -> torch.Tensor:
-    bsz = train.shape[0]
-    diff = (train.reshape(bsz, -1).float() - rollout.reshape(bsz, -1).float()).abs()
-    ref_max = rollout.reshape(bsz, -1).float().abs().max() + 1e-30
-    mean_abs_diff = diff.mean().detach()
-    log_stats[f"{prefix}_max_abs_diff"].append(diff.max().detach())
-    log_stats[f"{prefix}_mean_abs_diff"].append(mean_abs_diff)
-    log_stats[f"{prefix}_rel_max"].append((diff.max() / ref_max).detach())
-    return mean_abs_diff
 
 
 def _cast_cond_to_dtype(cond: dict, dtype: torch.dtype) -> dict:
