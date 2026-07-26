@@ -3,7 +3,7 @@
 import torch
 import torch.distributed as dist
 
-from miles.utils.metric_reduce import MetricBuffer, MetricReduce
+from miles.utils.metric_buffer import MetricBuffer, MetricReduce
 
 
 def _buffer(group=None, **schema) -> MetricBuffer:

@@ -4,7 +4,7 @@ from collections.abc import Collection
 
 import torch
 
-from miles.utils.metric_reduce import MetricBuffer, MetricReduce
+from miles.utils.metric_buffer import MetricBuffer, MetricReduce
 
 # Declaring metrics here also fixes the cross-rank layout the reduction packs into.
 SCHEMA = {

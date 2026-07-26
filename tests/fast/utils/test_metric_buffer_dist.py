@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-_WORKER = Path(__file__).with_name("_metric_reduce_worker.py")
+_WORKER = Path(__file__).with_name("_metric_buffer_worker.py")
 
 
 def test_metric_buffer_reduction():

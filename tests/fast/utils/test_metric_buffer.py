@@ -7,7 +7,7 @@ register_cpu_ci(est_time=15, suite="stage-a-cpu", labels=[])
 import pytest
 import torch
 
-from miles.utils.metric_reduce import MetricBuffer, MetricReduce
+from miles.utils.metric_buffer import MetricBuffer, MetricReduce
 
 
 def _buffer(**schema) -> MetricBuffer:
