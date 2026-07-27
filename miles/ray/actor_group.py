@@ -56,7 +56,7 @@ class RayTrainGroup:
             **self.args.train_env_vars,
         }
 
-        if getattr(self.args, "deterministic_mode", False):
+        if self.args.deterministic_mode:
             # Must be in the process env at spawn: NCCL reads it at
             # init_process_group and cuBLAS at first matmul, both before the actor
             # runs. torch-runtime knobs are set in the actor instead.

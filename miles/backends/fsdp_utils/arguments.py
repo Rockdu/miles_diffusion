@@ -132,7 +132,7 @@ def deterministic_capable_flash_fns():
 
 def validate_attention_args(args):
     """Fail fast (driver-side, before any actor launches) on deterministic-mode misconfig."""
-    if not getattr(args, "deterministic_mode", False):
+    if not args.deterministic_mode:
         return
     backend = args.fsdp_attention_backend
     name = "" if backend is None else backend.lower()

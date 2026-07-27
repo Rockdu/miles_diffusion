@@ -1404,38 +1404,37 @@ def miles_validate_args(args):
 
     args.rollout_patch_groups = ["sgld"] if args.apply_sgld_monkey_patches else []
 
-    if getattr(args, "diffusion_model", None):
-        from miles.utils.misc import load_function
+    from miles.utils.misc import load_function
 
-        if args.train_pipeline_config_path is not None:
-            # Explicit config path IS the identity (custom classes never need registering).
-            cfg_cls = load_function(args.train_pipeline_config_path)
-            args.diffusion_model_family = None
-        else:
-            from miles.backends.fsdp_utils.configs.train_pipeline_config import (
-                get_train_pipeline_config_cls,
-                resolve_diffusion_model_family,
-            )
+    if args.train_pipeline_config_path is not None:
+        # Explicit config path IS the identity (custom classes never need registering).
+        cfg_cls = load_function(args.train_pipeline_config_path)
+        args.diffusion_model_family = None
+    else:
+        from miles.backends.fsdp_utils.configs.train_pipeline_config import (
+            get_train_pipeline_config_cls,
+            resolve_diffusion_model_family,
+        )
 
-            args.diffusion_model_family = resolve_diffusion_model_family(args.diffusion_model)
-            cfg_cls = get_train_pipeline_config_cls(args.diffusion_model_family)
-            args.train_pipeline_config_path = f"{cfg_cls.__module__}.{cfg_cls.__qualname__}"
-        if args.model_backend_path is None:
-            args.model_backend_path = cfg_cls.model_backend_path
-        if cfg_cls.rollout_patch_group:
-            args.rollout_patch_groups.append(cfg_cls.rollout_patch_group)
-        if not cfg_cls.supports_cfg_training and (
-            args.diffusion_guidance_scale != 1.0 or args.diffusion_negative_prompt is not None
-        ):
-            raise ValueError(
-                f"{cfg_cls.__name__} trains unguided (supports_cfg_training=False); set "
-                f"--diffusion-guidance-scale 1.0 and drop --diffusion-negative-prompt"
-            )
-        cfg_cls.validate_args(args)
-        if args.use_lora and args.lora_target_modules is None:
-            args.lora_target_modules = list(cfg_cls.lora_target_modules)
+        args.diffusion_model_family = resolve_diffusion_model_family(args.diffusion_model)
+        cfg_cls = get_train_pipeline_config_cls(args.diffusion_model_family)
+        args.train_pipeline_config_path = f"{cfg_cls.__module__}.{cfg_cls.__qualname__}"
+    if args.model_backend_path is None:
+        args.model_backend_path = cfg_cls.model_backend_path
+    if cfg_cls.rollout_patch_group:
+        args.rollout_patch_groups.append(cfg_cls.rollout_patch_group)
+    if not cfg_cls.supports_cfg_training and (
+        args.diffusion_guidance_scale != 1.0 or args.diffusion_negative_prompt is not None
+    ):
+        raise ValueError(
+            f"{cfg_cls.__name__} trains unguided (supports_cfg_training=False); set "
+            f"--diffusion-guidance-scale 1.0 and drop --diffusion-negative-prompt"
+        )
+    cfg_cls.validate_args(args)
+    if args.use_lora and args.lora_target_modules is None:
+        args.lora_target_modules = list(cfg_cls.lora_target_modules)
 
-    if getattr(args, "lora_ipc_weight_sync", False):
+    if args.lora_ipc_weight_sync:
         if not args.use_lora:
             raise ValueError("--lora-ipc-weight-sync requires --use-lora")
         if not args.lora_target_modules:
@@ -1476,11 +1475,10 @@ def miles_validate_args(args):
         "debug_rollout_only and debug_train_only cannot be set at the same time, " "please set only one of them."
     )
 
-    if getattr(args, "diffusion_model", None):
-        from miles.backends.fsdp_utils.arguments import validate_hybrid_shard_args, validate_sp_args
+    from miles.backends.fsdp_utils.arguments import validate_hybrid_shard_args, validate_sp_args
 
-        validate_sp_args(args)
-        validate_hybrid_shard_args(args)
+    validate_sp_args(args)
+    validate_hybrid_shard_args(args)
 
     # always true on offload for colocate at the moment.
     if args.colocate:
@@ -1541,7 +1539,7 @@ def miles_validate_args(args):
         args.global_batch_size = derived_gbs
 
     train_world_size = args.actor_num_gpus_per_node * args.actor_num_nodes
-    sp_size = args.sequence_parallel_size if getattr(args, "diffusion_model", None) else 1
+    sp_size = args.sequence_parallel_size
     dp_size = train_world_size // sp_size
     if args.global_batch_size is not None:
         assert (

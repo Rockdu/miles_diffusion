@@ -242,7 +242,7 @@ def build_ltx_train_scheduler(args):
             self.timesteps = self.timesteps.to(device)
             return self
 
-    num_steps = int(getattr(args, "diffusion_num_steps", 24))
+    num_steps = int(args.diffusion_num_steps)
     sigmas = LTX2Scheduler().execute(steps=num_steps).float()
     return _LTXSchedulerHolder(
         sigmas=sigmas,
