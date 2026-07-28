@@ -6,6 +6,7 @@ import logging
 import time
 
 from miles.dashboard.collector import COLLECTOR_ACTOR_NAME, CollectorConfig
+from miles.dashboard.store import run_dir
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +28,11 @@ def init_dashboard(args) -> bool:
 
     from miles.dashboard.collector import DashboardCollector
 
+    start_ts = time.time()
     config = CollectorConfig(
-        workspace=args.miles_dashboard_workspace,
+        workspace=str(run_dir(args.miles_dashboard_workspace, start_ts)),
         run_name="miles-diffusion",
-        start_ts=time.time(),
+        start_ts=start_ts,
         args_snapshot=dict(vars(args)),
     )
     handle = None

@@ -1105,7 +1105,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "--miles-dashboard-workspace",
                 type=str,
                 default="./miles_dashboard",
-                help="Directory for miles dashboard telemetry.",
+                help="Base directory for miles dashboard telemetry; each launch writes to its own run_<ts> subdir.",
             )
             return parser
 

@@ -12,6 +12,7 @@ import os
 from collections import defaultdict
 
 from miles.dashboard.events import SPAN_KINDS
+from miles.dashboard.store import resolve_run_dir
 
 
 def _read_jsonl(paths):
@@ -324,7 +325,7 @@ def serve(workspace: str, host: str, port: int, title: str) -> None:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--workspace", required=True, help="miles dashboard workspace")
+    ap.add_argument("--workspace", required=True, help="miles dashboard workspace, or one run directory in it")
     ap.add_argument("--out", default="dashboard.html")
     ap.add_argument("--title", default="miles-D rollout dashboard")
     ap.add_argument(
@@ -334,10 +335,11 @@ def main():
     ap.add_argument("--port", type=int, default=8000)
     args = ap.parse_args()
 
+    workspace = str(resolve_run_dir(args.workspace))
     if args.serve:
-        serve(args.workspace, args.host, args.port, args.title)
+        serve(workspace, args.host, args.port, args.title)
         return
-    phases, gpu, life = load_streams(args.workspace)
+    phases, gpu, life = load_streams(workspace)
     html = build_html(phases, gpu, life, title=args.title)
     with open(args.out, "w") as f:
         f.write(html)
