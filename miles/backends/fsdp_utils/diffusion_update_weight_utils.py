@@ -31,6 +31,8 @@ except ImportError as _e:
     compute_weights_checksum = None
     _checksum_import_error = _e
 
+from miles.ray.utils import get_physical_gpu_id
+
 
 logger = logging.getLogger(__name__)
 
@@ -233,24 +235,27 @@ class DiffusionUpdateWeightFromTensor(DiffusionUpdateWeight):
             serialized_tensors.append(MultiprocessingSerializer.serialize(flattened_tensor_data, output_str=True))
 
         if self._ipc_gather_src == dist.get_rank():
-            gathered_serialized_batches = [None for _ in range(dist.get_world_size(self._ipc_gather_group))]
+            gathered_batches = [None for _ in range(dist.get_world_size(self._ipc_gather_group))]
         else:
-            gathered_serialized_batches = None
+            gathered_batches = None
 
         dist.gather_object(
-            obj=serialized_tensors,
-            object_gather_list=gathered_serialized_batches,
+            obj=(get_physical_gpu_id(), serialized_tensors),
+            object_gather_list=gathered_batches,
             dst=self._ipc_gather_src,
             group=self._ipc_gather_group,
         )
 
         if dist.get_rank() == self._ipc_gather_src:
+            payload_gpu_uuids = [gpu_uuid for gpu_uuid, _ in gathered_batches]
+            gathered_serialized_batches = [tensors for _, tensors in gathered_batches]
             # TODO: here we assume all ranks have the same number of dtypes.
             num_dtypes = len(gathered_serialized_batches[0])
             assert num_dtypes > 0
             for i in range(num_dtypes):
                 kwargs = {
                     "serialized_named_tensors": [tensors[i] for tensors in gathered_serialized_batches],
+                    "payload_gpu_uuids": payload_gpu_uuids,
                     "load_format": "flattened_bucket",
                     "target_modules": [target_module],
                     "weight_version": str(weight_version),
