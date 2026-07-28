@@ -21,7 +21,8 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
     sde_timestep_divisor = 1000.0
     rollout_patch_group = "ltx"
     hf_ckpt_name_patterns = ("ltx",)
-    model_backend_path = "miles.backends.fsdp_utils.model_backend.LTXModelBackend"
+    model_backend_path = "miles.backends.fsdp_utils.model_backend.MilesModelBackend"
+    model_package = "miles.backends.fsdp_utils.models.ltx"
     # Audio branch has no optimizer state: we only train the video stream.
     optimizer_state_allowed_missing = ["audio"]
 
@@ -103,41 +104,20 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
         if "context" not in cond:
             raise ValueError("LTX train requires denoising_env.pos_cond_kwargs.encoder_hidden_states")
         if "positions" not in cond:
-            cond.update(self._build_geometry(latents_input))
+            from miles.backends.fsdp_utils.models.ltx.positions import prepare_video_positions
+
+            batch_size, num_tokens, _ = latents_input.shape
+            cond["positions"] = prepare_video_positions(
+                batch_size=batch_size,
+                num_tokens=num_tokens,
+                height=self._height,
+                width=self._width,
+                num_frames=self._num_frames,
+                fps=self._fps,
+                device=latents_input.device,
+                dtype=latents_input.dtype,
+            )
         return self.forward_velocity(model, latents_input, timesteps_input, cond)
-
-    def _build_geometry(self, latents_input: torch.Tensor) -> dict:
-        """T2V geometry is a pure function of latent shape + request constants (args)."""
-        from miles.backends.fsdp_utils.models.ltx_geometry import build_ltx_t2v_geometry
-
-        batch_size, num_tokens, latent_dim = latents_input.shape
-        return build_ltx_t2v_geometry(
-            batch_size=batch_size,
-            num_tokens=num_tokens,
-            latent_dim=latent_dim,
-            height=self._height,
-            width=self._width,
-            num_frames=self._num_frames,
-            fps=self._fps,
-            device=latents_input.device,
-            dtype=latents_input.dtype,
-        )
-
-    @staticmethod
-    def _modality_timesteps_for_adaln(per_token_t: torch.Tensor) -> torch.Tensor:
-        """Collapse per-token sigma to batch-global AdaLN input when uniform.
-
-        sglang rollout builds temb with shape ``[B, 1, D]`` (scheduler timestep
-        is batch-scalar expanded only for masking). ltx_core defaults to
-        ``[B, T, D]`` when ``Modality.timesteps`` has length T, which diverges
-        in AdaLN even when every active token shares the same sigma.
-        """
-        if per_token_t.ndim != 2 or per_token_t.shape[1] == 1:
-            return per_token_t
-        ref = per_token_t[:, :1]
-        if torch.allclose(per_token_t, ref.expand_as(per_token_t), rtol=0.0, atol=0.0):
-            return ref
-        return per_token_t
 
     def forward_velocity(
         self,
@@ -157,35 +137,27 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
         # multiplies by timestep_scale_multiplier (1000) internally.
         sigma_scaled = timesteps_input.to(latents_input.dtype)
         sigma_unit = sigma_scaled / float(self.sde_timestep_divisor)
-        denoise_mask = cond["denoise_mask"].to(device)
-        denoise_mask_2d = denoise_mask.squeeze(-1) if denoise_mask.ndim == 3 else denoise_mask
-        denoise_mask_float = denoise_mask_2d.float()
-
-        per_token_t = (sigma_unit.view(B, 1) * denoise_mask_2d).to(dtype)
-        adaln_timesteps = self._modality_timesteps_for_adaln(per_token_t)
+        per_token_t = sigma_unit.view(B, 1).to(dtype)
 
         video_modality = Modality(
             enabled=True,
             latent=latents_input,
             sigma=sigma_unit.reshape(B),
-            timesteps=adaln_timesteps,
+            timesteps=per_token_t,
             positions=cond["positions"].to(dtype),
             context=cond["context"].to(dtype),
             context_mask=None,
         )
+        # FSDP mixed precision casts parameters but does not replace LTX's
+        # operation-level autocast semantics.
         with torch.autocast(device_type=str(device).split(":")[0], dtype=dtype):
             velocity, _ = model(video=video_modality, audio=None, perturbations=None)
 
-        per_token_t_3d = per_token_t.unsqueeze(-1) if per_token_t.ndim == 2 else per_token_t
-        x0_pred = to_denoised(latents_input, velocity, per_token_t_3d).float()
-
-        clean_latent = cond["clean_latent"].to(device).float()
-        denoise_mask_3d = denoise_mask_float.unsqueeze(-1) if denoise_mask_float.ndim == 2 else denoise_mask_float
-        x0_pred = x0_pred * denoise_mask_3d + clean_latent * (1.0 - denoise_mask_3d)
-
+        # Keep the original fp32 denoised reconstruction path: although this is
+        # algebraically an identity for T2V, strict e2e metrics depend on its rounding.
+        x0_pred = to_denoised(latents_input, velocity, per_token_t.unsqueeze(-1)).float()
         sigma_safe = torch.clamp(sigma_unit, min=1e-8).view(B, 1, 1)
-        velocity_for_sde = (latents_input.float() - x0_pred) / sigma_safe
-        return velocity_for_sde.to(dtype)
+        return ((latents_input.float() - x0_pred) / sigma_safe).to(dtype)
 
     def cfg_combine(
         self,
