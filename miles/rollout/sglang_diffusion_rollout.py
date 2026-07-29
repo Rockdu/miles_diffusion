@@ -381,6 +381,19 @@ async def generate_rollout_async(
 EVAL_PROMPT_DATASET = {}
 
 
+def release_eval_sample_media(args: Namespace, sample: Sample) -> None:
+    """Drop a scored eval sample's decoded media unless it is still logged or dumped.
+
+    Eval only consumes rewards afterwards, so keeping every ``generated_output``
+    until the whole dataset finishes costs num_prompts x video bytes of host RAM.
+    """
+    if args.save_debug_rollout_data is not None:
+        return
+    if sample.index is not None and sample.index < args.diffusion_log_images:
+        return
+    sample.generated_output = None
+
+
 # eval only
 async def eval_rollout(args: Namespace, rollout_id: int) -> tuple[dict[str, dict[str, list[Any]]], list[list[Sample]]]:
     assert not args.group_rm, "Group RM is not supported for eval rollout"
@@ -456,6 +469,8 @@ async def eval_rollout_single_dataset(
                 "eval_rollout_single_dataset example data, prompt: " f"{[str(row.prompt)]} " f"reward={row.reward}"
             )
             do_print = False
+        for row in rows:
+            release_eval_sample_media(args, row)
         data.extend(rows)
         pbar.update(1)
     pbar.close()

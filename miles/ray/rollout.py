@@ -168,7 +168,8 @@ class RolloutManager:
         _log_rollout_data(rollout_id, self.args, data, metrics, time.time() - start_time)
         with timer("convert_train_pairs"):
             data = self._convert_samples_to_train_data(data)
-        log_perf_data_raw(rollout_id, self.args, is_primary_rank=True)
+        with timer("gap_perf_log"):
+            log_perf_data_raw(rollout_id, self.args, is_primary_rank=True)
         logger.info("RolloutManager generate done: rollout_id=%s", rollout_id)
         dp_size = self.train_parallel_config["dp_size"]
         # Legacy 2D compat: strided DP split + tile reorder reproduce the legacy
@@ -190,7 +191,9 @@ class RolloutManager:
             ]
         else:
             shards = self.train_data_dp_splitter.split_by_dp(data, dp_size)
-        return [Box(ray.put(shard)) for shard in shards]
+        with timer("gap_ray_put"):
+            _boxed = [Box(ray.put(shard)) for shard in shards]
+        return _boxed
 
     def eval(self, rollout_id):
         if self.args.debug_train_only:
