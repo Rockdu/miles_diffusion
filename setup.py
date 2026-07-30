@@ -41,10 +41,8 @@ setup(
             "torch>=2.0",
         ]
     },
-    python_requires=">=3.10",
+    python_requires=">=3.12",
     classifiers=[
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
         "Environment :: GPU :: NVIDIA CUDA",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
