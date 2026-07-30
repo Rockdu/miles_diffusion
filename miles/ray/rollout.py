@@ -13,6 +13,9 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from sglang.srt.constants import GPU_MEMORY_TYPE_WEIGHTS
 
 from miles.backends.sglang_diffusion_utils.sglang_diffusion_engine import SGLangDiffusionEngine
+from miles.ray.data_conversion_hub.flow_grpo import (
+    expand_samples_to_train_pairs as flow_grpo_expand_samples_to_train_pairs,
+)
 from miles.rollout.base_types import call_rollout_fn
 from miles.rollout.rm_hub.core import set_reward_placement_group
 from miles.utils import tracking_utils
@@ -26,7 +29,7 @@ from miles.utils.misc import load_function
 from miles.utils.ray_utils import Box
 from miles.utils.timer import timer
 from miles.utils.tracking_utils import init_tracking
-from miles.utils.train_data_utils import RolloutTrainDataConverter, TrainDataDPSplitter, reorder_train_pairs_for_tiling
+from miles.utils.train_data_utils import TrainDataDPSplitter, reorder_train_pairs_for_tiling
 from miles.utils.train_metric_utils import log_perf_data_raw
 from miles.utils.types import Sample
 
@@ -77,7 +80,11 @@ class RolloutManager:
             if self.args.custom_convert_samples_to_train_data_path is not None
             else None
         )
-        self.train_data_converter = RolloutTrainDataConverter()
+        self.custom_expand_samples_to_train_pairs_func = (
+            load_function(self.args.custom_expand_samples_to_train_pairs_path)
+            if self.args.custom_expand_samples_to_train_pairs_path is not None
+            else None
+        )
         self.train_data_dp_splitter = TrainDataDPSplitter()
         logger.info(f"import {self.args.rollout_function_path} as generate_rollout function.")
         logger.info(f"import {self.args.eval_function_path} as eval_generate_rollout function.")
@@ -337,9 +344,7 @@ class RolloutManager:
 
         raw_rewards = [sample.get_reward_value(self.args) for sample in samples]
 
-        # --globalize-reward-mean / --globalize-reward-std are orthogonal. flow_grpo
-        # pickscore_qwenimage uses per-prompt mean + global std (PerPromptStatTracker
-        # with global_std=True), which is --globalize-reward-std alone.
+        # --globalize-reward-mean / --globalize-reward-std are orthogonal.
         rewards_flat = torch.tensor(raw_rewards, dtype=torch.float)
         rewards = rewards_flat.view(-1, self.args.n_samples_per_prompt)
 
@@ -363,6 +368,7 @@ class RolloutManager:
         """
         Convert inference generated samples to training data.
         """
+        # The full override also replaces reward post-processing.
         if self.custom_convert_samples_to_train_data_func is not None:
             return self.custom_convert_samples_to_train_data_func(self.args, samples)
 
@@ -374,7 +380,6 @@ class RolloutManager:
         raw_t = torch.tensor(raw_rewards, dtype=torch.float)
         norm_t = torch.tensor(rewards, dtype=torch.float)
 
-        # Emit reward distribution stats (raw + normalized) to stdout + wandb.
         reward_stats = {
             **_reward_stats_dict(raw_t, "rollout/reward/raw_"),
             **_reward_stats_dict(norm_t, "rollout/reward/norm_"),
@@ -406,7 +411,9 @@ class RolloutManager:
                 reward_key=self.args.reward_key,
             )
 
-        return self.train_data_converter.convert_samples(samples, rewards, raw_rewards)
+        if self.custom_expand_samples_to_train_pairs_func is not None:
+            return self.custom_expand_samples_to_train_pairs_func(self.args, samples, rewards, raw_rewards)
+        return flow_grpo_expand_samples_to_train_pairs(self.args, samples, rewards, raw_rewards)
 
     def _log_images(
         self,
