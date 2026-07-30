@@ -138,7 +138,7 @@ def register_train_actor(args, role: str) -> None:
     attach_phase_sink(handle, role)
     global _GPU_SAMPLER
     if dist.get_rank() == 0 and _GPU_SAMPLER is None:
-        _GPU_SAMPLER = GpuUtilSampler(args.miles_dashboard_workspace)
+        _GPU_SAMPLER = GpuUtilSampler(_ray_get(handle.workspace.remote()))
         _GPU_SAMPLER.start()
 
 

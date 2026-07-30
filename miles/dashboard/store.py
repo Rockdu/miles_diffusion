@@ -11,6 +11,9 @@ from pathlib import Path
 from miles.dashboard.events import PhaseEvent, TrajectoryEvent
 
 
+RUN_DIR_PREFIX = "run_"
+
+
 class Stream(StrEnum):
     PHASES = "phases"
     TRAJECTORIES = "trajectories"
@@ -33,6 +36,18 @@ def _timestamp(record: Record) -> float:
 
 def _hour_key(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y%m%d_%H")
+
+
+def run_dir(base: str, start_ts: float) -> Path:
+    """One directory per training launch, under the base workspace."""
+    stamp = datetime.fromtimestamp(start_ts, tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return Path(base) / f"{RUN_DIR_PREFIX}{stamp}"
+
+
+def resolve_run_dir(base: str) -> Path:
+    """Newest run under the base workspace (names sort by time), or base itself if it holds no runs."""
+    runs = sorted(path for path in Path(base).glob(f"{RUN_DIR_PREFIX}*") if path.is_dir())
+    return runs[-1] if runs else Path(base)
 
 
 class DashboardStore:

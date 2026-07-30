@@ -41,6 +41,10 @@ class DashboardCollector:
     def ping(self) -> bool:
         return True
 
+    def workspace(self) -> str:
+        """This run's directory, for workers that write telemetry files themselves."""
+        return self.config.workspace
+
     def start(self) -> None:
         if self._flush_thread is not None:
             return

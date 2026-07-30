@@ -80,7 +80,6 @@ def test_collector_startup_failure_disables_dashboard(monkeypatch, tmp_path, cap
     monkeypatch.setitem(sys.modules, "ray", ray_module)
     monkeypatch.setitem(sys.modules, "ray.util.scheduling_strategies", strategies_module)
     monkeypatch.setattr(backend, "_handle", None)
-    monkeypatch.setattr(backend, "_is_primary", False)
 
     args = SimpleNamespace(
         use_miles_dashboard=True,
