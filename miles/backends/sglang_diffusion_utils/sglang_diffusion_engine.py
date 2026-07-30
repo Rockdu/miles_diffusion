@@ -165,18 +165,19 @@ class SGLangDiffusionEngine(RayActor):
     def _pin_to_assigned_gpu(self):
         if self.base_gpu_id is None:
             return
+        tp = max(1, getattr(self.args, "rollout_num_gpus_per_engine", 1))
         cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         if not cvd:
-            # No ambient device list (full-node multi-node ray start): pin to the physical GPU.
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(self.base_gpu_id)
-            return
-        visible = [x.strip() for x in cvd.split(",") if x.strip()]
-        local_idx = _to_local_gpu_id(self.base_gpu_id)
-        pinned = visible[local_idx]
+            # No ambient device list (full-node multi-node ray start): pin the tp physical GPUs.
+            pinned = ",".join(str(self.base_gpu_id + k) for k in range(tp))
+        else:
+            visible = [x.strip() for x in cvd.split(",") if x.strip()]
+            local_idx = _to_local_gpu_id(self.base_gpu_id)
+            pinned = ",".join(visible[local_idx + k] for k in range(tp))
         os.environ["CUDA_VISIBLE_DEVICES"] = pinned
         logger.info(
             f"Engine rank={self.rank}: pinned CUDA_VISIBLE_DEVICES={pinned} "
-            f"(base_gpu_id={self.base_gpu_id}, local_idx={local_idx})"
+            f"(base_gpu_id={self.base_gpu_id}, tp={tp})"
         )
 
     def _make_request(self, endpoint: str, payload: dict | None = None):
@@ -312,6 +313,7 @@ def _compute_server_args(args, host, port, nccl_port):
         "master_port": nccl_port + 10000 if nccl_port is not None else None,
         # Must match rollout allocation, not user CLI.
         "tp_size": args.rollout_num_gpus_per_engine,
+        "num_gpus": args.rollout_num_gpus_per_engine,
         "sp_degree": args.sglang_sp_degree,
         "enable_cfg_parallel": args.sglang_enable_cfg_parallel,
         # Skip warmup to avoid timeout during RL rollouts.
