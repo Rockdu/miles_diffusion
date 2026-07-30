@@ -202,8 +202,8 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          # 3.10 matches miles-D's setup.py / pyproject (python_requires=">=3.10").
-          python-version: '3.10'
+          # 3.12 matches the CI/dev container image and miles-D's setup.py.
+          python-version: '3.12'
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
