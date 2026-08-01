@@ -53,7 +53,7 @@ class Cfg:
     # batch / schedule
     rollout_batch_size: int = 24
     n_samples_per_prompt: int = 8
-    num_steps_per_rollout: int = 2
+    num_steps_per_rollout: int = 1  # 1 optim step/rollout: fully on-policy. =2 collapses reward (off-policy 2nd step under 1e-4 clip)
     microgroup_size: int = 2        # tuned down (with gradient ckpt) for <=40GB train peak
     micro_batch_size: int = 1       # tuned down from 2 for <=40GB
     num_rollout: int = 10000
@@ -108,7 +108,8 @@ def ray_up(c: Cfg):
 
 
 def train_args(c: Cfg, wandb_key: str) -> str:
-    save = f"{REPO}/logs/wan22_{c.world}gpu_lora/ckpt"
+    # ckpt on shared cluster-storage (/personal survives devbox release), NOT node-local /root
+    save = f"/personal/wan22_{c.world}gpu_lora/ckpt"
     a = [
         "--train-backend fsdp",
         "--rollout-function-path miles.rollout.sglang_diffusion_rollout.generate_rollout",
@@ -123,6 +124,9 @@ def train_args(c: Cfg, wandb_key: str) -> str:
         f"--dp-replicate-size {c.dp_replicate} --sequence-parallel-size {c.sp} --ulysses-degree {c.ulysses}",
         # colocate memory: free VAE + text-encoder off the shared GPU during denoise
         "--sglang-vae-cpu-offload --sglang-text-encoder-cpu-offload",
+        # explicit DiT layerwise offload (was implicitly on via performance_mode=auto for
+        # wan2.2-a14b); pin it so the rollout-phase <=40GB does not depend on the auto heuristic
+        "--sglang-dit-layerwise-offload --sglang-dit-offload-prefetch-size 2",
         f"--use-lora --lora-rank {c.lora_rank} --lora-alpha {c.lora_alpha}",
         f"--lora-target-modules {LORA_TARGETS} --diffusion-init-lora-weight gaussian",
         "--lr 1e-4 --adam-beta2 0.999 --diffusion-clip-range 1e-4 --weight-decay 1e-4",
@@ -131,7 +135,8 @@ def train_args(c: Cfg, wandb_key: str) -> str:
         "--gradient-checkpointing",
         # LoRA IPC weight sync: only lora_A/B go to the engine via CUDA IPC (no full 2x14B gather)
         "--lora-ipc-weight-sync",
-        "--use-miles-router --sglang-server-concurrency 8 --update-weight-buffer-size 536870912",
+        # raise router health-check threshold: a busy engine (heavy eval) else misses /health -> false DEAD
+        "--use-miles-router --miles-router-health-check-failure-threshold 30 --sglang-server-concurrency 8 --update-weight-buffer-size 536870912",
         "--update-weight-target-module transformer,transformer_2",
         "--diffusion-reward pickscore:1.0 --advantage-estimator grpo --rm-type pickscore",
         # reward on its own GPU (reward_node): non-colocate, 1 worker * full GPU -> lands on the 1-GPU pod
@@ -144,7 +149,7 @@ def train_args(c: Cfg, wandb_key: str) -> str:
         "--diffusion-step-strategy-path miles.rollout.step_strategy_hub.epoch_global_random_choice",
         "--diffusion-num-sde-steps 1 --diffusion-sde-candidate-steps 1,2,3 --diffusion-debug-mode",
         f"--save {save} --save-interval 10",
-        f"--eval-prompt-data pickscore_test {DS}/test.jsonl --eval-interval 30 --skip-eval-before-train",
+        f"--eval-prompt-data pickscore_test {DS}/test.jsonl --eval-interval 100 --skip-eval-before-train",
         f"--use-miles-dashboard --miles-dashboard-workspace {REPO}/miles_dashboard",
     ]
     if wandb_key:
