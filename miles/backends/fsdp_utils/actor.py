@@ -39,13 +39,7 @@ from .loss_hub import DiffusionLossContext, flow_grpo_loss_formula, prepare_flow
 from .lr_scheduler import get_lr_scheduler
 from .metrics import new_metric_buffer
 from .parallel import create_fsdp_parallel_state
-from .precision import (
-    clip_grad_norm_mixed,
-    compile_precision_plan,
-    log_precision_summary,
-    resolve_dtype,
-    sync_replicated_grads,
-)
+from .precision import compile_precision_plan, log_precision_summary, resolve_dtype
 from .sequence_parallel.plan import apply_sequence_parallel
 
 logger = logging.getLogger(__name__)
@@ -117,7 +111,6 @@ class FSDPTrainRayActor(TrainRayActor):
         materialize_weights = rank == 0
 
         self.models: dict[str, torch.nn.Module] = {}
-        self._noshard_params: list[torch.nn.Parameter] = []
         for component in args.update_weight_target_modules:
             # per raw component (wan2.2 has two transformers), before LoRA/FSDP wrap
             with self._model_init_context(materialize_weights=materialize_weights):
@@ -145,7 +138,6 @@ class FSDPTrainRayActor(TrainRayActor):
             compiled_precision.apply_master_casts()
             if rank == 0:
                 log_precision_summary(component, compiled_precision, default_dtype=self._forward_dtype)
-            self._noshard_params.extend(plan.tensor for plan in compiled_precision.noshard_params)
 
             if args.use_lora:
                 model = apply_lora(model, args, self.train_pipeline_config)
@@ -162,7 +154,7 @@ class FSDPTrainRayActor(TrainRayActor):
                 cpu_offload=self.args.fsdp_cpu_offload,
                 args=self.args,
                 no_split_modules=self.model_backend.fsdp_no_split_modules(model),
-                ignored_params=compiled_precision.ignored_params(),
+                subshard_groups=compiled_precision.subshard_groups,
             )
             checkpoint.broadcast_full_state_to_fsdp(
                 model,
@@ -486,16 +478,11 @@ class FSDPTrainRayActor(TrainRayActor):
                 self.prof.step(rollout_id=rollout_id)
                 if not self.args.debug_skip_optimizer_step:
                     self.scaler.unscale_(self.optimizer)
-                    if self._noshard_params:
-                        # FSDP ignores no-shard params; average their rank-local grads before clipping.
-                        sync_replicated_grads(self._noshard_params, self.parallel_state.get_mesh("fsdp"))
-                        grad_norm = clip_grad_norm_mixed(self.model.parameters(), self.args.clip_grad)
-                    else:
-                        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_grad)
-                        if isinstance(grad_norm, DTensor):
-                            # clip returns a lazily-reduced partial norm; materialize it,
-                            # otherwise the logged metric leaks the local shard's value.
-                            grad_norm = grad_norm.full_tensor()
+                    grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_grad)
+                    if isinstance(grad_norm, DTensor):
+                        # clip returns a lazily-reduced partial norm; materialize it,
+                        # otherwise the logged metric leaks the local shard's value.
+                        grad_norm = grad_norm.full_tensor()
                     metrics.emit_replicated("grad_norm", grad_norm)
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
@@ -631,11 +618,9 @@ def apply_lora(model: torch.nn.Module, args: Namespace, train_pipeline_config) -
     return model
 
 
-def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules=None, ignored_params=None):
+def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules=None, subshard_groups=None):
     from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, fully_shard
 
-    if cpu_offload and ignored_params:
-        raise ValueError("no-shard precision rules are incompatible with --fsdp-cpu-offload")
     offload_policy = CPUOffloadPolicy() if cpu_offload else None
 
     layer_cls_to_wrap = no_split_modules if no_split_modules is not None else model._no_split_modules
@@ -647,24 +632,32 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules
     reduce_dtype = resolve_dtype(args.fsdp_reduce_dtype)
     logger.info(
         f"FSDP: wrapping {len(modules)} modules of type {layer_cls_to_wrap}, param_dtype={param_dtype}, "
-        f"reduce_dtype={reduce_dtype}, ignored_params={len(ignored_params) if ignored_params else 0}"
+        f"reduce_dtype={reduce_dtype}, sub-shard groups={len(subshard_groups) if subshard_groups else 0}"
     )
 
-    fsdp_kwargs = {
-        # Inputs are not cast: compute dtype comes from the trainer's autocast, which
-        # also keeps grad-ckpt recompute dtypes consistent with the forward.
-        "mp_policy": MixedPrecisionPolicy(
-            param_dtype=param_dtype,
-            reduce_dtype=reduce_dtype,
-            cast_forward_inputs=False,
-        ),
-        "offload_policy": offload_policy,
-        "mesh": mesh,
-    }
-    if ignored_params:
-        fsdp_kwargs["ignored_params"] = ignored_params
+    def _fsdp_kwargs(policy_param_dtype):
+        return {
+            # Inputs are not cast: compute dtype comes from the trainer's autocast, which
+            # also keeps grad-ckpt recompute dtypes consistent with the forward.
+            "mp_policy": MixedPrecisionPolicy(
+                param_dtype=policy_param_dtype,
+                reduce_dtype=reduce_dtype,
+                cast_forward_inputs=False,
+            ),
+            "offload_policy": offload_policy,
+            "mesh": mesh,
+        }
 
+    # Sub-shard groups wrap first so the block/root units exclude their params.
+    subshard_modules = set()
+    for group in subshard_groups or ():
+        fully_shard(group.modules, **_fsdp_kwargs(group.param_dtype))
+        subshard_modules.update(group.modules)
+
+    fsdp_kwargs = _fsdp_kwargs(param_dtype)
     for module in modules:
+        if module in subshard_modules:
+            raise ValueError(f"{type(module).__name__} is both an FSDP block unit and a precision sub-shard target")
         fully_shard(module, **fsdp_kwargs)
 
     fully_shard(model, **fsdp_kwargs)
