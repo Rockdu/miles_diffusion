@@ -11,23 +11,22 @@ the monkey-patch registry.
 ``compile_precision_plan`` resolves rules to a per-tensor plan and lowers it
 onto what FSDP2 can express:
   - inline (default): tensor follows its wrap unit's MixedPrecisionPolicy
-  - no_shard: gather pinned away from the default -> the param is excluded
-    from sharding (fully_shard ignored_params), replicated at master dtype;
-    its rank-local grads are averaged manually each step
-  - gather != master needs sub-shard lowering (a nested fully_shard with its
-    own policy) and is rejected until a use case exists
+  - sub_shard: gather pinned away from the default -> the owning modules are
+    grouped into one nested fully_shard unit per gather dtype with its own
+    MixedPrecisionPolicy, staying fully inside FSDP (DTensor params, FSDP
+    grad reduction, DCP/offload as usual) at the cost of one extra
+    all-gather per group per forward
+Gather intent that does not align to a module boundary (e.g. a bare
+nn.Parameter on a block) cannot be sub-wrapped and is rejected.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fnmatch import fnmatch
 
 import torch
-import torch.distributed as dist
-from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import DTensor
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +72,7 @@ class PrecisionSpec:
 
 
 # ---------------------------------------------------------------------------
-# Compiler: per-tensor plan -> FSDP2 lowering (master casts + no-shard set)
+# Compiler: per-tensor plan -> FSDP2 lowering (master casts + sub-shard groups)
 # ---------------------------------------------------------------------------
 
 
@@ -87,12 +86,18 @@ class TensorPlan:
 
 
 @dataclass
+class SubShardGroup:
+    """Modules to wrap as one nested fully_shard unit with param_dtype=gather."""
+
+    param_dtype: torch.dtype
+    modules: list[torch.nn.Module] = field(default_factory=list)
+    param_fqns: list[str] = field(default_factory=list)
+
+
+@dataclass
 class CompiledPrecision:
     master_casts: list[TensorPlan]
-    noshard_params: list[TensorPlan]
-
-    def ignored_params(self) -> set[torch.nn.Parameter] | None:
-        return {plan.tensor for plan in self.noshard_params} or None
+    subshard_groups: list[SubShardGroup]
 
     def apply_master_casts(self) -> None:
         for plan in self.master_casts:
@@ -134,13 +139,16 @@ def compile_precision_plan(
     for rule in spec.rules:
         _validate_rule(rule)
 
-    named: list[tuple[str, torch.Tensor, bool]] = []
+    named: list[tuple[str, torch.Tensor, bool, str, torch.nn.Module]] = []
+    float_params_of_module: dict[str, set[str]] = {}
     for mod_fqn, module in model.named_modules():
         prefix = f"{mod_fqn}." if mod_fqn else ""
         for name, param in module.named_parameters(recurse=False):
-            named.append((f"{prefix}{name}", param, False))
+            named.append((f"{prefix}{name}", param, False, mod_fqn, module))
+            if param.is_floating_point():
+                float_params_of_module.setdefault(mod_fqn, set()).add(f"{prefix}{name}")
         for name, buf in module.named_buffers(recurse=False):
-            named.append((f"{prefix}{name}", buf, True))
+            named.append((f"{prefix}{name}", buf, True, mod_fqn, module))
 
     matchers = []
     for rule in spec.rules:
@@ -158,8 +166,8 @@ def compile_precision_plan(
 
     match_counts = [0] * len(spec.rules)
     master_casts: list[TensorPlan] = []
-    noshard_params: list[TensorPlan] = []
-    for fqn, tensor, is_buffer in named:
+    gather_by_module: dict[str, tuple[torch.nn.Module, dict[str, torch.dtype]]] = {}
+    for fqn, tensor, is_buffer, mod_fqn, module in named:
         master = gather = None
         for i, rule in enumerate(spec.rules):
             if not matchers[i](fqn):
@@ -175,13 +183,9 @@ def compile_precision_plan(
             if is_buffer:
                 raise ValueError(f"precision rule pins gather dtype on buffer {fqn}; buffers are never gathered")
             if plan.gather != default_dtype:
-                effective_master = plan.master if plan.master is not None else tensor.dtype
-                if effective_master != plan.gather:
-                    raise ValueError(
-                        f"{fqn}: gather={plan.gather} != master={effective_master}; sub-shard lowering "
-                        f"is not implemented, pin master to the same dtype to use no-shard"
-                    )
-                noshard_params.append(plan)
+                if mod_fqn == "":
+                    raise ValueError(f"{fqn}: cannot sub-wrap the root module for a gather override")
+                gather_by_module.setdefault(mod_fqn, (module, {}))[1][fqn] = plan.gather
         if plan.master is not None and plan.master != tensor.dtype:
             master_casts.append(plan)
 
@@ -189,49 +193,38 @@ def compile_precision_plan(
         if count == 0:
             raise ValueError(f"precision rule matched no tensor: {rule}")
 
-    return CompiledPrecision(master_casts=master_casts, noshard_params=noshard_params)
+    # Gather overrides lower to whole-module nested fully_shard units, so every
+    # float param of an affected module must agree on one gather dtype.
+    groups: dict[torch.dtype, SubShardGroup] = {}
+    for mod_fqn, (module, requests) in gather_by_module.items():
+        dtypes = set(requests.values())
+        if len(dtypes) > 1:
+            raise ValueError(
+                f"module {mod_fqn} mixes gather dtypes {sorted(map(str, dtypes))}; FSDP sub-wrap needs one"
+            )
+        missing = float_params_of_module.get(mod_fqn, set()) - requests.keys()
+        if missing:
+            raise ValueError(
+                f"gather override must cover the whole module {mod_fqn} for FSDP sub-wrap; "
+                f"missing {sorted(missing)}"
+            )
+        dtype = dtypes.pop()
+        group = groups.setdefault(dtype, SubShardGroup(param_dtype=dtype))
+        group.modules.append(module)
+        group.param_fqns.extend(sorted(requests))
+
+    return CompiledPrecision(master_casts=master_casts, subshard_groups=list(groups.values()))
 
 
 def log_precision_summary(component: str, compiled: CompiledPrecision, *, default_dtype: torch.dtype) -> None:
-    noshard_bytes = sum(plan.tensor.numel() * plan.tensor.element_size() for plan in compiled.noshard_params)
     logger.info(
         f"precision[{component}]: default gather dtype {default_dtype}, "
-        f"{len(compiled.master_casts)} master casts, "
-        f"{len(compiled.noshard_params)} no-shard params ({noshard_bytes / 1e6:.1f} MB replicated/rank)"
+        f"{len(compiled.master_casts)} master casts, {len(compiled.subshard_groups)} sub-shard groups"
     )
     for plan in compiled.master_casts:
         logger.info(f"precision[{component}]: master {plan.fqn} -> {plan.master}")
-    for plan in compiled.noshard_params:
-        logger.info(f"precision[{component}]: no-shard {plan.fqn} @ {plan.gather}")
-
-
-# ---------------------------------------------------------------------------
-# Runtime helpers for no-shard (FSDP-ignored, replicated) params
-# ---------------------------------------------------------------------------
-
-
-def sync_replicated_grads(params: list[torch.nn.Parameter], mesh: DeviceMesh) -> None:
-    """Average rank-local grads of FSDP-ignored params over every dim FSDP reduces over."""
-    grads = [p.grad for p in params if p.grad is not None]
-    for dim in range(mesh.ndim):
-        group = mesh.get_group(dim)
-        for grad in grads:
-            dist.all_reduce(grad, op=dist.ReduceOp.AVG, group=group)
-
-
-def clip_grad_norm_mixed(parameters, max_norm: float) -> torch.Tensor:
-    """Global grad-norm clip over mixed DTensor + plain grads (torch rejects the mix in one call)."""
-    from torch.nn.utils import clip_grads_with_norm_, get_total_norm
-
-    params = [p for p in parameters if p.grad is not None]
-    sharded = [p for p in params if isinstance(p.grad, DTensor)]
-    replicated = [p for p in params if not isinstance(p.grad, DTensor)]
-    norms = []
-    if sharded:
-        norms.append(get_total_norm([p.grad for p in sharded]).full_tensor().float())
-    if replicated:
-        norms.append(get_total_norm([p.grad for p in replicated]).float())
-    total_norm = torch.linalg.vector_norm(torch.stack(norms))
-    clip_grads_with_norm_(sharded, max_norm, total_norm)
-    clip_grads_with_norm_(replicated, max_norm, total_norm)
-    return total_norm
+    for group in compiled.subshard_groups:
+        logger.info(
+            f"precision[{component}]: sub-shard @ {group.param_dtype}: "
+            f"{len(group.modules)} modules, params {group.param_fqns}"
+        )
