@@ -1503,6 +1503,17 @@ def set_default_diffusion_args(args) -> None:
         else:
             args.ref_mode = "none"
 
+    # --precision-default-dtype fills every dtype knob left unset; specific flags win.
+    if args.diffusion_forward_dtype is None:
+        args.diffusion_forward_dtype = args.precision_default_dtype or "bf16"
+    if args.precision_default_dtype is not None:
+        from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
+
+        # Mirrors the engine's forwarding rule: a value equal to the class default counts as unset.
+        sglang_dit = getattr(args, "sglang_dit_precision", None)
+        if sglang_dit is None or sglang_dit == getattr(PipelineConfig, "dit_precision", None):
+            args.sglang_dit_precision = args.precision_default_dtype
+
 
 def miles_validate_args(args):
     args.eval_datasets = _resolve_eval_datasets(args)
@@ -1530,20 +1541,11 @@ def miles_validate_args(args):
     if args.eval_reward_key is None:
         args.eval_reward_key = args.reward_key
 
-    # Resolve the precision default-dtype cascade: specific flag > --precision-default-dtype > built-in.
-    if args.diffusion_forward_dtype is None:
-        args.diffusion_forward_dtype = args.precision_default_dtype or "bf16"
-    if args.precision_default_dtype is not None:
-        from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
-
-        sglang_dit = getattr(args, "sglang_dit_precision", None)
-        if sglang_dit is None or sglang_dit == getattr(PipelineConfig, "dit_precision", None):
-            args.sglang_dit_precision = args.precision_default_dtype
-        elif sglang_dit != args.precision_default_dtype:
-            raise ValueError(
-                f"--sglang-dit-precision {sglang_dit} conflicts with "
-                f"--precision-default-dtype {args.precision_default_dtype}"
-            )
+    if args.precision_default_dtype is not None and args.sglang_dit_precision != args.precision_default_dtype:
+        raise ValueError(
+            f"--sglang-dit-precision {args.sglang_dit_precision} conflicts with "
+            f"--precision-default-dtype {args.precision_default_dtype}"
+        )
 
     args.update_weight_target_modules = [
         name.strip() for name in args.update_weight_target_module.split(",") if name.strip()

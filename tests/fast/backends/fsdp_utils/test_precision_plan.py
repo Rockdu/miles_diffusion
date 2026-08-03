@@ -48,6 +48,7 @@ def test_module_cls_rule_lowers_norms_to_one_subshard_group():
     assert group.param_dtype is torch.float32
     assert group.modules == [model.blocks[0].norm, model.blocks[1].norm]
     assert set(group.param_fqns) == {f"blocks.{i}.norm.{n}" for i in range(2) for n in ("weight", "bias")}
+    assert all(cast.dtype is torch.float32 for cast in compiled.master_casts)
     compiled.apply_master_casts()
     assert model.blocks[0].norm.weight.dtype is torch.float32
     assert model.blocks[0].linear.weight.dtype is torch.bfloat16
@@ -65,7 +66,7 @@ def test_param_fqn_rule_casts_buffer_master():
     model = _model()
     spec = PrecisionSpec(rules=(Rule(ParamSel("*.freqs"), master="fp32"),))
     compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
-    assert {p.fqn for p in compiled.master_casts} == {"blocks.0.freqs", "blocks.1.freqs"}
+    assert {cast.fqn for cast in compiled.master_casts} == {"blocks.0.freqs", "blocks.1.freqs"}
     assert compiled.subshard_groups == []
     compiled.apply_master_casts()
     assert model.blocks[0].freqs.dtype is torch.float32
