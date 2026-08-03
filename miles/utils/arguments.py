@@ -190,16 +190,27 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
-                "--diffusion-forward-dtype",
+                "--precision-default-dtype",
                 type=str,
-                default="bf16",
+                default=None,
                 choices=["fp16", "bf16", "fp32"],
                 help=(
-                    "dtype for the DiT forward compute. Used in three places "
-                    "with the same value: sglang-d rollout engine, FSDP "
-                    "MixedPrecisionPolicy.param_dtype on the training side, "
-                    "and the training-side input cast that matches rollout "
-                    "for log-prob alignment."
+                    "Default dtype for every module the family PrecisionSpec does not pin "
+                    "explicitly: sets both the training-side forward/gather dtype "
+                    "(--diffusion-forward-dtype) and the rollout engine's "
+                    "--sglang-dit-precision. Specific flags win over this default."
+                ),
+            )
+            parser.add_argument(
+                "--diffusion-forward-dtype",
+                type=str,
+                default=None,
+                choices=["fp16", "bf16", "fp32"],
+                help=(
+                    "dtype for the DiT forward on the training side: FSDP "
+                    "MixedPrecisionPolicy.param_dtype and the torch.autocast the "
+                    "trainer wraps the forward in. Defaults to "
+                    "--precision-default-dtype, else bf16."
                 ),
             )
             parser.add_argument(
@@ -1518,6 +1529,21 @@ def miles_validate_args(args):
 
     if args.eval_reward_key is None:
         args.eval_reward_key = args.reward_key
+
+    # Resolve the precision default-dtype cascade: specific flag > --precision-default-dtype > built-in.
+    if args.diffusion_forward_dtype is None:
+        args.diffusion_forward_dtype = args.precision_default_dtype or "bf16"
+    if args.precision_default_dtype is not None:
+        from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
+
+        sglang_dit = getattr(args, "sglang_dit_precision", None)
+        if sglang_dit is None or sglang_dit == getattr(PipelineConfig, "dit_precision", None):
+            args.sglang_dit_precision = args.precision_default_dtype
+        elif sglang_dit != args.precision_default_dtype:
+            raise ValueError(
+                f"--sglang-dit-precision {sglang_dit} conflicts with "
+                f"--precision-default-dtype {args.precision_default_dtype}"
+            )
 
     args.update_weight_target_modules = [
         name.strip() for name in args.update_weight_target_module.split(",") if name.strip()
