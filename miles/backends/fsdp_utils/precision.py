@@ -1,23 +1,36 @@
 """Fine-grained weight-precision control for FSDP2.
 
 A family declares per-tensor dtype intent as PrecisionSpec rules on its
-TrainPipelineConfig (last matching rule wins per axis):
+TrainPipelineConfig; each rule pins one or both axes (last match wins per axis):
   - master: resident dtype of the param/buffer (optimizer state precision)
   - gather: dtype the param is cast to for FSDP all-gather + forward
-Compute dtype is deliberately not managed here: the trainer runs the DiT
-forward under torch.autocast(default dtype); op-level exceptions belong to
-the monkey-patch registry.
+Compute dtype is not managed here: the trainer autocasts the DiT forward and
+op-level exceptions belong to the monkey-patch registry.
 
-``compile_precision_plan`` resolves rules to a per-tensor plan and lowers it
-onto what FSDP2 can express:
-  - inline (default): tensor follows its wrap unit's MixedPrecisionPolicy
-  - sub-shard: gather pinned away from the default -> the owning modules are
-    grouped into one nested fully_shard unit per gather dtype with its own
-    MixedPrecisionPolicy, staying fully inside FSDP (DTensor params, FSDP
-    grad reduction, DCP/offload as usual) at the cost of one extra
-    all-gather per group per forward
+``compile_precision_plan`` lowers the rules onto what FSDP2 can express:
+
+    PrecisionSpec rules
+        |
+    (1) inventory every param/buffer: FQN, owning module
+        |
+    (2) per tensor, fold matching rules -> (master, gather) intent
+        |                        |
+     master axis             gather axis
+        |                        |
+    (3) != loaded dtype?     (4) != default dtype?  --no--> inline: the block
+        -> MasterCast,           |                          policy already is
+        cast at load time        v                          the default
+                             sub-wrap request on the owning module
+                                 |
+    (5) per module: one gather dtype + all float params covered, then
+        merge same-dtype modules -> one SubShardGroup per dtype
+        |
+    apply_fsdp2: fully_shard(group.modules, param_dtype=group dtype),
+    nested before the block/root wrap, one extra all-gather per group
+
 Gather intent that does not align to a module boundary (e.g. a bare
-nn.Parameter on a block) cannot be sub-wrapped and is rejected.
+nn.Parameter on a block) cannot be sub-wrapped and is rejected; FSDP2 itself
+additionally requires uniform master dtype among trainable params per unit.
 """
 
 from __future__ import annotations
@@ -137,8 +150,7 @@ def compile_precision_plan(
     for rule in spec.rules:
         _validate_rule(rule)
 
-    # Enumerate every param/buffer once: (fqn, tensor, is_buffer, owning module) plus
-    # each module's float-param set (needed later for whole-module coverage checks).
+    # (1) Tensor inventory, plus per-module float-param sets for the stage (5) coverage check.
     named: list[tuple[str, torch.Tensor, bool, str, torch.nn.Module]] = []
     float_params_of_module: dict[str, set[str]] = {}
     for mod_fqn, module in model.named_modules():
@@ -150,8 +162,7 @@ def compile_precision_plan(
         for name, buf in module.named_buffers(recurse=False):
             named.append((f"{prefix}{name}", buf, True, mod_fqn, module))
 
-    # Precompile each rule into a tensor-fqn -> bool matcher; a ModuleSel matches
-    # every tensor under its matched modules' subtrees.
+    # (2a) One fqn -> bool matcher per rule; ModuleSel covers its matched modules' subtrees.
     matchers = []
     for rule in spec.rules:
         if isinstance(rule.select, ParamSel):
@@ -166,9 +177,7 @@ def compile_precision_plan(
             return None
         return default_dtype if axis == "default" else _DTYPES[axis]
 
-    # Per tensor: fold matching rules in declaration order (last match wins per axis),
-    # then route each axis to its lowering: master -> load-time cast, gather -> sub-wrap
-    # request on the owning module (gather == default needs nothing, the block policy is it).
+    # (2b)-(4) Fold rules per tensor, route master to casts and gather to sub-wrap requests.
     match_counts = [0] * len(spec.rules)
     master_casts: list[MasterCast] = []
     gather_by_module: dict[str, tuple[torch.nn.Module, dict[str, torch.dtype]]] = {}
@@ -193,14 +202,12 @@ def compile_precision_plan(
         if master_dtype is not None and master_dtype != tensor.dtype:
             master_casts.append(MasterCast(fqn, tensor, master_dtype))
 
-    # A rule that matched nothing is almost certainly a typo'd pattern or class name.
+    # A rule matching nothing is almost certainly a typo'd pattern or class name.
     for rule, count in zip(spec.rules, match_counts, strict=True):
         if count == 0:
             raise ValueError(f"precision rule matched no tensor: {rule}")
 
-    # Lower gather requests to nested fully_shard units: fully_shard wraps whole modules,
-    # so an affected module's float params must all agree on one gather dtype, and modules
-    # sharing a dtype merge into one group (one extra all-gather per group per step).
+    # (5) Validate module-boundary alignment, then merge same-dtype modules into groups.
     groups: dict[torch.dtype, SubShardGroup] = {}
     for mod_fqn, (module, requests) in gather_by_module.items():
         dtypes = set(requests.values())
