@@ -6,13 +6,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from miles.backends.fsdp_utils.precision import (
-    ModuleSel,
-    ParamSel,
-    PrecisionSpec,
-    Rule,
-    compile_precision_plan,
-)
+from miles.backends.fsdp_utils.precision import ModuleSel, ParamSel, PrecisionSpec, Rule, compile_precision_plan
 
 
 class Block(nn.Module):
