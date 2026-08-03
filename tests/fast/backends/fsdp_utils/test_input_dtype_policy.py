@@ -32,7 +32,9 @@ def test_default_policy_matches_rollout_boundary():
     )
     assert out_latents.dtype == torch.bfloat16
     assert out_timesteps.dtype == torch.float32
-    assert out_pos["context"].dtype == torch.bfloat16
+    # cond passes through: dump-verified on wan2.2/sd3.5 (rollout feeds fp32
+    # text embeds straight into the first context linear) and a no-op on ltx.
+    assert out_pos["context"].dtype == torch.float32
     assert out_pos["context_mask"].dtype == torch.int64
     assert out_neg is None and out_joint is None
 
