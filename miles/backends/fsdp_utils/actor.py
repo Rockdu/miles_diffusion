@@ -647,9 +647,10 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules
         }
 
     # Sub-shard groups wrap first so the block/root units exclude their params.
+    # Groups are tiny by design: ZeRO-2 style (no backward re-gather) costs a few MB.
     subshard_modules = set()
     for group in subshard_groups or ():
-        fully_shard(group.modules, **_fsdp_kwargs(group.param_dtype))
+        fully_shard(group.modules, reshard_after_forward=False, **_fsdp_kwargs(group.param_dtype))
         subshard_modules.update(group.modules)
 
     fsdp_kwargs = _fsdp_kwargs(param_dtype)
