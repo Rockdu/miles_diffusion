@@ -11,7 +11,7 @@ the monkey-patch registry.
 ``compile_precision_plan`` resolves rules to a per-tensor plan and lowers it
 onto what FSDP2 can express:
   - inline (default): tensor follows its wrap unit's MixedPrecisionPolicy
-  - sub_shard: gather pinned away from the default -> the owning modules are
+  - sub-shard: gather pinned away from the default -> the owning modules are
     grouped into one nested fully_shard unit per gather dtype with its own
     MixedPrecisionPolicy, staying fully inside FSDP (DTensor params, FSDP
     grad reduction, DCP/offload as usual) at the cost of one extra
@@ -77,12 +77,10 @@ class PrecisionSpec:
 
 
 @dataclass(frozen=True)
-class TensorPlan:
+class MasterCast:
     fqn: str
     tensor: torch.Tensor
-    is_buffer: bool
-    master: torch.dtype | None
-    gather: torch.dtype | None
+    dtype: torch.dtype
 
 
 @dataclass
@@ -96,12 +94,12 @@ class SubShardGroup:
 
 @dataclass
 class CompiledPrecision:
-    master_casts: list[TensorPlan]
+    master_casts: list[MasterCast]
     subshard_groups: list[SubShardGroup]
 
     def apply_master_casts(self) -> None:
-        for plan in self.master_casts:
-            plan.tensor.data = plan.tensor.data.to(plan.master)
+        for cast in self.master_casts:
+            cast.tensor.data = cast.tensor.data.to(cast.dtype)
 
 
 def _validate_rule(rule: Rule) -> None:
@@ -165,7 +163,7 @@ def compile_precision_plan(
         return default_dtype if axis == "default" else _DTYPES[axis]
 
     match_counts = [0] * len(spec.rules)
-    master_casts: list[TensorPlan] = []
+    master_casts: list[MasterCast] = []
     gather_by_module: dict[str, tuple[torch.nn.Module, dict[str, torch.dtype]]] = {}
     for fqn, tensor, is_buffer, mod_fqn, module in named:
         master = gather = None
@@ -175,19 +173,18 @@ def compile_precision_plan(
             match_counts[i] += 1
             master = rule.master if rule.master is not None else master
             gather = rule.gather if rule.gather is not None else gather
-        if master is None and gather is None:
-            continue
 
-        plan = TensorPlan(fqn, tensor, is_buffer, _resolve_axis(master), _resolve_axis(gather))
-        if plan.gather is not None:
+        gather_dtype = _resolve_axis(gather)
+        if gather_dtype is not None:
             if is_buffer:
                 raise ValueError(f"precision rule pins gather dtype on buffer {fqn}; buffers are never gathered")
-            if plan.gather != default_dtype:
+            if gather_dtype != default_dtype:
                 if mod_fqn == "":
                     raise ValueError(f"{fqn}: cannot sub-wrap the root module for a gather override")
-                gather_by_module.setdefault(mod_fqn, (module, {}))[1][fqn] = plan.gather
-        if plan.master is not None and plan.master != tensor.dtype:
-            master_casts.append(plan)
+                gather_by_module.setdefault(mod_fqn, (module, {}))[1][fqn] = gather_dtype
+        master_dtype = _resolve_axis(master)
+        if master_dtype is not None and master_dtype != tensor.dtype:
+            master_casts.append(MasterCast(fqn, tensor, master_dtype))
 
     for rule, count in zip(spec.rules, match_counts, strict=True):
         if count == 0:
@@ -221,8 +218,8 @@ def log_precision_summary(component: str, compiled: CompiledPrecision, *, defaul
         f"precision[{component}]: default gather dtype {default_dtype}, "
         f"{len(compiled.master_casts)} master casts, {len(compiled.subshard_groups)} sub-shard groups"
     )
-    for plan in compiled.master_casts:
-        logger.info(f"precision[{component}]: master {plan.fqn} -> {plan.master}")
+    for cast in compiled.master_casts:
+        logger.info(f"precision[{component}]: master {cast.fqn} -> {cast.dtype}")
     for group in compiled.subshard_groups:
         logger.info(
             f"precision[{component}]: sub-shard @ {group.param_dtype}: "
