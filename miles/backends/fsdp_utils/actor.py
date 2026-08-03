@@ -39,7 +39,13 @@ from .loss_hub import DiffusionLossContext, flow_grpo_loss_formula, prepare_flow
 from .lr_scheduler import get_lr_scheduler
 from .metrics import new_metric_buffer
 from .parallel import create_fsdp_parallel_state
-from .precision import apply_input_dtype_policy, compile_precision_plan, log_precision_summary, resolve_dtype
+from .precision import (
+    apply_input_dtype_policy,
+    compile_precision_plan,
+    log_precision_summary,
+    ordered_subshard_batches,
+    resolve_dtype,
+)
 from .sequence_parallel.plan import apply_sequence_parallel
 
 logger = logging.getLogger(__name__)
@@ -656,12 +662,26 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules
             "mesh": mesh,
         }
 
-    # Sub-shard groups wrap first so the block/root units exclude their params.
-    # Groups are tiny by design: ZeRO-2 style (no backward re-gather) costs a few MB.
+    # Sub-shard groups wrap first so the block/root units exclude their params,
+    # innermost-first (topological on containment; see ordered_subshard_batches)
+    # so an outer group never captures a nested group's params. Groups are tiny
+    # by design: ZeRO-2 style (no backward re-gather) costs a few MB.
     subshard_modules = set()
-    for group in subshard_groups or ():
-        fully_shard(group.modules, reshard_after_forward=False, **_fsdp_kwargs(group.param_dtype))
-        subshard_modules.update(group.modules)
+    for group_dtype, group_modules in ordered_subshard_batches(list(subshard_groups or ())):
+        fully_shard(group_modules, reshard_after_forward=False, **_fsdp_kwargs(group_dtype))
+        subshard_modules.update(group_modules)
+
+    # A sub-shard unit sitting ABOVE a block unit has already claimed the
+    # block's params at the override dtype; the block wrap below would silently
+    # see none of them. Containment is checked on the object graph.
+    block_ids = {id(module) for module in modules}
+    for sub in subshard_modules:
+        captured = [type(child).__name__ for child in sub.modules() if child is not sub and id(child) in block_ids]
+        if captured:
+            raise ValueError(
+                f"precision sub-shard target {type(sub).__name__} wraps above FSDP block unit(s) {captured}; "
+                "gather overrides must sit at or below the block units"
+            )
 
     fsdp_kwargs = _fsdp_kwargs(param_dtype)
     for module in modules:

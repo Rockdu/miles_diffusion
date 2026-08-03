@@ -272,6 +272,45 @@ def apply_input_dtype_policy(
     return _cast(latents, latents_dtype), _cast(timesteps, timestep_dtype), out_conds
 
 
+def ordered_subshard_batches(
+    groups: list[SubShardGroup],
+) -> list[tuple[torch.dtype, list[torch.nn.Module]]]:
+    """Innermost-first wrap order via topological layering on module containment.
+
+    ``fully_shard`` claims every not-yet-claimed param under a module, so a
+    unit must wrap only after every unit nested inside it has claimed its own
+    params — otherwise the outer unit captures the inner params at the wrong
+    dtype. The module reference graph is in practice a DAG — one nn.Module can
+    be registered under several parents, so a shared module's deduplicated FQN
+    understates its depth and FQN depth is not a sound order. Containment is
+    computed on the object graph instead. True reference cycles are
+    constructible (nothing in nn.Module forbids them) but pathological; the
+    layering below rejects them instead of spinning. Kahn layering keeps
+    mutually non-nested same-dtype modules merged in one wrap call.
+    """
+    entries = [(group.param_dtype, module) for group in groups for module in group.modules]
+    target_ids = {id(module) for _, module in entries}
+    contains: dict[int, set[int]] = {}
+    for _, module in entries:
+        contains[id(module)] = {
+            id(child) for child in module.modules() if child is not module and id(child) in target_ids
+        }
+    batches: list[tuple[torch.dtype, list[torch.nn.Module]]] = []
+    wrapped: set[int] = set()
+    pending = entries
+    while pending:
+        layer = [(dtype, module) for dtype, module in pending if contains[id(module)] <= wrapped]
+        if not layer:
+            raise ValueError("cyclic containment among precision sub-shard targets")
+        by_dtype: dict[torch.dtype, list[torch.nn.Module]] = {}
+        for dtype, module in layer:
+            by_dtype.setdefault(dtype, []).append(module)
+        batches.extend(sorted(by_dtype.items(), key=lambda kv: str(kv[0])))
+        wrapped.update(id(module) for _, module in layer)
+        pending = [(dtype, module) for dtype, module in pending if id(module) not in wrapped]
+    return batches
+
+
 def log_precision_summary(component: str, compiled: CompiledPrecision, *, default_dtype: torch.dtype) -> None:
     logger.info(
         f"precision[{component}]: default gather dtype {default_dtype}, "

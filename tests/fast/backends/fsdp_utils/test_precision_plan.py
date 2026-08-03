@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from miles.backends.fsdp_utils.precision import ModuleSel, ParamSel, PrecisionSpec, Rule, compile_precision_plan
+from miles.backends.fsdp_utils.precision import ModuleSel, ParamSel, PrecisionSpec, Rule, compile_precision_plan, ordered_subshard_batches
 
 
 class Block(nn.Module):
@@ -112,3 +112,54 @@ def test_unmatched_rule_rejected():
     spec = PrecisionSpec(rules=(Rule(ParamSel("no.such.param"), master="fp32"),))
     with pytest.raises(ValueError, match="matched no tensor"):
         compile_precision_plan(_model(), spec, default_dtype=torch.bfloat16)
+
+
+class _NestedOwner(torch.nn.Module):
+    """A param-owning module that also contains a param-owning child."""
+
+    def __init__(self):
+        super().__init__()
+        self.gain = torch.nn.Parameter(torch.ones(4))
+        self.inner = torch.nn.Linear(4, 4)
+
+
+def test_nested_subshard_groups_wrap_innermost_first():
+    model = torch.nn.Module()
+    model.outer = _NestedOwner()
+    spec = PrecisionSpec(
+        rules=(
+            Rule(ParamSel("outer.gain"), gather="fp32"),
+            Rule(ModuleSel(fqn="outer.inner"), gather="fp16"),
+        )
+    )
+    compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
+    batches = ordered_subshard_batches(compiled.subshard_groups)
+    flat = [module for _, modules in batches for module in modules]
+    assert flat == [model.outer.inner, model.outer], "inner unit must wrap before its ancestor"
+    assert batches[0][0] is torch.float16
+    assert batches[1][0] is torch.float32
+
+
+def test_shared_module_orders_by_containment_not_fqn_depth():
+    # The module graph is a DAG: `shared` is registered both at the root (FQN
+    # depth 0) and inside `owner`. Depth ordering would wrap it in the same
+    # layer as (or after) `owner`; containment must put it strictly first.
+    model = torch.nn.Module()
+    shared = torch.nn.Linear(4, 4)
+    model.shared = shared
+    model.owner = _NestedOwner()
+    model.owner.leaf = shared
+    spec = PrecisionSpec(
+        rules=(
+            Rule(ModuleSel(fqn="shared"), gather="fp32"),
+            Rule(ModuleSel(fqn="owner"), gather="fp16"),
+            Rule(ParamSel("shared.*"), gather="fp16"),
+        )
+    )
+    # owner's float params: gain + inner.* + leaf.* (leaf IS shared) -> shared
+    # ends up claimed fp16 via the owner subtree rule; give it its own module
+    # rule so the compile-side single-dtype check stays satisfied.
+    compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
+    batches = ordered_subshard_batches(compiled.subshard_groups)
+    order = {id(m): i for i, (_, mods) in enumerate(batches) for m in mods}
+    assert order[id(shared)] < order[id(model.owner)], "shared leaf must wrap before the ancestor that contains it"
