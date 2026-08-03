@@ -137,6 +137,8 @@ def compile_precision_plan(
     for rule in spec.rules:
         _validate_rule(rule)
 
+    # Enumerate every param/buffer once: (fqn, tensor, is_buffer, owning module) plus
+    # each module's float-param set (needed later for whole-module coverage checks).
     named: list[tuple[str, torch.Tensor, bool, str, torch.nn.Module]] = []
     float_params_of_module: dict[str, set[str]] = {}
     for mod_fqn, module in model.named_modules():
@@ -148,6 +150,8 @@ def compile_precision_plan(
         for name, buf in module.named_buffers(recurse=False):
             named.append((f"{prefix}{name}", buf, True, mod_fqn, module))
 
+    # Precompile each rule into a tensor-fqn -> bool matcher; a ModuleSel matches
+    # every tensor under its matched modules' subtrees.
     matchers = []
     for rule in spec.rules:
         if isinstance(rule.select, ParamSel):
@@ -162,6 +166,9 @@ def compile_precision_plan(
             return None
         return default_dtype if axis == "default" else _DTYPES[axis]
 
+    # Per tensor: fold matching rules in declaration order (last match wins per axis),
+    # then route each axis to its lowering: master -> load-time cast, gather -> sub-wrap
+    # request on the owning module (gather == default needs nothing, the block policy is it).
     match_counts = [0] * len(spec.rules)
     master_casts: list[MasterCast] = []
     gather_by_module: dict[str, tuple[torch.nn.Module, dict[str, torch.dtype]]] = {}
@@ -186,12 +193,14 @@ def compile_precision_plan(
         if master_dtype is not None and master_dtype != tensor.dtype:
             master_casts.append(MasterCast(fqn, tensor, master_dtype))
 
+    # A rule that matched nothing is almost certainly a typo'd pattern or class name.
     for rule, count in zip(spec.rules, match_counts, strict=True):
         if count == 0:
             raise ValueError(f"precision rule matched no tensor: {rule}")
 
-    # Gather overrides lower to whole-module nested fully_shard units, so every
-    # float param of an affected module must agree on one gather dtype.
+    # Lower gather requests to nested fully_shard units: fully_shard wraps whole modules,
+    # so an affected module's float params must all agree on one gather dtype, and modules
+    # sharing a dtype merge into one group (one extra all-gather per group per step).
     groups: dict[torch.dtype, SubShardGroup] = {}
     for mod_fqn, (module, requests) in gather_by_module.items():
         dtypes = set(requests.values())
