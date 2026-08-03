@@ -39,7 +39,7 @@ from .loss_hub import DiffusionLossContext, flow_grpo_loss_formula, prepare_flow
 from .lr_scheduler import get_lr_scheduler
 from .metrics import new_metric_buffer
 from .parallel import create_fsdp_parallel_state
-from .precision import compile_precision_plan, log_precision_summary, resolve_dtype
+from .precision import apply_input_dtype_policy, compile_precision_plan, log_precision_summary, resolve_dtype
 from .sequence_parallel.plan import apply_sequence_parallel
 
 logger = logging.getLogger(__name__)
@@ -526,16 +526,24 @@ class FSDPTrainRayActor(TrainRayActor):
         train_pipeline_config = self.train_pipeline_config
         forward_dtype = self._forward_dtype
 
+        # Boundary dtypes are family policy; op interiors stay autocast-managed.
+        latents_in, timesteps_in, (pos_cond_in, neg_cond_in, joint_cond_in) = apply_input_dtype_policy(
+            train_pipeline_config.input_dtype_policy,
+            latents=prepared.latents,
+            timesteps=prepared.timesteps_for_model,
+            conds=(prepared.pos_cond, prepared.neg_cond, prepared.joint_cond),
+            default_dtype=forward_dtype,
+        )
+
         def _compute_noise_pred() -> torch.Tensor:
-            # Inputs/params keep their resident dtypes; compute dtype is autocast-managed.
             with torch.autocast("cuda", dtype=forward_dtype, enabled=forward_dtype != torch.float32):
                 return train_pipeline_config.compute_noise_pred(
                     model=prepared.model,
-                    latents_input=prepared.latents,
-                    timesteps_input=prepared.timesteps_for_model,
-                    pos_cond=prepared.pos_cond,
-                    neg_cond=prepared.neg_cond,
-                    joint_cond=prepared.joint_cond,
+                    latents_input=latents_in,
+                    timesteps_input=timesteps_in,
+                    pos_cond=pos_cond_in,
+                    neg_cond=neg_cond_in,
+                    joint_cond=joint_cond_in,
                     use_cfg=prepared.use_cfg,
                     cfg_batching=prepared.cfg_batching,
                     guidance_scale=prepared.guidance_scale,

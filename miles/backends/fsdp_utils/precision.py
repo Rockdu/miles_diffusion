@@ -229,6 +229,49 @@ def compile_precision_plan(
     return CompiledPrecision(master_casts=master_casts, subshard_groups=list(groups.values()))
 
 
+# ---------------------------------------------------------------------------
+# Boundary-input dtype policy (TrainPipelineConfig.input_dtype_policy)
+# ---------------------------------------------------------------------------
+
+INPUT_DTYPE_POLICY_KEYS = ("latents", "cond", "timestep")
+
+
+def apply_input_dtype_policy(
+    policy: dict,
+    *,
+    latents: torch.Tensor,
+    timesteps: torch.Tensor,
+    conds: tuple,
+    default_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor, tuple]:
+    """Cast model-boundary inputs once, mirroring sglang-d's denoising stage
+    (autocast covers only matmul/conv ops, so e.g. a raw fp32 input reaching RoPE
+    would diverge from rollout). Axis values: "default" (the run's forward dtype),
+    a dtype name, or None (pass through); only floating tensors are cast."""
+    unknown = set(policy) - set(INPUT_DTYPE_POLICY_KEYS)
+    if unknown:
+        raise ValueError(f"input_dtype_policy has unknown keys {sorted(unknown)}; known: {INPUT_DTYPE_POLICY_KEYS}")
+
+    def _axis(key: str) -> torch.dtype | None:
+        axis = policy.get(key)
+        if axis is None:
+            return None
+        if axis != "default" and axis not in _DTYPES:
+            raise ValueError(f"input_dtype_policy[{key!r}] has unknown dtype {axis!r}")
+        return default_dtype if axis == "default" else _DTYPES[axis]
+
+    def _cast(value, dtype: torch.dtype | None):
+        if dtype is None or not torch.is_tensor(value) or not value.is_floating_point():
+            return value
+        return value.to(dtype)
+
+    latents_dtype, timestep_dtype, cond_dtype = _axis("latents"), _axis("timestep"), _axis("cond")
+    out_conds = tuple(
+        None if cond is None else {key: _cast(value, cond_dtype) for key, value in cond.items()} for cond in conds
+    )
+    return _cast(latents, latents_dtype), _cast(timesteps, timestep_dtype), out_conds
+
+
 def log_precision_summary(component: str, compiled: CompiledPrecision, *, default_dtype: torch.dtype) -> None:
     logger.info(
         f"precision[{component}]: default gather dtype {default_dtype}, "
