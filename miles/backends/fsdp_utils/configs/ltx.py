@@ -129,7 +129,6 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
         from ltx_core.model.transformer.modality import Modality
         from ltx_core.utils import to_denoised
 
-        device = latents_input.device
         dtype = latents_input.dtype
         B = latents_input.shape[0]
 
@@ -148,10 +147,8 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
             context=cond["context"].to(dtype),
             context_mask=None,
         )
-        # FSDP mixed precision casts parameters but does not replace LTX's
-        # operation-level autocast semantics.
-        with torch.autocast(device_type=str(device).split(":")[0], dtype=dtype):
-            velocity, _ = model(video=video_modality, audio=None, perturbations=None)
+        # Compute dtype comes from the trainer's ambient autocast around compute_noise_pred.
+        velocity, _ = model(video=video_modality, audio=None, perturbations=None)
 
         # Keep the original fp32 denoised reconstruction path: although this is
         # algebraically an identity for T2V, strict e2e metrics depend on its rounding.
