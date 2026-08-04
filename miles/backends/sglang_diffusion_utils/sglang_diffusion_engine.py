@@ -172,11 +172,20 @@ class SGLangDiffusionEngine(RayActor):
             return
         visible = [x.strip() for x in cvd.split(",") if x.strip()]
         local_idx = _to_local_gpu_id(self.base_gpu_id)
-        pinned = visible[local_idx]
+        # A multi-GPU engine (SP/TP inside one engine) owns a contiguous slice
+        # starting at base_gpu_id; pinning a single device left worker rank 1+
+        # with "CUDA error: invalid device ordinal".
+        count = max(1, getattr(self.args, "rollout_num_gpus_per_engine", 1))
+        if local_idx + count > len(visible):
+            raise RuntimeError(
+                f"engine needs {count} GPUs from local index {local_idx} but only "
+                f"CUDA_VISIBLE_DEVICES={cvd} are visible"
+            )
+        pinned = ",".join(visible[local_idx : local_idx + count])
         os.environ["CUDA_VISIBLE_DEVICES"] = pinned
         logger.info(
             f"Engine rank={self.rank}: pinned CUDA_VISIBLE_DEVICES={pinned} "
-            f"(base_gpu_id={self.base_gpu_id}, local_idx={local_idx})"
+            f"(base_gpu_id={self.base_gpu_id}, local_idx={local_idx}, count={count})"
         )
 
     def _make_request(self, endpoint: str, payload: dict | None = None):
@@ -310,8 +319,15 @@ def _compute_server_args(args, host, port, nccl_port):
         "nccl_port": nccl_port,
         # Distinct per engine so concurrent settle_port() probes don't race on the default.
         "master_port": nccl_port + 10000 if nccl_port is not None else None,
-        # Must match rollout allocation, not user CLI.
-        "tp_size": args.rollout_num_gpus_per_engine,
+        # Engine world size always matches the rollout allocation; the
+        # PARALLELISM SPLIT inside it defaults to TP for backward compat but an
+        # explicit --sglang-tp-size wins, so multi-GPU engines can run pure
+        # sequence parallel (e.g. --sglang-tp-size 1 --sglang-sp-degree 2
+        # --sglang-ulysses-degree 2 on a 2-GPU engine). num_gpus was never
+        # forwarded before, which capped every engine at 1 GPU regardless of
+        # --rollout-num-gpus-per-engine.
+        "num_gpus": args.rollout_num_gpus_per_engine,
+        "tp_size": getattr(args, "sglang_tp_size", None) or args.rollout_num_gpus_per_engine,
         "sp_degree": args.sglang_sp_degree,
         "enable_cfg_parallel": args.sglang_enable_cfg_parallel,
         # Skip warmup to avoid timeout during RL rollouts.
