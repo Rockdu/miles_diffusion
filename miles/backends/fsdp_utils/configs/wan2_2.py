@@ -5,12 +5,21 @@ from __future__ import annotations
 import torch
 from miles.utils.types import CondKwargs
 
+from ..precision import ModuleSel, PrecisionSpec, Rule
 from .train_pipeline_config import TrainPipelineConfig, register_train_pipeline_config
 
 
 @register_train_pipeline_config("wan2_2")
 class Wan2_2TrainPipelineConfig(TrainPipelineConfig):
     hf_ckpt_name_patterns = ("wan2.2", "wan-2.2")
+    # Rollout (sglang-d) keeps every FP32LayerNorm's affine params resident and
+    # consumed in fp32 (verified on the Wan2.2 full40 dump: rollout norm2
+    # weight/bias are float32 in the forward while the FSDP default policy
+    # gathered them as bf16). Pin the gather dtype so the training matmul
+    # consumes the same weight dtype; the resident master is already fp32 via
+    # the run-level --fsdp-master-dtype. Affine-less FP32LayerNorms
+    # (norm1/norm3/norm_out) carry no tensors and compile to nothing.
+    precision_spec = PrecisionSpec(rules=(Rule(ModuleSel(cls="FP32LayerNorm"), gather="fp32"),))
     # High-noise expert ("transformer") handles t >= boundary, low-noise expert
     # ("transformer_2") the rest.
     boundary_ratio = 0.875
