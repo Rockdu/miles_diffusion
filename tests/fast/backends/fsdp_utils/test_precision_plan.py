@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from miles.backends.fsdp_utils.precision import ModuleSel, PrecisionSpec, Rule, compile_precision_plan
+from miles.backends.fsdp_utils.precision import PrecisionSpec, Rule, compile_precision_plan
 
 
 class Rope(nn.Module):
@@ -39,9 +39,9 @@ def test_empty_spec_compiles_to_nothing():
     assert compiled.subshard_groups == []
 
 
-def test_cls_rule_lowers_norms_to_one_subshard_group():
+def test_wildcard_rule_lowers_norms_to_one_subshard_group():
     model = _model()
-    spec = PrecisionSpec(rules=(Rule(ModuleSel(cls="LayerNorm"), master="fp32", gather="fp32"),))
+    spec = PrecisionSpec(rules=(Rule("blocks.*.norm", master="fp32", gather="fp32"),))
     compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
     assert len(compiled.subshard_groups) == 1
     group = compiled.subshard_groups[0]
@@ -55,15 +55,15 @@ def test_cls_rule_lowers_norms_to_one_subshard_group():
 
 def test_gather_without_master_is_allowed():
     # Nested policy casts at all-gather, so gather may diverge from master.
-    spec = PrecisionSpec(rules=(Rule(ModuleSel(cls="LayerNorm"), gather="fp32"),))
+    spec = PrecisionSpec(rules=(Rule("blocks.*.norm", gather="fp32"),))
     compiled = compile_precision_plan(_model(), spec, default_dtype=torch.bfloat16)
     assert compiled.master_casts == []
     assert compiled.subshard_groups[0].param_dtype is torch.float32
 
 
-def test_master_rule_covers_matched_subtree():
+def test_ancestor_rule_covers_subtree():
     model = _model()
-    spec = PrecisionSpec(rules=(Rule(ModuleSel(fqn="blocks.1"), master="fp32"),))
+    spec = PrecisionSpec(rules=(Rule("blocks.1", master="fp32"),))
     compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
     assert all(cast.fqn.startswith("blocks.1.") for cast in compiled.master_casts)
     compiled.apply_master_casts()
@@ -72,9 +72,44 @@ def test_master_rule_covers_matched_subtree():
     assert model.blocks[0].linear.weight.dtype is torch.bfloat16
 
 
+def test_nearest_annotation_wins():
+    model = _model()
+    spec = PrecisionSpec(
+        rules=(
+            Rule("blocks.0.norm", master="default"),
+            Rule("blocks.0", master="fp32"),
+        )
+    )
+    compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
+    compiled.apply_master_casts()
+    assert model.blocks[0].linear.weight.dtype is torch.float32
+    assert model.blocks[0].norm.weight.dtype is torch.bfloat16
+
+
+def test_exact_beats_wildcard_regardless_of_order():
+    model = _model()
+    for rules in (
+        (Rule("blocks.0.norm", gather="default"), Rule("blocks.*.norm", master="fp32", gather="fp32")),
+        (Rule("blocks.*.norm", master="fp32", gather="fp32"), Rule("blocks.0.norm", gather="default")),
+    ):
+        compiled = compile_precision_plan(model, PrecisionSpec(rules=rules), default_dtype=torch.bfloat16)
+        assert compiled.subshard_groups[0].modules == [model.blocks[1].norm]
+
+
+def test_same_node_same_axis_tie_rejected():
+    spec = PrecisionSpec(
+        rules=(
+            Rule("blocks.*.norm", gather="fp32"),
+            Rule("*.0.norm", gather="fp16"),
+        )
+    )
+    with pytest.raises(ValueError, match="tie"):
+        compile_precision_plan(_model(), spec, default_dtype=torch.bfloat16)
+
+
 def test_buffer_only_module_master_cast():
     model = _model()
-    spec = PrecisionSpec(rules=(Rule(ModuleSel(cls="Rope"), master="fp32"),))
+    spec = PrecisionSpec(rules=(Rule("blocks.*.rope", master="fp32"),))
     compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
     assert {cast.fqn for cast in compiled.master_casts} == {"blocks.0.rope.freqs", "blocks.1.rope.freqs"}
     assert compiled.subshard_groups == []
@@ -82,31 +117,19 @@ def test_buffer_only_module_master_cast():
 
 def test_buffer_only_module_gather_is_skipped():
     # Buffers are never gathered; a gather pin on a paramless module lowers to nothing.
-    spec = PrecisionSpec(rules=(Rule(ModuleSel(cls="Rope"), gather="fp32"),))
+    spec = PrecisionSpec(rules=(Rule("blocks.*.rope", gather="fp32"),))
     compiled = compile_precision_plan(_model(), spec, default_dtype=torch.bfloat16)
     assert compiled.subshard_groups == []
 
 
 def test_gather_matching_default_is_inline():
-    spec = PrecisionSpec(rules=(Rule(ModuleSel(cls="LayerNorm"), gather="default"),))
+    spec = PrecisionSpec(rules=(Rule("blocks.*.norm", gather="default"),))
     compiled = compile_precision_plan(_model(), spec, default_dtype=torch.bfloat16)
     assert compiled.subshard_groups == []
     assert compiled.master_casts == []
 
 
-def test_last_rule_wins_per_axis():
-    model = _model()
-    spec = PrecisionSpec(
-        rules=(
-            Rule(ModuleSel(cls="LayerNorm"), master="fp32", gather="fp32"),
-            Rule(ModuleSel(fqn="blocks.0.norm"), master="default", gather="default"),
-        )
-    )
-    compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
-    assert compiled.subshard_groups[0].modules == [model.blocks[1].norm]
-
-
 def test_unmatched_rule_rejected():
-    spec = PrecisionSpec(rules=(Rule(ModuleSel(cls="NoSuchModule"), master="fp32"),))
+    spec = PrecisionSpec(rules=(Rule("no.such.module", master="fp32"),))
     with pytest.raises(ValueError, match="matched no module"):
         compile_precision_plan(_model(), spec, default_dtype=torch.bfloat16)
