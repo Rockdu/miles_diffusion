@@ -59,6 +59,7 @@ def apply_sgld_monkey_patches() -> None:
 def apply_ltx2_rollout_patches() -> None:
     from miles.backends.sglang_diffusion_utils.monkey_patches import (
         patch_ltx2_disable_av_cross,
+        patch_ltx2_norm_out_fp32,
         patch_ltx2_rollout_cond_kwargs,
         patch_ltx2_trivial_attention_mask,
     )
@@ -66,6 +67,7 @@ def apply_ltx2_rollout_patches() -> None:
     patch_ltx2_rollout_cond_kwargs.apply()
     patch_ltx2_disable_av_cross.apply()
     patch_ltx2_trivial_attention_mask.apply()
+    patch_ltx2_norm_out_fp32.apply()
 
 
 def apply_env_selected_rollout_patches() -> None:
