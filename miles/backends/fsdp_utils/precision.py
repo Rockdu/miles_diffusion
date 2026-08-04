@@ -1,36 +1,36 @@
-"""Fine-grained weight-precision control for FSDP2.
+"""Fine-grained weight-precision control for FSDP2, at module granularity.
 
-A family declares per-tensor dtype intent as PrecisionSpec rules on its
+A family declares per-module dtype intent as PrecisionSpec rules on its
 TrainPipelineConfig; each rule pins one or both axes (last match wins per axis):
-  - master: resident dtype of the param/buffer (optimizer state precision)
-  - gather: dtype the param is cast to for FSDP all-gather + forward
-Compute dtype is not managed here: the trainer autocasts the DiT forward and
-op-level exceptions belong to the monkey-patch registry.
+  - master: resident dtype of the module's params/buffers (optimizer precision)
+  - gather: dtype the params are cast to for FSDP all-gather + forward
+Compute dtype is not managed here: the trainer autocasts the DiT forward
+(boundary inputs via apply_input_dtype_policy below) and op-level exceptions
+belong to the monkey-patch registry.
 
 ``compile_precision_plan`` lowers the rules onto what FSDP2 can express:
 
     PrecisionSpec rules
         |
-    (1) inventory every param/buffer: FQN, owning module
+    (1) match each rule to modules; a rule covers its modules' whole subtrees
         |
-    (2) per tensor, fold matching rules -> (master, gather) intent
+    (2) per module, fold covering rules -> (master, gather) intent
         |                        |
      master axis             gather axis
         |                        |
     (3) != loaded dtype?     (4) != default dtype?  --no--> inline: the block
-        -> MasterCast,           |                          policy already is
-        cast at load time        v                          the default
-                             sub-wrap request on the owning module
-                                 |
-    (5) per module: one gather dtype + all float params covered, then
-        merge same-dtype modules -> one SubShardGroup per dtype
+        -> MasterCast of the      |                         policy already is
+        module's own float        v                         the default
+        tensors, at load time  sub-wrap: merge same-dtype modules into one
+                               SubShardGroup per dtype (buffer-only and
+                               paramless modules have nothing to gather: skipped)
         |
     apply_fsdp2: fully_shard(group.modules, param_dtype=group dtype),
     nested before the block/root wrap, one extra all-gather per group
 
-Gather intent that does not align to a module boundary (e.g. a bare
-nn.Parameter on a block) cannot be sub-wrapped and is rejected; FSDP2 itself
-additionally requires uniform master dtype among trainable params per unit.
+Module granularity is the floor FSDP2 gives us (fully_shard wraps modules,
+and FSDP2 requires uniform master dtype among trainable params per unit), so
+finer-grained selectors are deliberately not offered.
 """
 
 from __future__ import annotations
@@ -57,24 +57,17 @@ def resolve_dtype(name: str) -> torch.dtype:
 
 @dataclass(frozen=True)
 class ModuleSel:
-    """Matches every param/buffer under modules with fnmatch-ing FQN or exact class name."""
+    """Matches modules (and their subtrees) by fnmatch-ing FQN and/or exact class name."""
 
     fqn: str | None = None
     cls: str | None = None
 
 
 @dataclass(frozen=True)
-class ParamSel:
-    """Matches individual params/buffers by fnmatch on their FQN."""
-
-    fqn: str
-
-
-@dataclass(frozen=True)
 class Rule:
     """Axes take a dtype name ("fp32"/"bf16"/"fp16"), "default" (the run's default dtype), or None (untouched)."""
 
-    select: ModuleSel | ParamSel
+    select: ModuleSel
     master: str | None = None
     gather: str | None = None
 
@@ -118,7 +111,7 @@ class CompiledPrecision:
 def _validate_rule(rule: Rule) -> None:
     if rule.master is None and rule.gather is None:
         raise ValueError(f"precision rule sets no dtype axis: {rule}")
-    if isinstance(rule.select, ModuleSel) and rule.select.fqn is None and rule.select.cls is None:
+    if rule.select.fqn is None and rule.select.cls is None:
         raise ValueError(f"precision rule has an empty ModuleSel: {rule}")
     for axis in (rule.master, rule.gather):
         if axis is not None and axis != "default" and axis not in _DTYPES:
@@ -142,89 +135,56 @@ def compile_precision_plan(
     *,
     default_dtype: torch.dtype,
 ) -> CompiledPrecision:
-    """Resolve spec rules against the (pre-LoRA, pre-FSDP) model and lower them.
-
-    Raises on rules that match nothing (likely a typo'd pattern) and on plans
-    FSDP2 cannot express (see module docstring).
-    """
+    """Resolve spec rules against the (pre-LoRA, pre-FSDP) model and lower them per module."""
     for rule in spec.rules:
         _validate_rule(rule)
 
-    # (1) Tensor inventory, plus per-module float-param sets for the stage (5) coverage check.
-    named: list[tuple[str, torch.Tensor, bool, str, torch.nn.Module]] = []
-    float_params_of_module: dict[str, set[str]] = {}
-    for mod_fqn, module in model.named_modules():
-        prefix = f"{mod_fqn}." if mod_fqn else ""
-        for name, param in module.named_parameters(recurse=False):
-            named.append((f"{prefix}{name}", param, False, mod_fqn, module))
-            if param.is_floating_point():
-                float_params_of_module.setdefault(mod_fqn, set()).add(f"{prefix}{name}")
-        for name, buf in module.named_buffers(recurse=False):
-            named.append((f"{prefix}{name}", buf, True, mod_fqn, module))
+    # (1) Match each rule to modules once; a rule that matches nothing is almost certainly a typo.
+    rule_prefixes = [_matched_module_prefixes(rule.select, model) for rule in spec.rules]
+    for rule, prefixes in zip(spec.rules, rule_prefixes, strict=True):
+        if not prefixes:
+            raise ValueError(f"precision rule matched no module: {rule}")
 
-    # (2a) One fqn -> bool matcher per rule; ModuleSel covers its matched modules' subtrees.
-    matchers = []
-    for rule in spec.rules:
-        if isinstance(rule.select, ParamSel):
-            pattern = rule.select.fqn
-            matchers.append(lambda fqn, pattern=pattern: fnmatch(fqn, pattern))
-        else:
-            prefixes = _matched_module_prefixes(rule.select, model)
-            matchers.append(lambda fqn, prefixes=prefixes: any(p == "" or fqn.startswith(f"{p}.") for p in prefixes))
+    def _covers(prefixes: list[str], mod_fqn: str) -> bool:
+        return any(p == "" or mod_fqn == p or mod_fqn.startswith(f"{p}.") for p in prefixes)
 
     def _resolve_axis(axis: str | None) -> torch.dtype | None:
         if axis is None:
             return None
         return default_dtype if axis == "default" else _DTYPES[axis]
 
-    # (2b)-(4) Fold rules per tensor, route master to casts and gather to sub-wrap requests.
-    match_counts = [0] * len(spec.rules)
+    # (2)-(4) Fold rules per module, lower master to casts and gather to sub-shard groups.
     master_casts: list[MasterCast] = []
-    gather_by_module: dict[str, tuple[torch.nn.Module, dict[str, torch.dtype]]] = {}
-    for fqn, tensor, is_buffer, mod_fqn, module in named:
+    groups: dict[torch.dtype, SubShardGroup] = {}
+    for mod_fqn, module in model.named_modules():
         master = gather = None
-        for i, rule in enumerate(spec.rules):
-            if not matchers[i](fqn):
+        for rule, prefixes in zip(spec.rules, rule_prefixes, strict=True):
+            if not _covers(prefixes, mod_fqn):
                 continue
-            match_counts[i] += 1
             master = rule.master if rule.master is not None else master
             gather = rule.gather if rule.gather is not None else gather
+        if master is None and gather is None:
+            continue
+
+        prefix = f"{mod_fqn}." if mod_fqn else ""
+        params = list(module.named_parameters(recurse=False))
+        tensors = params + list(module.named_buffers(recurse=False))
+        master_dtype = _resolve_axis(master)
+        if master_dtype is not None:
+            for name, tensor in tensors:
+                if tensor.is_floating_point() and tensor.dtype != master_dtype:
+                    master_casts.append(MasterCast(f"{prefix}{name}", tensor, master_dtype))
 
         gather_dtype = _resolve_axis(gather)
-        if gather_dtype is not None:
-            if is_buffer:
-                raise ValueError(f"precision rule pins gather dtype on buffer {fqn}; buffers are never gathered")
-            if gather_dtype != default_dtype:
-                if mod_fqn == "":
-                    raise ValueError(f"{fqn}: cannot sub-wrap the root module for a gather override")
-                gather_by_module.setdefault(mod_fqn, (module, {}))[1][fqn] = gather_dtype
-        master_dtype = _resolve_axis(master)
-        if master_dtype is not None and master_dtype != tensor.dtype:
-            master_casts.append(MasterCast(fqn, tensor, master_dtype))
-
-    # A rule matching nothing is almost certainly a typo'd pattern or class name.
-    for rule, count in zip(spec.rules, match_counts, strict=True):
-        if count == 0:
-            raise ValueError(f"precision rule matched no tensor: {rule}")
-
-    # (5) Validate module-boundary alignment, then merge same-dtype modules into groups.
-    groups: dict[torch.dtype, SubShardGroup] = {}
-    for mod_fqn, (module, requests) in gather_by_module.items():
-        dtypes = set(requests.values())
-        if len(dtypes) > 1:
-            raise ValueError(
-                f"module {mod_fqn} mixes gather dtypes {sorted(map(str, dtypes))}; FSDP sub-wrap needs one"
-            )
-        missing = float_params_of_module.get(mod_fqn, set()) - requests.keys()
-        if missing:
-            raise ValueError(
-                f"gather override must cover the whole module {mod_fqn} for FSDP sub-wrap; "
-                f"missing {sorted(missing)}"
-            )
-        dtype = dtypes.pop()
-        group = groups.setdefault(dtype, SubShardGroup(param_dtype=dtype))
-        group.modules.append(module)
-        group.param_fqns.extend(sorted(requests))
+        if gather_dtype is not None and gather_dtype != default_dtype:
+            float_params = [name for name, param in params if param.is_floating_point()]
+            if not float_params:
+                continue
+            if mod_fqn == "":
+                raise ValueError("cannot sub-wrap the root module for a gather override")
+            group = groups.setdefault(gather_dtype, SubShardGroup(param_dtype=gather_dtype))
+            group.modules.append(module)
+            group.param_fqns.extend(f"{prefix}{name}" for name in float_params)
 
     return CompiledPrecision(master_casts=master_casts, subshard_groups=list(groups.values()))
 
