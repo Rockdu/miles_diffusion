@@ -72,7 +72,65 @@ def _mul_add_forward(self, a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, k:
     return (c.float() + gated).type_as(c)
 
 
+def _rms_norm_forward(self, x: torch.Tensor, residual=None):
+    # Wan norm_q/norm_k are torch.nn.RMSNorm on the train side; call the very
+    # same functional so the result is bitwise identical on identical inputs
+    # (validated offline on paired dumps: max|d| = 0.0 against the trainer,
+    # while the fused kernel differed at 3e-2 max-abs). NOT the sgld
+    # patch_rmsnorm semantics -- diffusers-generic RMSNorm rounds before the
+    # weight mul, torch.nn.RMSNorm does not; Wan uses the latter.
+    assert residual is None, "wan attention rmsnorm never fuses a residual"
+    return F.rms_norm(x, (x.shape[-1],), self.weight, self.variance_epsilon)
+
+
+def _rope_fp32(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    # diffusers WanAttnProcessor rotates in fp32 over interleaved pairs with
+    # half-size tables and rounds once; bit-identical to the diffusers formula
+    # on random data. The fused kernels rotate in bf16 instead.
+    cos = cos.float().unsqueeze(-2)
+    sin = sin.float().unsqueeze(-2)
+    x1 = x[..., 0::2].float()
+    x2 = x[..., 1::2].float()
+    o1 = x1 * cos - x2 * sin
+    o2 = x1 * sin + x2 * cos
+    return torch.stack((o1, o2), dim=-1).flatten(-2).type_as(x)
+
+
+def _patched_flashinfer_rope_qk_inplace(q, k, cos_sin_cache, is_neox=False):
+    # wanvideo builds the cache as cat([cos, sin], dim=-1), each [tokens, D/2].
+    assert not is_neox
+    half = cos_sin_cache.shape[-1] // 2
+    cos, sin = cos_sin_cache[..., :half], cos_sin_cache[..., half:]
+    return _rope_fp32(q, cos, sin), _rope_fp32(k, cos, sin)
+
+
+def _patched_apply_rotary_emb(x, cos, sin, is_neox_style, interleaved=False):
+    assert not is_neox_style
+    if interleaved and cos.shape[-1] == x.shape[-1]:
+        cos = cos[..., ::2]
+        sin = sin[..., ::2]
+    return _rope_fp32(x, cos, sin)
+
+
 def apply() -> None:
+    import importlib
+
+    from sglang.multimodal_gen.runtime.layers.layernorm import RMSNorm
+
     LayerNormScaleShift.forward = _lnss_forward
     ScaleResidualLayerNormScaleShift.forward = _srlnss_forward
     MulAdd.forward = _mul_add_forward
+    RMSNorm.forward = _rms_norm_forward
+    # The wan DiT modules bind the rope entry points at import time.
+    for mod_path in (
+        "sglang.multimodal_gen.runtime.models.dits.wanvideo",
+        "sglang.multimodal_gen.runtime.models.dits.causal_wanvideo",
+    ):
+        try:
+            mod = importlib.import_module(mod_path)
+        except ImportError:
+            continue
+        if hasattr(mod, "apply_flashinfer_rope_qk_inplace"):
+            mod.apply_flashinfer_rope_qk_inplace = _patched_flashinfer_rope_qk_inplace
+        if hasattr(mod, "_apply_rotary_emb"):
+            mod._apply_rotary_emb = _patched_apply_rotary_emb
