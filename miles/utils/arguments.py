@@ -1510,8 +1510,7 @@ def set_default_diffusion_args(args) -> None:
         from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
 
         # Mirrors the engine's forwarding rule: a value equal to the class default counts as unset.
-        sglang_dit = getattr(args, "sglang_dit_precision", None)
-        if sglang_dit is None or sglang_dit == getattr(PipelineConfig, "dit_precision", None):
+        if args.sglang_dit_precision == PipelineConfig.dit_precision:
             args.sglang_dit_precision = args.precision_default_dtype
 
 
