@@ -31,8 +31,10 @@ class PreparedBatch:
     """Actor-owned DiT forward inputs produced by a prepare hook."""
 
     latents: torch.Tensor
+    # Per-pair rollout timesteps (t domain) and scheduler sigmas (sigma domain); each
+    # family's compute_noise_pred consumes whichever domain its model expects.
     timesteps: torch.Tensor
-    timesteps_for_model: torch.Tensor
+    sigmas: torch.Tensor
     model: nn.Module
     component_name: str
     guidance_scale: float

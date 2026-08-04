@@ -14,6 +14,15 @@ def _stack_pair_field(batch: list[dict], key: str, device: torch.device) -> torc
     return torch.stack([pair[key] for pair in batch]).to(device=device, dtype=torch.float32)
 
 
+def _sigmas_for_timesteps(scheduler, timesteps: torch.Tensor) -> torch.Tensor:
+    """Exact-match pair timesteps into the rollout scheduler snapshot and return their sigmas."""
+    sched_t = scheduler.timesteps.to(timesteps.device)
+    idx = (timesteps.view(-1, 1) == sched_t.view(1, -1)).long().argmax(dim=1)
+    if not torch.equal(sched_t[idx], timesteps):
+        raise ValueError("train pair timesteps not found in rollout scheduler_timesteps")
+    return scheduler.sigmas.to(timesteps.device)[idx]
+
+
 def prepare_flow_grpo_batch(
     ctx: DiffusionLossContext,
     batch: list[dict],
@@ -62,10 +71,7 @@ def prepare_flow_grpo_batch(
             args.diffusion_guidance_scale_2,
         )
 
-    if config.needs_timestep_scaling:
-        timesteps_for_model = timesteps / float(num_train_timesteps)
-    else:
-        timesteps_for_model = timesteps
+    sigmas = _sigmas_for_timesteps(ctx.scheduler, timesteps)
 
     pos_list = [config.prepare_cond_kwargs(batch[i]["denoising_env"].pos_cond_kwargs, device) for i in range(bsz)]
     neg_list = (
@@ -85,7 +91,7 @@ def prepare_flow_grpo_batch(
     return PreparedBatch(
         latents=latents,
         timesteps=timesteps,
-        timesteps_for_model=timesteps_for_model,
+        sigmas=sigmas,
         model=model,
         component_name=component_name,
         guidance_scale=guidance_scale,
