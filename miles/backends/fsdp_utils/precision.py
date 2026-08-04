@@ -144,6 +144,9 @@ def compile_precision(
     The traversal makes that cheap. ``named_modules`` yields parents before children, so the parent's
     dtype is already in ``gather_dtypes`` when we reach a module: inheritance is one dict lookup, and
     each rule only has to be tested against the module it names rather than against its ancestors.
+    Within a module the rules apply in spec order, so a later rule wins, while rules on ancestors
+    have already acted through the inherited dtype. A buffer-only module never needs a unit — FSDP
+    gathers parameters, not buffers — whereas a container does, since ``parameters()`` recurses.
     """
     wrap_units: list[WrapUnit] = []
     gather_dtypes: dict[str, torch.dtype] = {"": default_dtype}
@@ -151,8 +154,6 @@ def compile_precision(
 
     for mod_fqn, module in model.named_modules():
         parent_gather = gather_dtypes[_parent_fqn(mod_fqn)]
-        # Start from what the parent provides, then let the rules selecting this module override it
-        # in spec order: the later one wins, and rules on ancestors already acted via the parent.
         gather = parent_gather
         for i, rule in enumerate(spec.rules):
             if not _selects(rule.select, mod_fqn, module):
@@ -160,9 +161,6 @@ def compile_precision(
             hits[i] += 1
             gather = _resolve_axis(rule.gather, default_dtype)
 
-        # Differs from the parent -> this module needs its own unit, unless it has nothing to gather:
-        # parameters() recurses so containers still count, but buffers are never gathered, so a
-        # buffer-only module like a RoPE cache would only add an empty FSDP group.
         needs_unit = gather != parent_gather and next(module.parameters(), None) is not None
         if needs_unit and mod_fqn == "":
             raise ValueError("cannot wrap the root module for a gather override")
