@@ -138,16 +138,12 @@ def compile_precision(
 ) -> CompiledPrecision:
     """Resolve the spec against the (pre-LoRA, pre-FSDP) model into FSDP2 wrap units.
 
-    The rule is one line: **a module becomes its own wrap unit exactly when its gather dtype differs
-    from its parent's.** Anything matching its parent is already covered by the parent's unit, so the
-    emitted units are the minimal set of fully_shard calls that realises the spec.
-
-    The traversal makes that cheap. ``named_modules`` yields parents before children, so the parent's
-    dtype is already in ``gather_dtypes`` when we reach a module: inheritance is one dict lookup, and
-    each rule only has to be tested against the module it names rather than against its ancestors.
-    Within a module the rules apply in spec order, so a later rule wins, while rules on ancestors
-    have already acted through the inherited dtype. A buffer-only module never needs a unit — FSDP
-    gathers parameters, not buffers — whereas a container does, since ``parameters()`` recurses.
+    Labelling every module with its gather dtype and noting that one fully_shard paints a whole
+    subtree makes this run-length encoding on a tree: the labelling cuts the tree into maximal
+    monochromatic components, one call per component root reproduces it, and no call can serve two
+    components, so that set is optimal. Hence the compiler is a single line — wrap a module iff its
+    dtype differs from its parent's, the root's component being the default wrap. ``named_modules``
+    is parent-first, so the parent's dtype is one dict lookup away, and rules apply in spec order.
     """
     wrap_units: list[WrapUnit] = []
     gather_dtypes: dict[str, torch.dtype] = {"": default_dtype}
@@ -162,6 +158,7 @@ def compile_precision(
             hits[i] += 1
             gather = _resolve_axis(rule.gather, default_dtype)
 
+        # A paramless module has nothing to gather; parameters() recurses, so containers still count.
         needs_unit = gather != parent_gather and next(module.parameters(), None) is not None
         if needs_unit and mod_fqn == "":
             raise ValueError("cannot wrap the root module for a gather override")
