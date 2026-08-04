@@ -80,7 +80,7 @@ fi
   --diffusion-output-num-frames 57 \
   --diffusion-fps 24 \
   --diffusion-forward-dtype bf16 \
-  --fsdp-master-dtype bf16 \
+  --fsdp-master-dtype fp32 \
   --fsdp-reduce-dtype bf16 \
   --advantage-estimator grpo \
   --globalize-reward-std \
