@@ -1,16 +1,11 @@
 """Fine-grained weight-precision control for FSDP2, at module granularity.
 
 A family declares per-module dtype intent as PrecisionSpec rules on its
-TrainPipelineConfig. A rule annotates the module-FQN tree nodes its ``path``
-matches (segment-wise glob, ``*`` never crosses dots) with one or both axes:
+TrainPipelineConfig; each rule pins one or both axes (last match wins per axis):
   - master: resident dtype of the module's params/buffers (optimizer precision)
   - gather: dtype the params are cast to for FSDP all-gather + forward
-Rule order carries no meaning; per axis each module resolves upward from itself:
-  - nearest wins: the closest annotated node on the self -> root chain applies
-  - most specific wins: on one node, the pattern with more literal segments
-    applies; a full tie is a compile error
-Compute dtype is not managed here: the trainer autocasts the DiT forward,
-model-boundary input dtypes are family policy applied by
+The weight spec does not manage compute dtype: the trainer autocasts the DiT
+forward, model-boundary input dtypes are family policy applied by
 ``apply_input_dtype_policy`` below, and op-level exceptions belong to the
 monkey-patch registry.
 
@@ -18,9 +13,9 @@ monkey-patch registry.
 
     PrecisionSpec rules
         |
-    (1) annotate matched tree nodes; a rule matching nothing is an error
+    (1) match each rule to modules; a rule covers its modules' whole subtrees
         |
-    (2) per module, resolve (master, gather) leaf-upward as above
+    (2) per module, fold covering rules -> (master, gather) intent
         |                        |
      master axis             gather axis
         |                        |
@@ -70,10 +65,18 @@ def _resolve_axis(axis: str | None, default_dtype: torch.dtype) -> torch.dtype |
 
 
 @dataclass(frozen=True)
-class Rule:
-    """path: segment-wise glob over module FQNs; axes take a dtype name, "default", or None (untouched)."""
+class ModuleSel:
+    """Matches modules (and their subtrees) by fnmatch-ing FQN and/or exact class name."""
 
-    path: str
+    fqn: str | None = None
+    cls: str | None = None
+
+
+@dataclass(frozen=True)
+class Rule:
+    """Axes take a dtype name ("fp32"/"bf16"/"fp16"), "default" (the run's default dtype), or None (untouched)."""
+
+    select: ModuleSel
     master: str | None = None
     gather: str | None = None
 
@@ -117,36 +120,22 @@ class CompiledPrecision:
 def _validate_rule(rule: Rule) -> None:
     if rule.master is None and rule.gather is None:
         raise ValueError(f"precision rule sets no dtype axis: {rule}")
+    if rule.select.fqn is None and rule.select.cls is None:
+        raise ValueError(f"precision rule has an empty ModuleSel: {rule}")
     for axis in (rule.master, rule.gather):
         if axis is not None and axis != "default" and axis not in _DTYPES:
             raise ValueError(f"precision rule has unknown dtype {axis!r}: {rule}")
 
 
-def _path_matches(path: str, fqn: str) -> bool:
-    if path == "" or fqn == "":
-        return path == fqn
-    pattern_segments = path.split(".")
-    fqn_segments = fqn.split(".")
-    return len(pattern_segments) == len(fqn_segments) and all(
-        fnmatch(seg, pat) for seg, pat in zip(fqn_segments, pattern_segments, strict=True)
-    )
-
-
-def _specificity(path: str) -> int:
-    return sum(1 for seg in path.split(".") if not any(c in seg for c in "*?["))
-
-
-def _resolve_node_axis(rules_at_node: list[Rule], axis_name: str, mod_fqn: str) -> str | None:
-    """Most-specific-wins on one node; a full tie between distinct values is a compile error."""
-    setters = [rule for rule in rules_at_node if getattr(rule, axis_name) is not None]
-    if not setters:
-        return None
-    best = max(_specificity(rule.path) for rule in setters)
-    winners = [rule for rule in setters if _specificity(rule.path) == best]
-    values = {getattr(rule, axis_name) for rule in winners}
-    if len(values) > 1:
-        raise ValueError(f"precision rules tie on {mod_fqn}.{axis_name}: {winners}")
-    return values.pop()
+def _matched_module_prefixes(sel: ModuleSel, model: torch.nn.Module) -> list[str]:
+    prefixes = []
+    for mod_fqn, module in model.named_modules():
+        if sel.cls is not None and type(module).__name__ != sel.cls:
+            continue
+        if sel.fqn is not None and not fnmatch(mod_fqn, sel.fqn):
+            continue
+        prefixes.append(mod_fqn)
+    return prefixes
 
 
 def compile_precision_plan(
@@ -159,33 +148,25 @@ def compile_precision_plan(
     for rule in spec.rules:
         _validate_rule(rule)
 
-    # (1) Annotate matched tree nodes; a rule that matches nothing is almost certainly a typo.
-    all_fqns = [fqn for fqn, _ in model.named_modules()]
-    annotations: dict[str, list[Rule]] = {}
-    for rule in spec.rules:
-        matched = [fqn for fqn in all_fqns if _path_matches(rule.path, fqn)]
-        if not matched:
+    # (1) Match each rule to modules once; a rule that matches nothing is almost certainly a typo.
+    rule_prefixes = [_matched_module_prefixes(rule.select, model) for rule in spec.rules]
+    for rule, prefixes in zip(spec.rules, rule_prefixes, strict=True):
+        if not prefixes:
             raise ValueError(f"precision rule matched no module: {rule}")
-        for fqn in matched:
-            annotations.setdefault(fqn, []).append(rule)
 
-    def _resolve(mod_fqn: str, axis_name: str) -> str | None:
-        node = mod_fqn
-        while True:
-            if node in annotations:
-                value = _resolve_node_axis(annotations[node], axis_name, node)
-                if value is not None:
-                    return value
-            if node == "":
-                return None
-            node = node.rsplit(".", 1)[0] if "." in node else ""
+    def _covers(prefixes: list[str], mod_fqn: str) -> bool:
+        return any(p == "" or mod_fqn == p or mod_fqn.startswith(f"{p}.") for p in prefixes)
 
-    # (2)-(4) Resolve each module leaf-upward, lower master to casts and gather to sub-shard groups.
+    # (2)-(4) Fold rules per module, lower master to casts and gather to sub-shard groups.
     master_casts: list[MasterCast] = []
     groups: dict[torch.dtype, SubShardGroup] = {}
     for mod_fqn, module in model.named_modules():
-        master = _resolve(mod_fqn, "master")
-        gather = _resolve(mod_fqn, "gather")
+        master = gather = None
+        for rule, prefixes in zip(spec.rules, rule_prefixes, strict=True):
+            if not _covers(prefixes, mod_fqn):
+                continue
+            master = rule.master if rule.master is not None else master
+            gather = rule.gather if rule.gather is not None else gather
         if master is None and gather is None:
             continue
 
