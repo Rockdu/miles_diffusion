@@ -85,8 +85,7 @@ class TrainPipelineConfig(abc.ABC):
     rollout_patch_group: str | None = None
     # Weight-precision rules (master/gather dtypes) compiled onto FSDP2; see precision.py.
     precision_spec: PrecisionSpec = PrecisionSpec()
-    # Model-boundary input dtypes (see precision.apply_input_dtype_policy); the default
-    # passes every input through unchanged, families opt into boundary casts explicitly.
+    # Model-boundary input dtypes (see precision.apply_input_dtype_policy); families opt into casts explicitly.
     input_dtype_policy: dict = {"latents": None, "cond": None, "timestep": None}
     # Default component paths (miles custom-function style); CLI args override.
     model_backend_path: str = "miles.backends.fsdp_utils.model_backend.DiffusersModelBackend"

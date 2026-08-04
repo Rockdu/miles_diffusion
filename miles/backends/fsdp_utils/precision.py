@@ -80,7 +80,7 @@ class PrecisionSpec:
 
 
 # ---------------------------------------------------------------------------
-# Compiler: per-tensor plan -> FSDP2 lowering (master casts + sub-shard groups)
+# Compiler: per-module plan -> FSDP2 lowering (master casts + sub-shard groups)
 # ---------------------------------------------------------------------------
 
 
@@ -206,10 +206,8 @@ def apply_input_dtype_policy(
     conds: tuple,
     default_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor, tuple]:
-    """Cast model-boundary inputs once: autocast covers only matmul/conv ops, so
-    without a boundary cast e.g. a raw fp32 latent keeps fp32 through element-wise
-    ops. Axis values: "default" (the run's forward dtype), a dtype name, or None
-    (pass through); only floating tensors are cast."""
+    """Cast float boundary inputs per family policy ("default"/dtype name/None=passthrough);
+    autocast alone would leave element-wise ops running at the raw input dtype."""
     unknown = set(policy) - set(INPUT_DTYPE_POLICY_KEYS)
     if unknown:
         raise ValueError(f"input_dtype_policy has unknown keys {sorted(unknown)}; known: {INPUT_DTYPE_POLICY_KEYS}")

@@ -643,8 +643,7 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules
 
     def _fsdp_kwargs(policy_param_dtype):
         return {
-            # FSDP casts no inputs (boundary casts belong to input_dtype_policy); compute dtype
-            # comes from the trainer's autocast, keeping grad-ckpt recompute dtype-consistent.
+            # input_dtype_policy owns boundary casts; autocast owns compute and keeps grad-ckpt recompute consistent.
             "mp_policy": MixedPrecisionPolicy(
                 param_dtype=policy_param_dtype,
                 reduce_dtype=reduce_dtype,
