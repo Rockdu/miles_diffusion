@@ -1,7 +1,20 @@
 """Gloo worker asserting the compiled precision plan really wraps under FSDP2 (2 ranks).
 
+Model and spec (default gather dtype is bf16, master is fp32):
+
+    Net
+    ├── stem                      Leaf   -> bf16, sharded   (no rule)
+    └── blocks
+        ├── 0: Block                     -> block unit, bf16, sharded
+        │   ├── norm  Norm               -> fp32 via cls rule, replicated
+        │   └── attn  Attn               -> fp16 via fqn rule, replicated
+        │       ├── norm_q  Norm         -> bf16, carved back out of attn
+        │       └── proj    Leaf         -> fp16, inherits attn
+        └── 1: Block                     -> same, except norm_q keeps fp32
+
 Modules cast explicitly in forward because CPU kernels reject mixed dtypes; what
-matters here is the wrap nesting and the param dtype each module sees at forward.
+matters here is the wrap nesting, the param dtype each module sees at forward,
+and that precision units are replicated instead of sharded.
 """
 
 import torch
@@ -9,13 +22,14 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
+from torch.distributed.tensor import DTensor, Replicate
 
 from miles.backends.fsdp_utils.precision import ModuleSel, PrecisionSpec, Rule, build_wrap_plan, compile_precision_plan
 
 DEFAULT_DTYPE = torch.bfloat16
 
 
-class Norm(nn.Module):
+class Leaf(nn.Module):
     def __init__(self):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(8))
@@ -24,20 +38,15 @@ class Norm(nn.Module):
         return x * self.weight.to(x.dtype)
 
 
-class Proj(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.weight = nn.Parameter(torch.eye(8))
-
-    def forward(self, x):
-        return x @ self.weight.to(x.dtype)
+class Norm(Leaf):
+    pass
 
 
 class Attn(nn.Module):
     def __init__(self):
         super().__init__()
         self.norm_q = Norm()
-        self.proj = Proj()
+        self.proj = Leaf()
 
     def forward(self, x):
         return self.proj(self.norm_q(x))
@@ -53,12 +62,14 @@ class Block(nn.Module):
         return self.attn(self.norm(x))
 
 
-class Tiny(nn.Module):
+class Net(nn.Module):
     def __init__(self):
         super().__init__()
+        self.stem = Leaf()
         self.blocks = nn.ModuleList([Block(), Block()])
 
     def forward(self, x):
+        x = self.stem(x)
         for block in self.blocks:
             x = block(x)
         return x
@@ -66,37 +77,47 @@ class Tiny(nn.Module):
 
 SPEC = PrecisionSpec(
     rules=(
-        Rule(ModuleSel(fqn="blocks.0"), gather="fp16"),
-        Rule(ModuleSel(fqn="blocks.0.attn"), gather="fp32"),
+        Rule(ModuleSel(cls="Norm"), gather="fp32"),
+        Rule(ModuleSel(fqn="blocks.0.attn"), gather="fp16"),
         Rule(ModuleSel(fqn="blocks.0.attn.norm_q"), gather="default"),
-        Rule(ModuleSel(cls="Norm", fqn="blocks.1*"), gather="fp32"),
     )
 )
 EXPECTED_GATHER = {
-    "blocks.0.norm": torch.float16,  # inherits the fp16 block unit
-    "blocks.0.attn.norm_q": DEFAULT_DTYPE,  # carved back out of two non-default ancestors
-    "blocks.0.attn.proj": torch.float32,  # inherits the fp32 attn unit
-    "blocks.1.norm": torch.float32,  # cls + fqn rule
-    "blocks.1.attn.norm_q": torch.float32,
-    "blocks.1.attn.proj": DEFAULT_DTYPE,  # untouched by any rule
+    "stem": DEFAULT_DTYPE,  # no rule
+    "blocks.0.norm": torch.float32,  # cls rule
+    "blocks.0.attn.norm_q": DEFAULT_DTYPE,  # carved back out of the fp16 attn unit
+    "blocks.0.attn.proj": torch.float16,  # inherits the fp16 attn unit
+    "blocks.1.norm": torch.float32,  # cls rule
+    "blocks.1.attn.norm_q": torch.float32,  # cls rule, no override above it
+    "blocks.1.attn.proj": DEFAULT_DTYPE,  # no rule
 }
 
 
 def main() -> None:
     dist.init_process_group("gloo")
-    mesh = init_device_mesh("cpu", (dist.get_world_size(),))
-    model = Tiny().to(torch.float32)  # fp32 master
+    world_size = dist.get_world_size()
+    shard_mesh = init_device_mesh("cpu", (world_size,), mesh_dim_names=("fsdp",))
+    replicate_mesh = init_device_mesh("cpu", (world_size, 1), mesh_dim_names=("replicate", "shard"))
+    model = Net().to(torch.float32)  # fp32 master
 
     compiled = compile_precision_plan(model, SPEC, default_dtype=DEFAULT_DTYPE)
     compiled.apply_master_casts()
 
-    def fsdp_kwargs(param_dtype):
+    def fsdp_kwargs(param_dtype, mesh):
         policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=torch.float32, cast_forward_inputs=False)
         return {"mp_policy": policy, "mesh": mesh}
 
-    for module, policy_dtype in build_wrap_plan(model, compiled, list(model.blocks)):
-        fully_shard(module, **fsdp_kwargs(policy_dtype))
-    fully_shard(model, **fsdp_kwargs(DEFAULT_DTYPE))
+    for unit in build_wrap_plan(model, compiled, list(model.blocks)):
+        fully_shard(unit.module, **fsdp_kwargs(unit.param_dtype, shard_mesh if unit.shard else replicate_mesh))
+    fully_shard(model, **fsdp_kwargs(DEFAULT_DTYPE, shard_mesh))
+
+    # Precision units are replicated, so their local shard is the whole tensor: no all-gather.
+    for unit in compiled.wrap_units:
+        param = next(unit.module.parameters())
+        if not isinstance(param, DTensor) or param.placements[0] != Replicate():
+            raise AssertionError(f"{unit.fqn} is not replicated: {getattr(param, 'placements', None)}")
+        if param.to_local().shape != param.shape:
+            raise AssertionError(f"{unit.fqn} local shard {param.to_local().shape} != full {param.shape}")
 
     seen: dict[str, torch.dtype] = {}
 

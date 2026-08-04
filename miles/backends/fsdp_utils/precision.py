@@ -32,7 +32,8 @@ monkey-patch registry.
                              modules into one deepest-first order, so FSDP2
                              always nests child-before-parent — that is how
                              gather="default" carves a module back out of a
-                             non-default ancestor.
+                             non-default ancestor. Precision units wrap on a
+                             replicated mesh (no all-gather, see WrapUnit.shard).
 
 Module granularity is the floor FSDP2 gives us (fully_shard wraps modules, and
 FSDP2 requires uniform master dtype among trainable params per unit), so
@@ -104,11 +105,13 @@ class MasterCast:
 
 @dataclass(frozen=True)
 class WrapUnit:
-    """A module to fully_shard on its own with param_dtype=gather."""
+    """A module to fully_shard on its own with param_dtype=gather. Precision units are replicated
+    (shard=False) since a pinned module is small by nature; that will become a size-driven choice."""
 
     fqn: str
     module: torch.nn.Module
     param_dtype: torch.dtype
+    shard: bool = False
 
 
 @dataclass
@@ -220,17 +223,18 @@ def build_wrap_plan(
     model: torch.nn.Module,
     compiled: CompiledPrecision,
     block_modules: list[torch.nn.Module],
-) -> list[tuple[torch.nn.Module, torch.dtype]]:
+) -> list[WrapUnit]:
     """One wrap order for FSDP2, deepest module first. Block modules are extra wraps that FSDP
     needs for sharding granularity, so they must carry their own effective dtype: wrapping one at
     the default inside an overridden region would be the innermost wrap and undo the override."""
-    plan: dict[torch.nn.Module, torch.dtype] = {unit.module: unit.param_dtype for unit in compiled.wrap_units}
+    plan: dict[torch.nn.Module, WrapUnit] = {unit.module: unit for unit in compiled.wrap_units}
     depths, fqns = {}, {}
     for mod_fqn, module in model.named_modules():
         depths[module], fqns[module] = mod_fqn.count("."), mod_fqn
     for module in block_modules:
-        plan.setdefault(module, compiled.gather_dtypes[fqns[module]])
-    return [(module, plan[module]) for module in sorted(plan, key=lambda module: -depths[module])]
+        fqn = fqns[module]
+        plan.setdefault(module, WrapUnit(fqn, module, compiled.gather_dtypes[fqn], shard=True))
+    return [plan[module] for module in sorted(plan, key=lambda module: -depths[module])]
 
 
 def log_precision_summary(component: str, compiled: CompiledPrecision, *, default_dtype: torch.dtype) -> None:
