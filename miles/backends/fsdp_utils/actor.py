@@ -39,7 +39,13 @@ from .loss_hub import DiffusionLossContext, flow_grpo_loss_formula, prepare_flow
 from .lr_scheduler import get_lr_scheduler
 from .metrics import new_metric_buffer
 from .parallel import create_fsdp_parallel_state
-from .precision import apply_input_dtype_policy, compile_precision_plan, log_precision_summary, resolve_dtype
+from .precision import (
+    apply_input_dtype_policy,
+    build_wrap_plan,
+    compile_precision_plan,
+    log_precision_summary,
+    resolve_dtype,
+)
 from .sequence_parallel.plan import apply_sequence_parallel
 
 logger = logging.getLogger(__name__)
@@ -653,18 +659,9 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules
             "mesh": mesh,
         }
 
-    # Precision units come pre-sorted deepest-first, so every wrap excludes the ones already wrapped.
-    precision_modules = set()
-    for unit in precision_wrap_units or ():
-        fully_shard(unit.module, **_fsdp_kwargs(unit.param_dtype))
-        precision_modules.add(unit.module)
+    for module, policy_dtype in build_wrap_plan(model, precision_wrap_units or [], modules, param_dtype):
+        fully_shard(module, **_fsdp_kwargs(policy_dtype))
 
-    fsdp_kwargs = _fsdp_kwargs(param_dtype)
-    for module in modules:
-        # A block that is also a precision unit keeps its pinned policy; wrapping twice is an error.
-        if module not in precision_modules:
-            fully_shard(module, **fsdp_kwargs)
-
-    fully_shard(model, **fsdp_kwargs)
+    fully_shard(model, **_fsdp_kwargs(param_dtype))
 
     return model

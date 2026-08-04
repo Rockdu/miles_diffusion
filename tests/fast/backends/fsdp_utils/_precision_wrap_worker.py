@@ -10,7 +10,7 @@ import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 
-from miles.backends.fsdp_utils.precision import ModuleSel, PrecisionSpec, Rule, compile_precision_plan
+from miles.backends.fsdp_utils.precision import ModuleSel, PrecisionSpec, Rule, build_wrap_plan, compile_precision_plan
 
 DEFAULT_DTYPE = torch.bfloat16
 
@@ -94,13 +94,9 @@ def main() -> None:
         policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=torch.float32, cast_forward_inputs=False)
         return {"mp_policy": policy, "mesh": mesh}
 
-    precision_modules = set()
-    for unit in compiled.wrap_units:
-        fully_shard(unit.module, **fsdp_kwargs(unit.param_dtype))
-        precision_modules.add(unit.module)
-    for block in model.blocks:
-        if block not in precision_modules:
-            fully_shard(block, **fsdp_kwargs(DEFAULT_DTYPE))
+    plan = build_wrap_plan(model, compiled.wrap_units, list(model.blocks), DEFAULT_DTYPE)
+    for module, policy_dtype in plan:
+        fully_shard(module, **fsdp_kwargs(policy_dtype))
     fully_shard(model, **fsdp_kwargs(DEFAULT_DTYPE))
 
     seen: dict[str, torch.dtype] = {}

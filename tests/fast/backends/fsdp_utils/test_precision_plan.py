@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from miles.backends.fsdp_utils.precision import ModuleSel, PrecisionSpec, Rule, compile_precision_plan
+from miles.backends.fsdp_utils.precision import ModuleSel, PrecisionSpec, Rule, build_wrap_plan, compile_precision_plan
 
 
 class Rope(nn.Module):
@@ -103,6 +103,7 @@ def test_empty_module_sel_rejected():
 
 
 def test_every_node_of_a_nested_chain_wraps_bottom_up():
+    model = _model()
     spec = PrecisionSpec(
         rules=(
             Rule(ModuleSel(fqn="blocks.0"), gather="fp16"),
@@ -110,11 +111,19 @@ def test_every_node_of_a_nested_chain_wraps_bottom_up():
             Rule(ModuleSel(fqn="blocks.0.attn.norm_q"), gather="default"),
         )
     )
-    compiled = compile_precision_plan(_model(), spec, default_dtype=torch.bfloat16)
-    assert _units(compiled) == [
-        ("blocks.0.attn.norm_q", torch.bfloat16),
-        ("blocks.0.attn", torch.float32),
-        ("blocks.0", torch.float16),
+    compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
+    assert dict(_units(compiled)) == {
+        "blocks.0.attn.norm_q": torch.bfloat16,
+        "blocks.0.attn": torch.float32,
+        "blocks.0": torch.float16,
+    }
+    # The block that is also a unit keeps its pin, and children wrap before parents.
+    plan = build_wrap_plan(model, compiled.wrap_units, list(model.blocks), torch.bfloat16)
+    assert plan == [
+        (model.blocks[0].attn.norm_q, torch.bfloat16),
+        (model.blocks[0].attn, torch.float32),
+        (model.blocks[0], torch.float16),
+        (model.blocks[1], torch.bfloat16),
     ]
 
 

@@ -24,15 +24,15 @@ monkey-patch registry.
     (3) != loaded dtype?     (4) != the dtype the enclosing wrap unit already
         -> MasterCast of the     provides? -> the module becomes its own wrap
         module's own float       unit at that dtype (paramless modules have
-        tensors, at load time    nothing to gather and are skipped)
-        |                        |
-        v                        v
-    apply_master_casts()     apply_fsdp2: fully_shard(unit.module,
-    before FSDP wrapping     param_dtype=unit dtype), deepest unit first, then
-                             blocks, then root. FSDP2 nests child-before-parent,
-                             so a unit is always excluded from its enclosing
-                             unit — that is how gather="default" carves a module
-                             back out of a non-default ancestor.
+        tensors, at load time    nothing to gather and are skipped), which makes
+        |                        the units a minimal cover of the tree
+        v                        |
+    apply_master_casts()         v
+    before FSDP wrapping     build_wrap_plan() merges the units with the block
+                             modules into one deepest-first order, so FSDP2
+                             always nests child-before-parent — that is how
+                             gather="default" carves a module back out of a
+                             non-default ancestor.
 
 Module granularity is the floor FSDP2 gives us (fully_shard wraps modules, and
 FSDP2 requires uniform master dtype among trainable params per unit), so
@@ -211,9 +211,22 @@ def compile_precision_plan(
         wrap_units.append(WrapUnit(mod_fqn, module, gather_dtype))
         unit_dtypes[mod_fqn] = gather_dtype
 
-    # (5) FSDP2 nests child-before-parent, so hand back the deepest units first.
-    wrap_units.sort(key=lambda unit: -unit.fqn.count("."))
     return CompiledPrecision(master_casts=master_casts, wrap_units=wrap_units)
+
+
+def build_wrap_plan(
+    model: torch.nn.Module,
+    wrap_units: list[WrapUnit],
+    block_modules: list[torch.nn.Module],
+    default_dtype: torch.dtype,
+) -> list[tuple[torch.nn.Module, torch.dtype]]:
+    """One wrap order for FSDP2, deepest module first: precision units pin their param_dtype,
+    remaining block modules take the default, and a module appearing in both keeps the pin."""
+    plan: dict[torch.nn.Module, torch.dtype] = {unit.module: unit.param_dtype for unit in wrap_units}
+    for module in block_modules:
+        plan.setdefault(module, default_dtype)
+    depths = {module: mod_fqn.count(".") for mod_fqn, module in model.named_modules()}
+    return [(module, plan[module]) for module in sorted(plan, key=lambda module: -depths[module])]
 
 
 def log_precision_summary(component: str, compiled: CompiledPrecision, *, default_dtype: torch.dtype) -> None:
