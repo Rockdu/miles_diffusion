@@ -20,6 +20,19 @@ class Wan2_2TrainPipelineConfig(TrainPipelineConfig):
     # the run-level --fsdp-master-dtype. Affine-less FP32LayerNorms
     # (norm1/norm3/norm_out) carry no tensors and compile to nothing.
     precision_spec = PrecisionSpec(rules=(Rule(ModuleSel(cls="FP32LayerNorm"), gather="fp32"),))
+    # Boundary inputs, verified against paired sglang-d dumps: rollout casts
+    # the latent to the forward dtype at the boundary but passes the T5 text
+    # embeds through in fp32 -- the first context linear consumes an fp32
+    # input with bf16 weights -- and keeps the raw timestep fp32.
+    # Known residue this policy cannot remove: diffusers ties temb to the text
+    # embeds' dtype (WanTimeTextImageEmbedding: `.type_as(encoder_hidden_states)`),
+    # so with fp32 cond the act_fn/time_proj input records read fp32 where
+    # rollout reads bf16. autocast re-quantizes at the time_proj matmul, so the
+    # effective compute dtype still matches everywhere; only the SiLU on the
+    # 1x1536 time vector runs at higher precision than rollout. The alternative
+    # (cond cast to forward dtype) would misalign the 512x4096 text embeds
+    # feeding every block's cross attention instead.
+    input_dtype_policy = {"latents": "default", "cond": None, "timestep": "fp32"}
     # High-noise expert ("transformer") handles t >= boundary, low-noise expert
     # ("transformer_2") the rest.
     boundary_ratio = 0.875
