@@ -238,3 +238,19 @@ def test_unmatched_rule_rejected():
     spec = PrecisionSpec(rules=(Rule(ModuleSel(cls="NoSuchModule"), gather="fp32"),))
     with pytest.raises(ValueError, match="matched no module"):
         compile_precision(Tiny(), spec, default_dtype=torch.bfloat16)
+
+
+def test_wrap_plan_resolves_lora_prefixed_fqns():
+    """The plan is compiled on the raw component; PEFT later nests it under
+    base_model.model, so wrap_plan must resolve block dtypes through the prefix."""
+    model = Tiny()
+    compiled = compile_precision(model, PrecisionSpec(), default_dtype=torch.bfloat16)
+    inner = nn.Module()
+    inner.model = model
+    wrapped = nn.Module()
+    wrapped.base_model = inner
+    units = compiled.wrap_plan(wrapped, list(model.blocks))
+    assert [(u.fqn, u.param_dtype) for u in units] == [
+        ("base_model.model.blocks.0", torch.bfloat16),
+        ("base_model.model.blocks.1", torch.bfloat16),
+    ]
