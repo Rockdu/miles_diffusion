@@ -99,8 +99,7 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --advantage-estimator grpo \
   --globalize-reward-std \
   --rm-type ocr \
-  --diffusion-forward-dtype fp16 \
-  --sglang-dit-precision fp16 \
+  --precision-default-dtype fp16 \
   --sglang-vae-slicing \
   --diffusion-num-steps 10 \
   --diffusion-step-strategy-path miles.rollout.step_strategy_hub.sde_window \

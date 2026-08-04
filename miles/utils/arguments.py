@@ -196,9 +196,9 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 choices=["fp16", "bf16", "fp32"],
                 help=(
                     "Default dtype for every module the family PrecisionSpec does not pin "
-                    "explicitly, i.e. the training-side forward/gather dtype when "
-                    "--diffusion-forward-dtype is unset. The rollout engine has its own "
-                    "--sglang-dit-precision; keep them consistent in the recipe."
+                    "explicitly. One knob for both sides: it sets the training forward/gather dtype "
+                    "and the rollout engine's --sglang-dit-precision. Leave it unset to tune each "
+                    "side on its own, which is what the shipped recipes do."
                 ),
             )
             parser.add_argument(
@@ -1407,6 +1407,8 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
         )
 
         parser.set_defaults(sglang_tensor_parallel_size=add_sglang_tp_size())
+        # None means unset: the engine then forwards nothing and sglang keeps its per-pipeline dtype.
+        parser.set_defaults(sglang_dit_precision=None)
         return parser
 
     return add_miles_arguments
@@ -1503,9 +1505,13 @@ def set_default_diffusion_args(args) -> None:
         else:
             args.ref_mode = "none"
 
-    # --diffusion-forward-dtype wins over --precision-default-dtype, which wins over the built-in.
+    # --precision-default-dtype fills whichever side was left unset; disagreements are rejected in
+    # miles_validate_args. Without it the training side falls back to bf16 and the rollout engine
+    # keeps its own per-pipeline default.
     if args.diffusion_forward_dtype is None:
         args.diffusion_forward_dtype = args.precision_default_dtype or "bf16"
+    if args.sglang_dit_precision is None:
+        args.sglang_dit_precision = args.precision_default_dtype
 
 
 def miles_validate_args(args):
@@ -1533,6 +1539,17 @@ def miles_validate_args(args):
 
     if args.eval_reward_key is None:
         args.eval_reward_key = args.reward_key
+
+    if args.precision_default_dtype is not None:
+        for flag, value in (
+            ("--diffusion-forward-dtype", args.diffusion_forward_dtype),
+            ("--sglang-dit-precision", args.sglang_dit_precision),
+        ):
+            if value != args.precision_default_dtype:
+                raise ValueError(
+                    f"{flag} {value} disagrees with --precision-default-dtype "
+                    f"{args.precision_default_dtype}; leave it unset or pass the same value"
+                )
 
     args.update_weight_target_modules = [
         name.strip() for name in args.update_weight_target_module.split(",") if name.strip()
