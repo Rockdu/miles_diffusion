@@ -71,13 +71,6 @@ def check(rank, world_size, dp_replicate, dp_shard, ring_degree, ulysses_degree)
         assert fsdp.ndim == 1, fsdp
         assert fsdp.size() == dp_shard * sp_size
 
-    # Precision units wrap here: dp_shard degree 1 means nothing is gathered, and every rank
-    # takes part in the one grad all-reduce.
-    noshard = meshes["fsdp_noshard"]
-    assert noshard.mesh_dim_names == ("dp_replicate", "dp_shard")
-    assert noshard.shape == (world_size, 1)
-    assert mesh_group_ranks(noshard["dp_replicate"]) == list(range(world_size))
-
 
 def main():
     dist.init_process_group("gloo")

@@ -157,7 +157,6 @@ class FSDPTrainRayActor(TrainRayActor):
             model = apply_fsdp2(
                 model,
                 mesh=self.parallel_state.get_mesh("fsdp"),
-                noshard_mesh=self.parallel_state.get_mesh("fsdp_noshard"),
                 cpu_offload=self.args.fsdp_cpu_offload,
                 args=self.args,
                 no_split_modules=self.model_backend.fsdp_no_split_modules(model),
@@ -634,7 +633,6 @@ def apply_lora(model: torch.nn.Module, args: Namespace, train_pipeline_config) -
 def apply_fsdp2(
     model,
     mesh=None,
-    noshard_mesh=None,
     cpu_offload=False,
     args=None,
     no_split_modules=None,
@@ -656,7 +654,7 @@ def apply_fsdp2(
         f"reduce_dtype={reduce_dtype}, precision wrap units={len(compiled_precision.wrap_units)}"
     )
 
-    def _fsdp_kwargs(policy_param_dtype, unit_mesh):
+    def _fsdp_kwargs(policy_param_dtype):
         return {
             # input_dtype_policy owns boundary casts; autocast owns compute and keeps grad-ckpt recompute consistent.
             "mp_policy": MixedPrecisionPolicy(
@@ -665,12 +663,12 @@ def apply_fsdp2(
                 cast_forward_inputs=False,
             ),
             "offload_policy": offload_policy,
-            "mesh": unit_mesh,
+            "mesh": mesh,
         }
 
     for unit in build_wrap_plan(model, compiled_precision, modules):
-        fully_shard(unit.module, **_fsdp_kwargs(unit.param_dtype, mesh if unit.shard else noshard_mesh))
+        fully_shard(unit.module, **_fsdp_kwargs(unit.param_dtype))
 
-    fully_shard(model, **_fsdp_kwargs(param_dtype, mesh))
+    fully_shard(model, **_fsdp_kwargs(param_dtype))
 
     return model

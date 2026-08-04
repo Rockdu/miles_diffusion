@@ -62,7 +62,7 @@ def _units(compiled):
 
 
 def _plan(model, compiled):
-    return [(unit.fqn, unit.param_dtype, unit.shard) for unit in build_wrap_plan(model, compiled, list(model.blocks))]
+    return [(unit.fqn, unit.param_dtype) for unit in build_wrap_plan(model, compiled, list(model.blocks))]
 
 
 NORM_FQNS = {f"blocks.{i}{suffix}" for i in range(2) for suffix in (".norm", ".attn.norm_q")}
@@ -192,7 +192,7 @@ def test_every_node_of_a_nested_chain_wraps_bottom_up():
         ├── attn        [U] fp32   gather order 2
         │   └── norm_q  [U] bf16   gather order 1, wraps first
         └── rope            fp16 buffer, never gathered
-        blocks.1        [U] bf16   block unit only, still sharded
+        blocks.1        [U] bf16   block unit only, at the default dtype
     """
     model = _model()
     spec = PrecisionSpec(
@@ -208,12 +208,11 @@ def test_every_node_of_a_nested_chain_wraps_bottom_up():
         "blocks.0.attn": torch.float32,
         "blocks.0": torch.float16,
     }
-    # (fqn, param_dtype, shard): precision units are replicated, the plain block unit shards.
     assert _plan(model, compiled) == [
-        ("blocks.0.attn.norm_q", torch.bfloat16, False),
-        ("blocks.0.attn", torch.float32, False),
-        ("blocks.0", torch.float16, False),
-        ("blocks.1", torch.bfloat16, True),
+        ("blocks.0.attn.norm_q", torch.bfloat16),
+        ("blocks.0.attn", torch.float32),
+        ("blocks.0", torch.float16),
+        ("blocks.1", torch.bfloat16),
     ]
 
 
@@ -232,9 +231,9 @@ def test_block_inside_an_override_wraps_at_the_override_dtype():
     compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
     assert _units(compiled) == [("blocks", torch.float32)]
     assert _plan(model, compiled) == [
-        ("blocks.0", torch.float32, True),
-        ("blocks.1", torch.float32, True),
-        ("blocks", torch.float32, False),
+        ("blocks.0", torch.float32),
+        ("blocks.1", torch.float32),
+        ("blocks", torch.float32),
     ]
 
 

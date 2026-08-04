@@ -6,26 +6,24 @@ Master is fp32 everywhere, default gather dtype is bf16, and the spec is
     Rule(fqn="blocks.0.attn",            gather=fp16)
     Rule(fqn="blocks.0.attn.norm_q",     gather=default)
 
-so the tree, the dtype each module's params carry in the forward, and how each
-wrap unit is placed on the mesh come out as:
+so the tree and the dtype each module's params carry in the forward come out as:
 
-    Net                             gather   placement
-    ├── stem            Leaf        bf16     sharded    (root unit, no rule)
+    Net                             gather
+    ├── stem            Leaf        bf16    (no rule, wrapped by the root unit)
     └── blocks
-        ├── 0           Block  [U]  bf16     sharded    (block unit)
-        │   ├── norm    Norm   [U]  fp32     replicated
-        │   └── attn    Attn   [U]  fp16     replicated
-        │       ├── norm_q Norm [U] bf16     replicated (carved out of attn)
-        │       └── proj   Leaf     fp16     (inside the attn unit)
-        └── 1           Block  [U]  bf16     sharded    (block unit)
-            ├── norm    Norm   [U]  fp32     replicated
+        ├── 0           Block  [U]  bf16    (block unit)
+        │   ├── norm    Norm   [U]  fp32
+        │   └── attn    Attn   [U]  fp16
+        │       ├── norm_q Norm [U] bf16    (carved back out of attn)
+        │       └── proj   Leaf     fp16    (inside the attn unit)
+        └── 1           Block  [U]  bf16    (block unit)
+            ├── norm    Norm   [U]  fp32
             └── attn    Attn
-                ├── norm_q Norm [U] fp32     replicated (no override above it)
-                └── proj   Leaf     bf16     (inside the block unit)
+                ├── norm_q Norm [U] fp32    (no override above it)
+                └── proj   Leaf     bf16    (inside the block unit)
 
 Modules cast explicitly in forward because CPU kernels reject mixed dtypes; what
-matters here is the wrap nesting, the param dtype each module sees at forward,
-and that precision units are replicated instead of sharded.
+matters here is the wrap nesting and the param dtype each module sees at forward.
 """
 
 import torch
@@ -33,7 +31,6 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
-from torch.distributed.tensor import DTensor, Replicate
 
 from miles.backends.fsdp_utils.precision import ModuleSel, PrecisionSpec, Rule, build_wrap_plan, compile_precision_plan
 
@@ -107,28 +104,19 @@ EXPECTED_GATHER = {
 def main() -> None:
     dist.init_process_group("gloo")
     world_size = dist.get_world_size()
-    shard_mesh = init_device_mesh("cpu", (world_size,), mesh_dim_names=("fsdp",))
-    noshard_mesh = init_device_mesh("cpu", (world_size, 1), mesh_dim_names=("dp_replicate", "dp_shard"))
+    mesh = init_device_mesh("cpu", (world_size,), mesh_dim_names=("dp_shard",))
     model = Net().to(torch.float32)  # fp32 master
 
     compiled = compile_precision_plan(model, SPEC, default_dtype=DEFAULT_DTYPE)
     compiled.apply_master_casts()
 
-    def fsdp_kwargs(param_dtype, mesh):
+    def fsdp_kwargs(param_dtype):
         policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=torch.float32, cast_forward_inputs=False)
         return {"mp_policy": policy, "mesh": mesh}
 
     for unit in build_wrap_plan(model, compiled, list(model.blocks)):
-        fully_shard(unit.module, **fsdp_kwargs(unit.param_dtype, shard_mesh if unit.shard else noshard_mesh))
-    fully_shard(model, **fsdp_kwargs(DEFAULT_DTYPE, shard_mesh))
-
-    # Precision units are replicated, so their local shard is the whole tensor: no all-gather.
-    for unit in compiled.wrap_units:
-        param = next(unit.module.parameters())
-        if not isinstance(param, DTensor) or param.placements[0] != Replicate():
-            raise AssertionError(f"{unit.fqn} is not replicated: {getattr(param, 'placements', None)}")
-        if param.to_local().shape != param.shape:
-            raise AssertionError(f"{unit.fqn} local shard {param.to_local().shape} != full {param.shape}")
+        fully_shard(unit.module, **fsdp_kwargs(unit.param_dtype))
+    fully_shard(model, **fsdp_kwargs(DEFAULT_DTYPE))
 
     seen: dict[str, torch.dtype] = {}
 

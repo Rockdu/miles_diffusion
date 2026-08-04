@@ -20,17 +20,10 @@ def build_fsdp_meshes(
     """Build the FSDP hybrid-shard and DP/SP views."""
     world_mesh = init_device_mesh(device_type, (world_size,), mesh_dim_names=("world",))
 
-    def shard_view(replicate: int) -> DeviceMesh:
-        """FSDP shards over the last axis, so replicate=world_size leaves nothing to shard."""
-        return world_mesh._unflatten(0, (replicate, world_size // replicate), ("dp_replicate", "dp_shard"))
-
+    shard_view = world_mesh._unflatten(0, (dp_replicate, world_size // dp_replicate), ("dp_replicate", "dp_shard"))
     # A degree-1 replicate axis would all-reduce over a single rank every bucket.
-    hybrid_view = shard_view(dp_replicate)
-    fsdp_mesh = hybrid_view if dp_replicate > 1 else hybrid_view["dp_shard"]
-    # Precision units that must not be gathered wrap on the fully replicated view instead; FSDP
-    # keeps their params whole and reduces the grads with one all-reduce over every rank.
-    noshard_mesh = shard_view(world_size)
-    meshes = {"world": world_mesh, "fsdp": fsdp_mesh, "fsdp_noshard": noshard_mesh, "dp": world_mesh}
+    fsdp_mesh = shard_view if dp_replicate > 1 else shard_view["dp_shard"]
+    meshes = {"world": world_mesh, "fsdp": fsdp_mesh, "dp": world_mesh}
 
     if sp_size > 1:
         dp_sp_view = world_mesh._unflatten(0, (world_size // sp_size, sp_size), ("dp", "sp"))

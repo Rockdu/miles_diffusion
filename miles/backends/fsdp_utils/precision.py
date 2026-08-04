@@ -32,8 +32,7 @@ monkey-patch registry.
                              modules into one deepest-first order, so FSDP2
                              always nests child-before-parent — that is how
                              gather="default" carves a module back out of a
-                             non-default ancestor. Precision units wrap on a
-                             replicated mesh (no all-gather, see WrapUnit.shard).
+                             non-default ancestor.
 
 Module granularity is the floor FSDP2 gives us (fully_shard wraps modules, and
 FSDP2 requires uniform master dtype among trainable params per unit), so
@@ -105,13 +104,11 @@ class MasterCast:
 
 @dataclass(frozen=True)
 class WrapUnit:
-    """A module to fully_shard on its own with param_dtype=gather. Precision units are replicated
-    (shard=False) since a pinned module is small by nature; that will become a size-driven choice."""
+    """A module to fully_shard on its own with param_dtype=gather."""
 
     fqn: str
     module: torch.nn.Module
     param_dtype: torch.dtype
-    shard: bool = False
 
 
 @dataclass
@@ -233,7 +230,7 @@ def build_wrap_plan(
         depths[module], fqns[module] = mod_fqn.count("."), mod_fqn
     for module in block_modules:
         fqn = fqns[module]
-        plan.setdefault(module, WrapUnit(fqn, module, compiled.gather_dtypes[fqn], shard=True))
+        plan.setdefault(module, WrapUnit(fqn, module, compiled.gather_dtypes[fqn]))
     return [plan[module] for module in sorted(plan, key=lambda module: -depths[module])]
 
 
