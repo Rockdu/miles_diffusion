@@ -13,11 +13,17 @@ from .train_pipeline_config import TrainPipelineConfig, register_train_pipeline_
 
 @register_train_pipeline_config("ltx")
 class LTXTrainPipelineConfig(TrainPipelineConfig):
-    """LTX-2.3 video GRPO: unguided velocity forward over ltx_core."""
+    """LTX-2.3 video GRPO: unguided velocity forward over ltx_core.
 
-    needs_timestep_scaling = False
+    Dtype parity vs sglang-d rollout (dump-verified on paired LTX-2.3 runs): the empty
+    precision_spec matches, and of the boundary axes only latents is load-bearing --
+    forward_velocity anchors the element-wise math on latents.dtype and consumes
+    sigmas_input verbatim in fp32. Known benign delta: norm_out records fp32 under
+    autocast, compute-equivalent.
+    """
+
     supports_cfg_training = False
-    # Rollout stores σ×1000 in trajectory timesteps; ltx_core AdaLN uses σ∈[0,1].
+    # Rollout stores σ×1000 in trajectory timesteps; the CPS SDE path resolves σ linearly.
     sde_timestep_divisor = 1000.0
     rollout_patch_group = "ltx"
     hf_ckpt_name_patterns = ("ltx",)
@@ -93,6 +99,7 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
         model: torch.nn.Module,
         latents_input: torch.Tensor,
         timesteps_input: torch.Tensor,
+        sigmas_input: torch.Tensor,
         pos_cond: dict | None,
         neg_cond: dict | None,
         joint_cond: dict | None,
@@ -119,13 +126,13 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
                 device=latents_input.device,
                 dtype=latents_input.dtype,
             )
-        return self.forward_velocity(model, latents_input, timesteps_input, cond)
+        return self.forward_velocity(model, latents_input, sigmas_input, cond)
 
     def forward_velocity(
         self,
         model: torch.nn.Module,
         latents_input: torch.Tensor,
-        timesteps_input: torch.Tensor,
+        sigmas_input: torch.Tensor,
         cond: dict,
     ) -> torch.Tensor:
         from ltx_core.model.transformer.modality import Modality
@@ -134,17 +141,16 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
         dtype = latents_input.dtype
         B = latents_input.shape[0]
 
-        # Trajectory timesteps are σ×1000; ltx_core AdaLN expects σ∈[0,1] and
-        # multiplies by timestep_scale_multiplier (1000) internally.
-        sigma_scaled = timesteps_input.to(latents_input.dtype)
-        sigma_unit = sigma_scaled / float(self.sde_timestep_divisor)
-        per_token_t = sigma_unit.view(B, 1).to(dtype)
+        # The model consumes the rollout σ verbatim in fp32: bf16-rounding it before
+        # the sinusoid costs ~2e-3 rel per AdaLN block.
+        sigma_unit = sigmas_input.to(dtype)
+        per_token_t = sigma_unit.view(B, 1)
 
         video_modality = Modality(
             enabled=True,
             latent=latents_input,
-            sigma=sigma_unit.reshape(B),
-            timesteps=per_token_t,
+            sigma=sigmas_input.float().reshape(B),
+            timesteps=sigmas_input.float().view(B, 1),
             positions=cond["positions"].to(dtype),
             context=cond["context"].to(dtype),
             context_mask=None,

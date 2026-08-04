@@ -197,11 +197,13 @@ def apply_input_dtype_policy(
     *,
     latents: torch.Tensor,
     timesteps: torch.Tensor,
+    sigmas: torch.Tensor,
     conds: tuple,
     default_dtype: torch.dtype,
-) -> tuple[torch.Tensor, torch.Tensor, tuple]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple]:
     """Cast float boundary inputs per family policy ("default"/dtype name/None=passthrough);
-    autocast alone would leave element-wise ops running at the raw input dtype."""
+    autocast alone would leave element-wise ops running at the raw input dtype. The "timestep"
+    axis covers both the timesteps and the rollout sigmas."""
     unknown = set(policy) - set(INPUT_DTYPE_POLICY_KEYS)
     if unknown:
         raise ValueError(f"input_dtype_policy has unknown keys {sorted(unknown)}; known: {INPUT_DTYPE_POLICY_KEYS}")
@@ -221,4 +223,4 @@ def apply_input_dtype_policy(
     out_conds = tuple(
         None if cond is None else {key: _cast(value, cond_dtype) for key, value in cond.items()} for cond in conds
     )
-    return _cast(latents, latents_dtype), _cast(timesteps, timestep_dtype), out_conds
+    return _cast(latents, latents_dtype), _cast(timesteps, timestep_dtype), _cast(sigmas, timestep_dtype), out_conds

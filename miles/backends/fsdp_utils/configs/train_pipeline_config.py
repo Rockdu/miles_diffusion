@@ -76,7 +76,6 @@ class TrainPipelineConfig(abc.ABC):
     """Base class. Subclass per model family."""
 
     lora_target_modules: list[str] = ["to_q", "to_k", "to_v", "to_out.0"]
-    needs_timestep_scaling: bool = True
     optimizer_state_allowed_missing: list[str] = []
     # Case-insensitive substrings matched against the checkpoint name (--diffusion-model).
     hf_ckpt_name_patterns: tuple[str, ...] = ()
@@ -107,6 +106,7 @@ class TrainPipelineConfig(abc.ABC):
         model: torch.nn.Module,
         latents_input: torch.Tensor,
         timesteps_input: torch.Tensor,
+        sigmas_input: torch.Tensor,
         pos_cond: dict | None,
         neg_cond: dict | None,
         joint_cond: dict | None,
@@ -115,7 +115,8 @@ class TrainPipelineConfig(abc.ABC):
         guidance_scale: float,
         true_cfg_scale: float | None,
     ) -> torch.Tensor:
-        """Default diffusers forward with CFG; families with a different forward override."""
+        """Default diffusers forward with CFG; families whose model consumes sigma
+        (or with a different forward entirely) override."""
 
         def _forward(cond: dict) -> torch.Tensor:
             return model(
