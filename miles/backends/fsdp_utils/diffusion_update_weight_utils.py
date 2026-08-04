@@ -289,9 +289,14 @@ class DiffusionUpdateWeightFromTensor(DiffusionUpdateWeight):
             # TODO: here we assume all ranks have the same number of dtypes.
             num_dtypes = len(gathered_serialized_batches[0])
             assert num_dtypes > 0
+            # Each gathered entry is a full replica (DTensor redistributed to
+            # Replicate above). The server expects one entry per engine TP rank,
+            # not per engine GPU: with sequence parallelism gpus_per_engine >
+            # tp_size and the extra replicas must not be sent.
+            engine_tp = getattr(self.args, "sglang_tp_size", None) or self.args.rollout_num_gpus_per_engine
             for i in range(num_dtypes):
                 kwargs = {
-                    "serialized_named_tensors": [tensors[i] for tensors in gathered_serialized_batches],
+                    "serialized_named_tensors": [tensors[i] for tensors in gathered_serialized_batches[:engine_tp]],
                     "load_format": "flattened_bucket",
                     "target_modules": [target_module],
                     "weight_version": str(weight_version),
