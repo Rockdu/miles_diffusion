@@ -514,13 +514,16 @@ class FSDPTrainRayActor(TrainRayActor):
         forward_dtype = self._forward_dtype
 
         latents_input = prepared.latents.to(forward_dtype)
-        timesteps_input = prepared.timesteps_for_model.to(forward_dtype)
+        timesteps_input = prepared.timesteps.to(forward_dtype)
+        # Rollout sigmas are consumed verbatim: casting them would reintroduce ULP drift.
+        sigmas_input = prepared.sigmas
 
         def _compute_noise_pred() -> torch.Tensor:
             return train_pipeline_config.compute_noise_pred(
                 model=prepared.model,
                 latents_input=latents_input,
                 timesteps_input=timesteps_input,
+                sigmas_input=sigmas_input,
                 pos_cond=prepared.pos_cond,
                 neg_cond=prepared.neg_cond,
                 joint_cond=prepared.joint_cond,
