@@ -204,10 +204,10 @@ def apply_input_dtype_policy(
     conds: tuple,
     default_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor, tuple]:
-    """Cast model-boundary inputs once, mirroring sglang-d's denoising stage
-    (autocast covers only matmul/conv ops, so e.g. a raw fp32 input reaching RoPE
-    would diverge from rollout). Axis values: "default" (the run's forward dtype),
-    a dtype name, or None (pass through); only floating tensors are cast."""
+    """Cast model-boundary inputs once: autocast covers only matmul/conv ops, so
+    without a boundary cast e.g. a raw fp32 latent keeps fp32 through element-wise
+    ops. Axis values: "default" (the run's forward dtype), a dtype name, or None
+    (pass through); only floating tensors are cast."""
     unknown = set(policy) - set(INPUT_DTYPE_POLICY_KEYS)
     if unknown:
         raise ValueError(f"input_dtype_policy has unknown keys {sorted(unknown)}; known: {INPUT_DTYPE_POLICY_KEYS}")

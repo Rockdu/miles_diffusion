@@ -73,7 +73,7 @@ def prepare_flow_grpo_batch(
         if use_cfg
         else None
     )
-    # Cond tensors keep their rollout dtypes; the DiT forward runs under autocast.
+    # Cond dtypes are set at the model boundary by the family input_dtype_policy (see actor).
     cfg_batching = use_cfg and bool(args.fsdp_cfg_batching)
     joint_cond = pos_cond = neg_cond = None
     if cfg_batching:
