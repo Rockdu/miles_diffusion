@@ -39,13 +39,7 @@ from .loss_hub import DiffusionLossContext, flow_grpo_loss_formula, prepare_flow
 from .lr_scheduler import get_lr_scheduler
 from .metrics import new_metric_buffer
 from .parallel import create_fsdp_parallel_state
-from .precision import (
-    apply_input_dtype_policy,
-    build_wrap_plan,
-    compile_precision_plan,
-    log_precision_summary,
-    resolve_dtype,
-)
+from .precision import apply_input_dtype_policy, compile_precision, log_precision_summary, resolve_dtype
 from .sequence_parallel.plan import apply_sequence_parallel
 
 logger = logging.getLogger(__name__)
@@ -136,7 +130,7 @@ class FSDPTrainRayActor(TrainRayActor):
                 self.model_backend.enable_gradient_checkpointing(model)
 
             # Resolve the family precision plan on clean FQNs (pre-LoRA, pre-FSDP).
-            compiled_precision = compile_precision_plan(
+            compiled_precision = compile_precision(
                 model,
                 self.train_pipeline_config.precision_spec,
                 default_dtype=self._forward_dtype,
@@ -666,7 +660,7 @@ def apply_fsdp2(
             "mesh": mesh,
         }
 
-    for unit in build_wrap_plan(model, compiled_precision, modules):
+    for unit in compiled_precision.wrap_plan(model, modules):
         fully_shard(unit.module, **_fsdp_kwargs(unit.param_dtype))
 
     fully_shard(model, **_fsdp_kwargs(param_dtype))

@@ -2,8 +2,7 @@
 
 A family declares dtype intent as PrecisionSpec rules on its TrainPipelineConfig.
 A rule selects modules by FQN glob and/or class-name glob (both narrows to the
-intersection) and pins one or both axes; a rule covers its modules' subtrees, and
-where rules overlap the later one wins per axis:
+intersection) and pins one or both axes:
   - master: resident dtype of the module's params/buffers (optimizer precision)
   - gather: dtype the params are cast to for FSDP all-gather + forward
 Compute dtype is not managed here: the trainer autocasts the DiT forward,
@@ -11,24 +10,24 @@ model-boundary input dtypes are family policy applied by
 ``apply_input_dtype_policy`` below, and op-level exceptions belong to the
 monkey-patch registry.
 
-``compile_precision_plan`` lowers the rules onto what FSDP2 can express:
+``compile_precision`` lowers the rules onto what FSDP2 can express:
 
     PrecisionSpec rules
         |
-    (1) match each rule to modules once
-        |
-    (2) per module, fold covering rules -> (master, gather) intent
+    (1) per module, parent-first: inherit the parent's decision, then apply the
+        rules selecting this module in spec order (so a deeper rule always wins
+        and order only breaks ties on one module)
         |                        |
-     master axis             gather axis
+    master dtype             gather dtype
         |                        |
-    (3) != loaded dtype?     (4) != the dtype the enclosing wrap unit already
-        -> MasterCast of the     provides? -> the module becomes its own wrap
-        module's own float       unit at that dtype (paramless modules have
-        tensors, at load time    nothing to gather and are skipped), which makes
-        |                        the units a minimal cover of the tree
+    (2) != loaded dtype?     (3) != what the parent already provides?
+        -> MasterCast of the     -> the module becomes its own wrap unit at that
+        module's own float       dtype (paramless modules have nothing to gather
+        tensors, at load time    and are skipped), which makes the units a
+        |                        minimal cover of the tree
         v                        |
     apply_master_casts()         v
-    before FSDP wrapping     build_wrap_plan() merges the units with the block
+    before FSDP wrapping     compiled.wrap_plan() merges the units with the block
                              modules into one deepest-first order, so FSDP2
                              always nests child-before-parent — that is how
                              gather="default" carves a module back out of a
@@ -126,6 +125,19 @@ class CompiledPrecision:
         for cast in self.master_casts:
             cast.tensor.data = cast.tensor.data.to(cast.dtype)
 
+    def wrap_plan(self, model: torch.nn.Module, block_modules: list[torch.nn.Module]) -> list[WrapUnit]:
+        """One wrap order for FSDP2, deepest module first. Block modules are extra wraps that FSDP
+        needs for sharding granularity, so they must carry their own effective dtype: wrapping one at
+        the default inside an overridden region would be the innermost wrap and undo the override."""
+        plan: dict[torch.nn.Module, WrapUnit] = {unit.module: unit for unit in self.wrap_units}
+        depths, fqns = {}, {}
+        for mod_fqn, module in model.named_modules():
+            depths[module], fqns[module] = mod_fqn.count("."), mod_fqn
+        for module in block_modules:
+            fqn = fqns[module]
+            plan.setdefault(module, WrapUnit(fqn, module, self.gather_dtypes[fqn]))
+        return [plan[module] for module in sorted(plan, key=lambda module: -depths[module])]
+
 
 def _selects(sel: ModuleSel, mod_fqn: str, module: torch.nn.Module) -> bool:
     if sel.fqn is not None and not fnmatch(mod_fqn, sel.fqn):
@@ -138,91 +150,50 @@ def _parent_fqn(mod_fqn: str) -> str:
     return mod_fqn.rsplit(".", 1)[0] if "." in mod_fqn else ""
 
 
-def _self_and_ancestors(mod_fqn: str) -> list[str]:
-    fqns = []
-    while mod_fqn:
-        fqns.append(mod_fqn)
-        mod_fqn = _parent_fqn(mod_fqn)
-    return fqns + [""]
-
-
-def _fold_covering_rules(
-    rules: tuple[Rule, ...],
-    matched_fqns: list[set[str]],
-    mod_fqn: str,
-) -> tuple[str | None, str | None]:
-    """Later rules override earlier ones per axis; a rule covers its matched modules' subtrees."""
-    covering = _self_and_ancestors(mod_fqn)
-    master = gather = None
-    for rule, fqns in zip(rules, matched_fqns, strict=True):
-        if fqns.isdisjoint(covering):
-            continue
-        master = rule.master if rule.master is not None else master
-        gather = rule.gather if rule.gather is not None else gather
-    return master, gather
-
-
-def compile_precision_plan(
+def compile_precision(
     model: torch.nn.Module,
     spec: PrecisionSpec,
     *,
     default_dtype: torch.dtype,
 ) -> CompiledPrecision:
-    """Resolve spec rules against the (pre-LoRA, pre-FSDP) model and lower them per module."""
-    # (1) A rule matching nothing is almost certainly a typo'd pattern or class name.
-    matched_fqns = []
-    for rule in spec.rules:
-        fqns = {fqn for fqn, module in model.named_modules() if _selects(rule.select, fqn, module)}
-        if not fqns:
-            raise ValueError(f"precision rule matched no module: {rule}")
-        matched_fqns.append(fqns)
-
-    # (2)-(4) named_modules is parent-first, so the enclosing unit's dtype is already known here.
+    """Resolve the spec against the (pre-LoRA, pre-FSDP) model, then lower it per module."""
     master_casts: list[MasterCast] = []
     wrap_units: list[WrapUnit] = []
+    masters: dict[str, torch.dtype | None] = {"": None}
     gather_dtypes: dict[str, torch.dtype] = {"": default_dtype}
-    for mod_fqn, module in model.named_modules():
-        enclosing_dtype = gather_dtypes[_parent_fqn(mod_fqn)]
-        gather_dtypes[mod_fqn] = enclosing_dtype
-        master, gather = _fold_covering_rules(spec.rules, matched_fqns, mod_fqn)
+    hits = [0] * len(spec.rules)
 
-        master_dtype = _resolve_axis(master, default_dtype)
-        if master_dtype is not None:
+    for mod_fqn, module in model.named_modules():
+        parent_fqn = _parent_fqn(mod_fqn)
+        master, gather = masters[parent_fqn], gather_dtypes[parent_fqn]
+        for i, rule in enumerate(spec.rules):
+            if not _selects(rule.select, mod_fqn, module):
+                continue
+            hits[i] += 1
+            if rule.master is not None:
+                master = _resolve_axis(rule.master, default_dtype)
+            if rule.gather is not None:
+                gather = _resolve_axis(rule.gather, default_dtype)
+        masters[mod_fqn], gather_dtypes[mod_fqn] = master, gather_dtypes[parent_fqn]
+
+        if master is not None:
             prefix = f"{mod_fqn}." if mod_fqn else ""
             own = list(module.named_parameters(recurse=False)) + list(module.named_buffers(recurse=False))
             for name, tensor in own:
-                if tensor.is_floating_point() and tensor.dtype != master_dtype:
-                    master_casts.append(MasterCast(f"{prefix}{name}", tensor, master_dtype))
+                if tensor.is_floating_point() and tensor.dtype != master:
+                    master_casts.append(MasterCast(f"{prefix}{name}", tensor, master))
 
-        gather_dtype = _resolve_axis(gather, default_dtype)
-        if gather_dtype is None or gather_dtype == enclosing_dtype:
-            continue
-        if not any(param.is_floating_point() for param in module.parameters()):
+        if gather == gather_dtypes[parent_fqn] or not any(p.is_floating_point() for p in module.parameters()):
             continue
         if mod_fqn == "":
             raise ValueError("cannot wrap the root module for a gather override")
-        wrap_units.append(WrapUnit(mod_fqn, module, gather_dtype))
-        gather_dtypes[mod_fqn] = gather_dtype
+        wrap_units.append(WrapUnit(mod_fqn, module, gather))
+        gather_dtypes[mod_fqn] = gather
 
+    for rule, hit in zip(spec.rules, hits, strict=True):
+        if not hit:
+            raise ValueError(f"precision rule matched no module: {rule}")
     return CompiledPrecision(master_casts=master_casts, wrap_units=wrap_units, gather_dtypes=gather_dtypes)
-
-
-def build_wrap_plan(
-    model: torch.nn.Module,
-    compiled: CompiledPrecision,
-    block_modules: list[torch.nn.Module],
-) -> list[WrapUnit]:
-    """One wrap order for FSDP2, deepest module first. Block modules are extra wraps that FSDP
-    needs for sharding granularity, so they must carry their own effective dtype: wrapping one at
-    the default inside an overridden region would be the innermost wrap and undo the override."""
-    plan: dict[torch.nn.Module, WrapUnit] = {unit.module: unit for unit in compiled.wrap_units}
-    depths, fqns = {}, {}
-    for mod_fqn, module in model.named_modules():
-        depths[module], fqns[module] = mod_fqn.count("."), mod_fqn
-    for module in block_modules:
-        fqn = fqns[module]
-        plan.setdefault(module, WrapUnit(fqn, module, compiled.gather_dtypes[fqn]))
-    return [plan[module] for module in sorted(plan, key=lambda module: -depths[module])]
 
 
 def log_precision_summary(component: str, compiled: CompiledPrecision, *, default_dtype: torch.dtype) -> None:

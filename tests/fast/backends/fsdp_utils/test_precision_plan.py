@@ -23,7 +23,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from miles.backends.fsdp_utils.precision import ModuleSel, PrecisionSpec, Rule, build_wrap_plan, compile_precision_plan
+from miles.backends.fsdp_utils.precision import ModuleSel, PrecisionSpec, Rule, compile_precision
 
 
 class Rope(nn.Module):
@@ -62,7 +62,7 @@ def _units(compiled):
 
 
 def _plan(model, compiled):
-    return [(unit.fqn, unit.param_dtype) for unit in build_wrap_plan(model, compiled, list(model.blocks))]
+    return [(unit.fqn, unit.param_dtype) for unit in compiled.wrap_plan(model, list(model.blocks))]
 
 
 NORM_FQNS = {f"blocks.{i}{suffix}" for i in range(2) for suffix in (".norm", ".attn.norm_q")}
@@ -78,7 +78,7 @@ def test_empty_spec_compiles_to_nothing():
     │   └── norm_q      bf16
     └── rope            bf16
     """
-    compiled = compile_precision_plan(_model(), PrecisionSpec(), default_dtype=torch.bfloat16)
+    compiled = compile_precision(_model(), PrecisionSpec(), default_dtype=torch.bfloat16)
     assert compiled.master_casts == []
     assert compiled.wrap_units == []
 
@@ -97,7 +97,7 @@ def test_fqn_glob_selects_norms_across_depths():
     """
     model = _model()
     spec = PrecisionSpec(rules=(Rule(ModuleSel(fqn="*norm*"), master="fp32", gather="fp32"),))
-    compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
+    compiled = compile_precision(model, spec, default_dtype=torch.bfloat16)
     assert dict(_units(compiled)) == dict.fromkeys(NORM_FQNS, torch.float32)
     compiled.apply_master_casts()
     assert model.blocks[0].attn.norm_q.weight.dtype is torch.float32
@@ -117,7 +117,7 @@ def test_cls_glob_selects_by_class():
     └── rope            bf16
     """
     spec = PrecisionSpec(rules=(Rule(ModuleSel(cls="*LayerNorm"), gather="fp32"),))
-    compiled = compile_precision_plan(_model(), spec, default_dtype=torch.bfloat16)
+    compiled = compile_precision(_model(), spec, default_dtype=torch.bfloat16)
     assert compiled.master_casts == []
     assert {fqn for fqn, _ in _units(compiled)} == NORM_FQNS
 
@@ -136,7 +136,7 @@ def test_master_rule_covers_matched_subtree():
     """
     model = _model()
     spec = PrecisionSpec(rules=(Rule(ModuleSel(fqn="blocks.1"), master="fp32"),))
-    compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
+    compiled = compile_precision(model, spec, default_dtype=torch.bfloat16)
     compiled.apply_master_casts()
     assert model.blocks[1].linear.weight.dtype is torch.float32
     assert model.blocks[1].rope.freqs.dtype is torch.float32
@@ -162,7 +162,7 @@ def test_later_rule_overrides_earlier_selection():
             Rule(ModuleSel(fqn="blocks.0.*norm*"), gather="fp16"),
         )
     )
-    compiled = compile_precision_plan(_model(), spec, default_dtype=torch.bfloat16)
+    compiled = compile_precision(_model(), spec, default_dtype=torch.bfloat16)
     assert dict(_units(compiled)) == {
         "blocks.0.norm": torch.float16,
         "blocks.0.attn.norm_q": torch.float16,
@@ -201,7 +201,7 @@ def test_every_node_of_a_nested_chain_wraps_bottom_up():
             Rule(ModuleSel(fqn="blocks.0.attn.norm_q"), gather="default"),
         )
     )
-    compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
+    compiled = compile_precision(model, spec, default_dtype=torch.bfloat16)
     assert dict(_units(compiled)) == {
         "blocks.0.attn.norm_q": torch.bfloat16,
         "blocks.0.attn": torch.float32,
@@ -227,7 +227,7 @@ def test_block_inside_an_override_wraps_at_the_override_dtype():
     """
     model = _model()
     spec = PrecisionSpec(rules=(Rule(ModuleSel(fqn="blocks"), gather="fp32"),))
-    compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
+    compiled = compile_precision(model, spec, default_dtype=torch.bfloat16)
     assert _units(compiled) == [("blocks", torch.float32)]
     assert _plan(model, compiled) == [
         ("blocks.0", torch.float32),
@@ -249,7 +249,7 @@ def test_inherited_gather_needs_no_extra_unit():
     └── rope            bf16
     """
     spec = PrecisionSpec(rules=(Rule(ModuleSel(cls="Attn"), gather="fp32"),))
-    compiled = compile_precision_plan(_model(), spec, default_dtype=torch.bfloat16)
+    compiled = compile_precision(_model(), spec, default_dtype=torch.bfloat16)
     assert _units(compiled) == [("blocks.0.attn", torch.float32), ("blocks.1.attn", torch.float32)]
 
 
@@ -263,7 +263,7 @@ def test_buffer_only_module_casts_master_without_wrapping():
     """
     model = _model()
     spec = PrecisionSpec(rules=(Rule(ModuleSel(cls="Rope"), master="fp32", gather="fp32"),))
-    compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
+    compiled = compile_precision(model, spec, default_dtype=torch.bfloat16)
     assert {cast.fqn for cast in compiled.master_casts} == {"blocks.0.rope.freqs", "blocks.1.rope.freqs"}
     assert compiled.wrap_units == []
 
@@ -272,4 +272,4 @@ def test_unmatched_rule_rejected():
     """A rule matching nothing is a typo'd pattern or class name, not a silent no-op."""
     spec = PrecisionSpec(rules=(Rule(ModuleSel(cls="NoSuchModule"), master="fp32"),))
     with pytest.raises(ValueError, match="matched no module"):
-        compile_precision_plan(_model(), spec, default_dtype=torch.bfloat16)
+        compile_precision(_model(), spec, default_dtype=torch.bfloat16)

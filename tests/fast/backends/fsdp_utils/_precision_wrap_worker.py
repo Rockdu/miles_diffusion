@@ -32,7 +32,7 @@ import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 
-from miles.backends.fsdp_utils.precision import ModuleSel, PrecisionSpec, Rule, build_wrap_plan, compile_precision_plan
+from miles.backends.fsdp_utils.precision import ModuleSel, PrecisionSpec, Rule, compile_precision
 
 DEFAULT_DTYPE = torch.bfloat16
 
@@ -107,14 +107,14 @@ def main() -> None:
     mesh = init_device_mesh("cpu", (world_size,), mesh_dim_names=("dp_shard",))
     model = Net().to(torch.float32)  # fp32 master
 
-    compiled = compile_precision_plan(model, SPEC, default_dtype=DEFAULT_DTYPE)
+    compiled = compile_precision(model, SPEC, default_dtype=DEFAULT_DTYPE)
     compiled.apply_master_casts()
 
     def fsdp_kwargs(param_dtype):
         policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=torch.float32, cast_forward_inputs=False)
         return {"mp_policy": policy, "mesh": mesh}
 
-    for unit in build_wrap_plan(model, compiled, list(model.blocks)):
+    for unit in compiled.wrap_plan(model, list(model.blocks)):
         fully_shard(unit.module, **fsdp_kwargs(unit.param_dtype))
     fully_shard(model, **fsdp_kwargs(DEFAULT_DTYPE))
 
