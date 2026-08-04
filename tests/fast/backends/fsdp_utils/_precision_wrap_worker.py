@@ -108,7 +108,7 @@ def main() -> None:
     dist.init_process_group("gloo")
     world_size = dist.get_world_size()
     shard_mesh = init_device_mesh("cpu", (world_size,), mesh_dim_names=("fsdp",))
-    replicate_mesh = init_device_mesh("cpu", (world_size, 1), mesh_dim_names=("replicate", "shard"))
+    noshard_mesh = init_device_mesh("cpu", (world_size, 1), mesh_dim_names=("dp_replicate", "dp_shard"))
     model = Net().to(torch.float32)  # fp32 master
 
     compiled = compile_precision_plan(model, SPEC, default_dtype=DEFAULT_DTYPE)
@@ -119,7 +119,7 @@ def main() -> None:
         return {"mp_policy": policy, "mesh": mesh}
 
     for unit in build_wrap_plan(model, compiled, list(model.blocks)):
-        fully_shard(unit.module, **fsdp_kwargs(unit.param_dtype, shard_mesh if unit.shard else replicate_mesh))
+        fully_shard(unit.module, **fsdp_kwargs(unit.param_dtype, shard_mesh if unit.shard else noshard_mesh))
     fully_shard(model, **fsdp_kwargs(DEFAULT_DTYPE, shard_mesh))
 
     # Precision units are replicated, so their local shard is the whole tensor: no all-gather.

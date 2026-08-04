@@ -157,7 +157,7 @@ class FSDPTrainRayActor(TrainRayActor):
             model = apply_fsdp2(
                 model,
                 mesh=self.parallel_state.get_mesh("fsdp"),
-                replicate_mesh=self.parallel_state.get_mesh("fsdp_replicate"),
+                noshard_mesh=self.parallel_state.get_mesh("fsdp_noshard"),
                 cpu_offload=self.args.fsdp_cpu_offload,
                 args=self.args,
                 no_split_modules=self.model_backend.fsdp_no_split_modules(model),
@@ -634,7 +634,7 @@ def apply_lora(model: torch.nn.Module, args: Namespace, train_pipeline_config) -
 def apply_fsdp2(
     model,
     mesh=None,
-    replicate_mesh=None,
+    noshard_mesh=None,
     cpu_offload=False,
     args=None,
     no_split_modules=None,
@@ -669,7 +669,7 @@ def apply_fsdp2(
         }
 
     for unit in build_wrap_plan(model, compiled_precision, modules):
-        fully_shard(unit.module, **_fsdp_kwargs(unit.param_dtype, mesh if unit.shard else replicate_mesh))
+        fully_shard(unit.module, **_fsdp_kwargs(unit.param_dtype, mesh if unit.shard else noshard_mesh))
 
     fully_shard(model, **_fsdp_kwargs(param_dtype, mesh))
 

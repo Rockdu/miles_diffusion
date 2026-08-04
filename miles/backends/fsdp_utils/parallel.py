@@ -23,10 +23,10 @@ def build_fsdp_meshes(
     shard_view = world_mesh._unflatten(0, (dp_replicate, world_size // dp_replicate), ("dp_replicate", "fsdp"))
     # A degree-1 replicate axis would all-reduce over a single rank every bucket.
     fsdp_mesh = shard_view if dp_replicate > 1 else shard_view["fsdp"]
-    # Degree-1 shard axis: params stay replicated (no all-gather) and grads all-reduce, for the
-    # small modules the precision spec pins (see precision.WrapUnit.shard).
-    replicate_mesh = init_device_mesh(device_type, (world_size, 1), mesh_dim_names=("replicate", "shard"))
-    meshes = {"world": world_mesh, "fsdp": fsdp_mesh, "fsdp_replicate": replicate_mesh, "dp": world_mesh}
+    # Same ranks with a degree-1 shard axis: params stay replicated (no all-gather) and grads
+    # all-reduce, for the small modules the precision spec pins (see precision.WrapUnit.shard).
+    noshard_mesh = world_mesh._unflatten(0, (world_size, 1), ("dp_replicate", "dp_shard"))
+    meshes = {"world": world_mesh, "fsdp": fsdp_mesh, "fsdp_noshard": noshard_mesh, "dp": world_mesh}
 
     if sp_size > 1:
         dp_sp_view = world_mesh._unflatten(0, (world_size // sp_size, sp_size), ("dp", "sp"))
