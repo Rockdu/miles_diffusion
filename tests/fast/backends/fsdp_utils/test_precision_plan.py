@@ -1,16 +1,18 @@
 """Compiling PrecisionSpec rules into master casts and FSDP2 wrap units.
 
-Test model (every test uses two identical blocks; `w` marks own float params):
+Every test uses this model, loaded at bf16 with default_dtype=bf16, and every
+docstring draws the resulting dtype per node (`[U]` = its own wrap unit).
+`blocks.1` mirrors `blocks.0`, so most diagrams only draw block 0.
 
-    Tiny
-    └── blocks
-        ├── 0: Block
-        │   ├── linear  Linear     w
-        │   ├── norm    LayerNorm  w
-        │   ├── attn    Attn       (no own param)
-        │   │   └── norm_q  LayerNorm  w
-        │   └── rope    Rope       (buffer only)
-        └── 1: Block  (same)
+    Tiny                            classes and own float tensors
+    └── blocks          ModuleList  -
+        ├── 0           Block       -
+        │   ├── linear  Linear      weight, bias
+        │   ├── norm    LayerNorm   weight, bias
+        │   ├── attn    Attn        -
+        │   │   └── norm_q  LayerNorm  weight, bias
+        │   └── rope    Rope        freqs (buffer only)
+        └── 1           Block       (same)
 """
 
 from tests.ci.ci_register import register_cpu_ci
@@ -67,15 +69,32 @@ NORM_FQNS = {f"blocks.{i}{suffix}" for i in range(2) for suffix in (".norm", ".a
 
 
 def test_empty_spec_compiles_to_nothing():
-    """No rules -> the model keeps the run's default dtype everywhere."""
+    """No rules, so every node keeps the default and nothing is emitted.
+
+    blocks.0            gather bf16
+    ├── linear          bf16
+    ├── norm            bf16
+    ├── attn            bf16
+    │   └── norm_q      bf16
+    └── rope            bf16
+    """
     compiled = compile_precision_plan(_model(), PrecisionSpec(), default_dtype=torch.bfloat16)
     assert compiled.master_casts == []
     assert compiled.wrap_units == []
 
 
 def test_fqn_glob_selects_norms_across_depths():
-    """`*norm*` crosses dots, so one rule catches `blocks.N.norm` (depth 2) and
-    `blocks.N.attn.norm_q` (depth 3) while leaving their Linear siblings alone."""
+    """`*norm*` crosses dots, so one rule catches both norm depths and skips the Linear siblings.
+
+    Rule(fqn="*norm*", master=fp32, gather=fp32)
+
+    blocks.0            master bf16   gather bf16
+    ├── linear          bf16          bf16
+    ├── norm      [U]   fp32          fp32
+    ├── attn            bf16          bf16
+    │   └── norm_q [U]  fp32          fp32
+    └── rope            bf16          bf16
+    """
     model = _model()
     spec = PrecisionSpec(rules=(Rule(ModuleSel(fqn="*norm*"), master="fp32", gather="fp32"),))
     compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
@@ -86,7 +105,17 @@ def test_fqn_glob_selects_norms_across_depths():
 
 
 def test_cls_glob_selects_by_class():
-    """Selecting by class name reaches the same norms without naming any path."""
+    """Selecting by class name reaches the same two norms without naming any path.
+
+    Rule(cls="*LayerNorm", gather=fp32)
+
+    blocks.0            gather bf16
+    ├── linear          bf16
+    ├── norm      [U]   fp32
+    ├── attn            bf16
+    │   └── norm_q [U]  fp32
+    └── rope            bf16
+    """
     spec = PrecisionSpec(rules=(Rule(ModuleSel(cls="*LayerNorm"), gather="fp32"),))
     compiled = compile_precision_plan(_model(), spec, default_dtype=torch.bfloat16)
     assert compiled.master_casts == []
@@ -94,8 +123,17 @@ def test_cls_glob_selects_by_class():
 
 
 def test_master_rule_covers_matched_subtree():
-    """A rule on `blocks.1` casts every float tensor under it (params and buffers),
-    and nothing under its sibling `blocks.0`."""
+    """A rule covers its module's whole subtree, params and buffers alike, and stops at the sibling.
+
+    Rule(fqn="blocks.1", master=fp32)
+
+    blocks.0            master bf16      blocks.1            master fp32
+    ├── linear          bf16             ├── linear          fp32
+    ├── norm            bf16             ├── norm            fp32
+    ├── attn            bf16             ├── attn            fp32
+    │   └── norm_q      bf16             │   └── norm_q      fp32
+    └── rope.freqs      bf16             └── rope.freqs      fp32
+    """
     model = _model()
     spec = PrecisionSpec(rules=(Rule(ModuleSel(fqn="blocks.1"), master="fp32"),))
     compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
@@ -106,10 +144,17 @@ def test_master_rule_covers_matched_subtree():
 
 
 def test_later_rule_overrides_earlier_selection():
-    """Rules overlap on block 0's norms; the later rule wins there, block 1 keeps the first rule.
+    """Both rules cover block 0's norms; the later one wins there while block 1 keeps the first.
 
-    blocks.0.norm, blocks.0.attn.norm_q -> fp16   (rule 2)
-    blocks.1.norm, blocks.1.attn.norm_q -> fp32   (rule 1)
+    Rule(cls="LayerNorm",        gather=fp32)   # rule 1
+    Rule(fqn="blocks.0.*norm*",  gather=fp16)   # rule 2, wins where they overlap
+
+    blocks.0            gather bf16      blocks.1            gather bf16
+    ├── linear          bf16             ├── linear          bf16
+    ├── norm      [U]   fp16  (rule 2)   ├── norm      [U]   fp32  (rule 1)
+    ├── attn            bf16             ├── attn            bf16
+    │   └── norm_q [U]  fp16  (rule 2)   │   └── norm_q [U]  fp32  (rule 1)
+    └── rope            bf16             └── rope            bf16
     """
     spec = PrecisionSpec(
         rules=(
@@ -127,20 +172,27 @@ def test_later_rule_overrides_earlier_selection():
 
 
 def test_empty_module_sel_rejected():
-    """A selector with neither fqn nor cls would match everything by accident."""
+    """A selector with neither fqn nor cls would silently match every module."""
     spec = PrecisionSpec(rules=(Rule(ModuleSel(), master="fp32"),))
     with pytest.raises(ValueError, match="empty ModuleSel"):
         compile_precision_plan(_model(), spec, default_dtype=torch.bfloat16)
 
 
 def test_every_node_of_a_nested_chain_wraps_bottom_up():
-    """Three nested rules, each differing from its parent, need one unit per node:
+    """Three nested rules that each differ from their parent need one unit per node, and the plan
+    hands them back deepest first so each outer wrap excludes the inner ones.
 
-        blocks.0              fp16   <- wraps last (shallowest)
-        └── attn              fp32
-            └── norm_q        bf16   <- wraps first, so the outer units exclude it
+        Rule(fqn="blocks.0",              gather=fp16)
+        Rule(fqn="blocks.0.attn",         gather=fp32)
+        Rule(fqn="blocks.0.attn.norm_q",  gather=default)   # carved back out
 
-    `blocks.1` is only wrapped as a block unit, at the default dtype.
+        blocks.0        [U] fp16   gather order 3
+        ├── linear          fp16   (inherits blocks.0)
+        ├── norm            fp16   (inherits blocks.0)
+        ├── attn        [U] fp32   gather order 2
+        │   └── norm_q  [U] bf16   gather order 1, wraps first
+        └── rope            fp16 buffer, never gathered
+        blocks.1        [U] bf16   block unit only, still sharded
     """
     model = _model()
     spec = PrecisionSpec(
@@ -156,7 +208,7 @@ def test_every_node_of_a_nested_chain_wraps_bottom_up():
         "blocks.0.attn": torch.float32,
         "blocks.0": torch.float16,
     }
-    # Precision units are replicated (shard=False); the plain block unit still shards.
+    # (fqn, param_dtype, shard): precision units are replicated, the plain block unit shards.
     assert _plan(model, compiled) == [
         ("blocks.0.attn.norm_q", torch.bfloat16, False),
         ("blocks.0.attn", torch.float32, False),
@@ -166,8 +218,15 @@ def test_every_node_of_a_nested_chain_wraps_bottom_up():
 
 
 def test_block_inside_an_override_wraps_at_the_override_dtype():
-    """`blocks` (the ModuleList) is an ancestor of both block units, so the blocks wrap deeper
-    than the override; at the default dtype they would be the innermost wrap and undo it."""
+    """The rule sits above the block units, so the blocks wrap deeper than the override; at the
+    default dtype they would be the innermost wrap and silently undo it.
+
+        Rule(fqn="blocks", gather=fp32)
+
+        blocks          [U] fp32   gather order 3 (the override)
+        ├── 0               fp32   gather order 1, block unit forced to fp32
+        └── 1               fp32   gather order 2, block unit forced to fp32
+    """
     model = _model()
     spec = PrecisionSpec(rules=(Rule(ModuleSel(fqn="blocks"), gather="fp32"),))
     compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
@@ -180,15 +239,30 @@ def test_block_inside_an_override_wraps_at_the_override_dtype():
 
 
 def test_inherited_gather_needs_no_extra_unit():
-    """`attn` owns no parameter but its subtree does, so it wraps; `norm_q` inherits the same
-    dtype from it and needs no unit of its own (the units are a minimal cover of the tree)."""
+    """Units are a minimal cover: a node whose dtype already comes from an enclosing unit is skipped.
+
+    Rule(cls="Attn", gather=fp32)
+
+    blocks.0            gather bf16
+    ├── linear          bf16
+    ├── norm            bf16
+    ├── attn        [U] fp32   (owns no param, but its subtree does)
+    │   └── norm_q      fp32   inherits attn, so no unit of its own
+    └── rope            bf16
+    """
     spec = PrecisionSpec(rules=(Rule(ModuleSel(cls="Attn"), gather="fp32"),))
     compiled = compile_precision_plan(_model(), spec, default_dtype=torch.bfloat16)
     assert _units(compiled) == [("blocks.0.attn", torch.float32), ("blocks.1.attn", torch.float32)]
 
 
 def test_buffer_only_module_casts_master_without_wrapping():
-    """Buffers are never gathered, so a paramless module takes the master cast and no unit."""
+    """Buffers are never gathered, so a paramless module takes the master cast and no unit.
+
+    Rule(cls="Rope", master=fp32, gather=fp32)
+
+    blocks.0            master bf16   gather bf16
+    └── rope.freqs      fp32          n/a (buffer), no unit
+    """
     model = _model()
     spec = PrecisionSpec(rules=(Rule(ModuleSel(cls="Rope"), master="fp32", gather="fp32"),))
     compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
@@ -197,7 +271,7 @@ def test_buffer_only_module_casts_master_without_wrapping():
 
 
 def test_unmatched_rule_rejected():
-    """A rule matching nothing is a typo'd pattern or class name, not a no-op."""
+    """A rule matching nothing is a typo'd pattern or class name, not a silent no-op."""
     spec = PrecisionSpec(rules=(Rule(ModuleSel(cls="NoSuchModule"), master="fp32"),))
     with pytest.raises(ValueError, match="matched no module"):
         compile_precision_plan(_model(), spec, default_dtype=torch.bfloat16)

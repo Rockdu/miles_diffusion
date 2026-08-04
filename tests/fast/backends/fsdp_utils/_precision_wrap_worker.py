@@ -1,16 +1,27 @@
 """Gloo worker asserting the compiled precision plan really wraps under FSDP2 (2 ranks).
 
-Model and spec (default gather dtype is bf16, master is fp32):
+Master is fp32 everywhere, default gather dtype is bf16, and the spec is
 
-    Net
-    ├── stem                      Leaf   -> bf16, sharded   (no rule)
+    Rule(cls="Norm",                     gather=fp32)
+    Rule(fqn="blocks.0.attn",            gather=fp16)
+    Rule(fqn="blocks.0.attn.norm_q",     gather=default)
+
+so the tree, the dtype each module's params carry in the forward, and how each
+wrap unit is placed on the mesh come out as:
+
+    Net                             gather   placement
+    ├── stem            Leaf        bf16     sharded    (root unit, no rule)
     └── blocks
-        ├── 0: Block                     -> block unit, bf16, sharded
-        │   ├── norm  Norm               -> fp32 via cls rule, replicated
-        │   └── attn  Attn               -> fp16 via fqn rule, replicated
-        │       ├── norm_q  Norm         -> bf16, carved back out of attn
-        │       └── proj    Leaf         -> fp16, inherits attn
-        └── 1: Block                     -> same, except norm_q keeps fp32
+        ├── 0           Block  [U]  bf16     sharded    (block unit)
+        │   ├── norm    Norm   [U]  fp32     replicated
+        │   └── attn    Attn   [U]  fp16     replicated
+        │       ├── norm_q Norm [U] bf16     replicated (carved out of attn)
+        │       └── proj   Leaf     fp16     (inside the attn unit)
+        └── 1           Block  [U]  bf16     sharded    (block unit)
+            ├── norm    Norm   [U]  fp32     replicated
+            └── attn    Attn
+                ├── norm_q Norm [U] fp32     replicated (no override above it)
+                └── proj   Leaf     bf16     (inside the block unit)
 
 Modules cast explicitly in forward because CPU kernels reject mixed dtypes; what
 matters here is the wrap nesting, the param dtype each module sees at forward,
