@@ -196,9 +196,9 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 choices=["fp16", "bf16", "fp32"],
                 help=(
                     "Default dtype for every module the family PrecisionSpec does not pin "
-                    "explicitly: sets both the training-side forward/gather dtype "
-                    "(--diffusion-forward-dtype) and the rollout engine's "
-                    "--sglang-dit-precision. Specific flags win over this default."
+                    "explicitly, i.e. the training-side forward/gather dtype when "
+                    "--diffusion-forward-dtype is unset. Rollout must agree: pass the same value "
+                    "to --sglang-dit-precision or startup is refused."
                 ),
             )
             parser.add_argument(
@@ -1503,15 +1503,9 @@ def set_default_diffusion_args(args) -> None:
         else:
             args.ref_mode = "none"
 
-    # --precision-default-dtype fills every dtype knob left unset; specific flags win.
+    # --diffusion-forward-dtype wins over --precision-default-dtype, which wins over the built-in.
     if args.diffusion_forward_dtype is None:
         args.diffusion_forward_dtype = args.precision_default_dtype or "bf16"
-    if args.precision_default_dtype is not None:
-        from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
-
-        # Mirrors the engine's forwarding rule: a value equal to the class default counts as unset.
-        if args.sglang_dit_precision == PipelineConfig.dit_precision:
-            args.sglang_dit_precision = args.precision_default_dtype
 
 
 def miles_validate_args(args):
@@ -1540,10 +1534,13 @@ def miles_validate_args(args):
     if args.eval_reward_key is None:
         args.eval_reward_key = args.reward_key
 
-    if args.precision_default_dtype is not None and args.sglang_dit_precision != args.precision_default_dtype:
+    # Rollout and training must denoise at the same dtype, or the PPO ratio compares log-probs from
+    # two different precisions. sglang resolves dit_precision from a per-pipeline config class we
+    # cannot see here, so refuse a mismatch rather than overwrite its value.
+    if args.sglang_dit_precision != args.diffusion_forward_dtype:
         raise ValueError(
-            f"--sglang-dit-precision {args.sglang_dit_precision} conflicts with "
-            f"--precision-default-dtype {args.precision_default_dtype}"
+            f"--sglang-dit-precision {args.sglang_dit_precision} disagrees with the training forward "
+            f"dtype {args.diffusion_forward_dtype}; pass both with the same value"
         )
 
     args.update_weight_target_modules = [
