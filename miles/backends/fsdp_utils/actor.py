@@ -154,7 +154,7 @@ class FSDPTrainRayActor(TrainRayActor):
                 cpu_offload=self.args.fsdp_cpu_offload,
                 args=self.args,
                 no_split_modules=self.model_backend.fsdp_no_split_modules(model),
-                subshard_groups=compiled_precision.subshard_groups,
+                precision_wrap_units=compiled_precision.wrap_units,
             )
             checkpoint.broadcast_full_state_to_fsdp(
                 model,
@@ -624,7 +624,7 @@ def apply_lora(model: torch.nn.Module, args: Namespace, train_pipeline_config) -
     return model
 
 
-def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules=None, subshard_groups=None):
+def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules=None, precision_wrap_units=None):
     from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, fully_shard
 
     offload_policy = CPUOffloadPolicy() if cpu_offload else None
@@ -638,7 +638,7 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules
     reduce_dtype = resolve_dtype(args.fsdp_reduce_dtype)
     logger.info(
         f"FSDP: wrapping {len(modules)} modules of type {layer_cls_to_wrap}, param_dtype={param_dtype}, "
-        f"reduce_dtype={reduce_dtype}, sub-shard groups={len(subshard_groups) if subshard_groups else 0}"
+        f"reduce_dtype={reduce_dtype}, precision wrap units={len(precision_wrap_units) if precision_wrap_units else 0}"
     )
 
     def _fsdp_kwargs(policy_param_dtype):
@@ -653,18 +653,17 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules
             "mesh": mesh,
         }
 
-    # Sub-shard groups wrap first so the block/root units exclude their params.
-    # Groups are tiny by design: ZeRO-2 style (no backward re-gather) costs a few MB.
-    subshard_modules = set()
-    for group in subshard_groups or ():
-        fully_shard(group.modules, reshard_after_forward=False, **_fsdp_kwargs(group.param_dtype))
-        subshard_modules.update(group.modules)
+    # Precision units come pre-sorted deepest-first, so every wrap excludes the ones already wrapped.
+    precision_modules = set()
+    for unit in precision_wrap_units or ():
+        fully_shard(unit.module, **_fsdp_kwargs(unit.param_dtype))
+        precision_modules.add(unit.module)
 
     fsdp_kwargs = _fsdp_kwargs(param_dtype)
     for module in modules:
-        if module in subshard_modules:
-            raise ValueError(f"{type(module).__name__} is both an FSDP block unit and a precision sub-shard target")
-        fully_shard(module, **fsdp_kwargs)
+        # A block that is also a precision unit keeps its pinned policy; wrapping twice is an error.
+        if module not in precision_modules:
+            fully_shard(module, **fsdp_kwargs)
 
     fully_shard(model, **fsdp_kwargs)
 
