@@ -160,9 +160,12 @@ def compile_precision(
         # Seed the effective dtype from the parent; it only advances if this module emits a unit.
         gather_dtypes[mod_fqn] = inherited
 
-        # A unit is needed only where the dtype changes and there is something to gather at all,
-        # which is what keeps the units a minimal cover of the tree.
-        if gather == inherited or not any(p.is_floating_point() for p in module.parameters()):
+        # Minimal cover: a unit is only needed where the dtype changes.
+        if gather == inherited:
+            continue
+        # Nothing to gather: parameters() recurses so a container still counts, but buffers are
+        # never gathered and non-float params never cast, so wrapping those is pure overhead.
+        if not any(param.is_floating_point() for param in module.parameters()):
             continue
         if mod_fqn == "":
             raise ValueError("cannot wrap the root module for a gather override")
