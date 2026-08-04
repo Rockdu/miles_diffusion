@@ -25,6 +25,9 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
     model_package = "miles.backends.fsdp_utils.models.ltx"
     # Audio branch has no optimizer state: we only train the video stream.
     optimizer_state_allowed_missing = ["audio"]
+    # forward_velocity anchors its element-wise math on latents.dtype and rollout runs
+    # it in bf16, so cast latents/cond at the boundary (fp32 passthrough drifts ~5x).
+    input_dtype_policy = {"latents": "default", "cond": "default", "timestep": None}
 
     def configure(self, args: Namespace) -> None:
         self._height = args.diffusion_height
