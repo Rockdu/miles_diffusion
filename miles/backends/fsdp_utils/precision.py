@@ -4,9 +4,10 @@ A family declares per-module dtype intent as PrecisionSpec rules on its
 TrainPipelineConfig; each rule pins one or both axes (last match wins per axis):
   - master: resident dtype of the module's params/buffers (optimizer precision)
   - gather: dtype the params are cast to for FSDP all-gather + forward
-Compute dtype is not managed here: the trainer autocasts the DiT forward
-(boundary inputs via apply_input_dtype_policy below) and op-level exceptions
-belong to the monkey-patch registry.
+The weight spec does not manage compute dtype: the trainer autocasts the DiT
+forward, model-boundary input dtypes are family policy applied by
+``apply_input_dtype_policy`` below, and op-level exceptions belong to the
+monkey-patch registry.
 
 ``compile_precision_plan`` lowers the rules onto what FSDP2 can express:
 
@@ -26,7 +27,8 @@ belong to the monkey-patch registry.
                                paramless modules have nothing to gather: skipped)
         |
     apply_fsdp2: fully_shard(group.modules, param_dtype=group dtype),
-    nested before the block/root wrap, one extra all-gather per group
+    nested before the block/root wrap; one extra all-gather per group per
+    step (reshard_after_forward=False, so backward re-uses the forward gather)
 
 Module granularity is the floor FSDP2 gives us (fully_shard wraps modules,
 and FSDP2 requires uniform master dtype among trainable params per unit), so
