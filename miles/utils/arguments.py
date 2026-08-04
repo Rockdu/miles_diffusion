@@ -1535,13 +1535,16 @@ def miles_validate_args(args):
         args.eval_reward_key = args.reward_key
 
     # Rollout and training must denoise at the same dtype, or the PPO ratio compares log-probs from
-    # two different precisions. Recipes leave --sglang-dit-precision alone unless the model needs a
-    # non-default rollout dtype (SD3.5 is fp16), so this compares against the flag's default; a
-    # per-pipeline override inside sglang is resolved from the model path and is invisible here.
-    if args.sglang_dit_precision != args.diffusion_forward_dtype:
+    # two different precisions. A value left at the parser default means "unspecified": sglang then
+    # resolves dit_precision from a per-pipeline config we cannot see here, so only an explicitly
+    # chosen rollout dtype is checked (this mirrors the engine's own forwarding rule).
+    from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
+
+    rollout_dtype = args.sglang_dit_precision
+    if rollout_dtype != PipelineConfig.dit_precision and rollout_dtype != args.diffusion_forward_dtype:
         raise ValueError(
-            f"--sglang-dit-precision {args.sglang_dit_precision} disagrees with the training forward "
-            f"dtype {args.diffusion_forward_dtype}; pass both with the same value"
+            f"--sglang-dit-precision {rollout_dtype} disagrees with the training forward dtype "
+            f"{args.diffusion_forward_dtype}; pass both with the same value"
         )
 
     args.update_weight_target_modules = [
