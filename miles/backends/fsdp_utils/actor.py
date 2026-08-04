@@ -160,7 +160,7 @@ class FSDPTrainRayActor(TrainRayActor):
                 cpu_offload=self.args.fsdp_cpu_offload,
                 args=self.args,
                 no_split_modules=self.model_backend.fsdp_no_split_modules(model),
-                precision_wrap_units=compiled_precision.wrap_units,
+                compiled_precision=compiled_precision,
             )
             checkpoint.broadcast_full_state_to_fsdp(
                 model,
@@ -630,7 +630,7 @@ def apply_lora(model: torch.nn.Module, args: Namespace, train_pipeline_config) -
     return model
 
 
-def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules=None, precision_wrap_units=None):
+def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules=None, compiled_precision=None):
     from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, fully_shard
 
     offload_policy = CPUOffloadPolicy() if cpu_offload else None
@@ -644,7 +644,7 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules
     reduce_dtype = resolve_dtype(args.fsdp_reduce_dtype)
     logger.info(
         f"FSDP: wrapping {len(modules)} modules of type {layer_cls_to_wrap}, param_dtype={param_dtype}, "
-        f"reduce_dtype={reduce_dtype}, precision wrap units={len(precision_wrap_units) if precision_wrap_units else 0}"
+        f"reduce_dtype={reduce_dtype}, precision wrap units={len(compiled_precision.wrap_units)}"
     )
 
     def _fsdp_kwargs(policy_param_dtype):
@@ -659,7 +659,7 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules
             "mesh": mesh,
         }
 
-    for module, policy_dtype in build_wrap_plan(model, precision_wrap_units or [], modules, param_dtype):
+    for module, policy_dtype in build_wrap_plan(model, compiled_precision, modules):
         fully_shard(module, **_fsdp_kwargs(policy_dtype))
 
     fully_shard(model, **_fsdp_kwargs(param_dtype))

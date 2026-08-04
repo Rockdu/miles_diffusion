@@ -118,12 +118,26 @@ def test_every_node_of_a_nested_chain_wraps_bottom_up():
         "blocks.0": torch.float16,
     }
     # The block that is also a unit keeps its pin, and children wrap before parents.
-    plan = build_wrap_plan(model, compiled.wrap_units, list(model.blocks), torch.bfloat16)
+    plan = build_wrap_plan(model, compiled, list(model.blocks))
     assert plan == [
         (model.blocks[0].attn.norm_q, torch.bfloat16),
         (model.blocks[0].attn, torch.float32),
         (model.blocks[0], torch.float16),
         (model.blocks[1], torch.bfloat16),
+    ]
+
+
+def test_block_inside_an_override_wraps_at_the_override_dtype():
+    model = _model()
+    spec = PrecisionSpec(rules=(Rule(ModuleSel(fqn="blocks"), gather="fp32"),))
+    compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
+    assert _units(compiled) == [("blocks", torch.float32)]
+    # Blocks wrap deeper than the override, so at the default they would undo it.
+    plan = build_wrap_plan(model, compiled, list(model.blocks))
+    assert plan == [
+        (model.blocks[0], torch.float32),
+        (model.blocks[1], torch.float32),
+        (model.blocks, torch.float32),
     ]
 
 

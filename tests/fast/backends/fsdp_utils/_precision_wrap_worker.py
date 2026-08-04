@@ -94,8 +94,7 @@ def main() -> None:
         policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=torch.float32, cast_forward_inputs=False)
         return {"mp_policy": policy, "mesh": mesh}
 
-    plan = build_wrap_plan(model, compiled.wrap_units, list(model.blocks), DEFAULT_DTYPE)
-    for module, policy_dtype in plan:
+    for module, policy_dtype in build_wrap_plan(model, compiled, list(model.blocks)):
         fully_shard(module, **fsdp_kwargs(policy_dtype))
     fully_shard(model, **fsdp_kwargs(DEFAULT_DTYPE))
 

@@ -115,6 +115,8 @@ class WrapUnit:
 class CompiledPrecision:
     master_casts: list[MasterCast]
     wrap_units: list[WrapUnit]
+    # Effective gather dtype of every module, i.e. the dtype its innermost wrap unit provides.
+    gather_dtypes: dict[str, torch.dtype]
 
     def apply_master_casts(self) -> None:
         for cast in self.master_casts:
@@ -187,10 +189,10 @@ def compile_precision_plan(
     # (2)-(4) named_modules is parent-first, so the enclosing unit's dtype is already known here.
     master_casts: list[MasterCast] = []
     wrap_units: list[WrapUnit] = []
-    unit_dtypes: dict[str, torch.dtype] = {"": default_dtype}
+    gather_dtypes: dict[str, torch.dtype] = {"": default_dtype}
     for mod_fqn, module in model.named_modules():
-        enclosing_dtype = unit_dtypes[_parent_fqn(mod_fqn)]
-        unit_dtypes[mod_fqn] = enclosing_dtype
+        enclosing_dtype = gather_dtypes[_parent_fqn(mod_fqn)]
+        gather_dtypes[mod_fqn] = enclosing_dtype
         master, gather = _fold_covering_rules(spec.rules, matched_fqns, mod_fqn)
 
         master_dtype = _resolve_axis(master, default_dtype)
@@ -209,23 +211,25 @@ def compile_precision_plan(
         if mod_fqn == "":
             raise ValueError("cannot wrap the root module for a gather override")
         wrap_units.append(WrapUnit(mod_fqn, module, gather_dtype))
-        unit_dtypes[mod_fqn] = gather_dtype
+        gather_dtypes[mod_fqn] = gather_dtype
 
-    return CompiledPrecision(master_casts=master_casts, wrap_units=wrap_units)
+    return CompiledPrecision(master_casts=master_casts, wrap_units=wrap_units, gather_dtypes=gather_dtypes)
 
 
 def build_wrap_plan(
     model: torch.nn.Module,
-    wrap_units: list[WrapUnit],
+    compiled: CompiledPrecision,
     block_modules: list[torch.nn.Module],
-    default_dtype: torch.dtype,
 ) -> list[tuple[torch.nn.Module, torch.dtype]]:
-    """One wrap order for FSDP2, deepest module first: precision units pin their param_dtype,
-    remaining block modules take the default, and a module appearing in both keeps the pin."""
-    plan: dict[torch.nn.Module, torch.dtype] = {unit.module: unit.param_dtype for unit in wrap_units}
+    """One wrap order for FSDP2, deepest module first. Block modules are extra wraps that FSDP
+    needs for sharding granularity, so they must carry their own effective dtype: wrapping one at
+    the default inside an overridden region would be the innermost wrap and undo the override."""
+    plan: dict[torch.nn.Module, torch.dtype] = {unit.module: unit.param_dtype for unit in compiled.wrap_units}
+    depths, fqns = {}, {}
+    for mod_fqn, module in model.named_modules():
+        depths[module], fqns[module] = mod_fqn.count("."), mod_fqn
     for module in block_modules:
-        plan.setdefault(module, default_dtype)
-    depths = {module: mod_fqn.count(".") for mod_fqn, module in model.named_modules()}
+        plan.setdefault(module, compiled.gather_dtypes[fqns[module]])
     return [(module, plan[module]) for module in sorted(plan, key=lambda module: -depths[module])]
 
 
