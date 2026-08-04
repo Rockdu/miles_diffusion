@@ -21,7 +21,7 @@ def _inputs():
     return latents, timesteps, pos_cond
 
 
-def test_default_policy_matches_rollout_boundary():
+def test_default_policy_is_passthrough():
     latents, timesteps, pos_cond = _inputs()
     out_latents, out_timesteps, (out_pos, out_neg, out_joint) = apply_input_dtype_policy(
         DEFAULT_POLICY,
@@ -30,9 +30,9 @@ def test_default_policy_matches_rollout_boundary():
         conds=(pos_cond, None, None),
         default_dtype=torch.bfloat16,
     )
-    assert out_latents.dtype == torch.bfloat16
+    assert out_latents.dtype == torch.float32
     assert out_timesteps.dtype == torch.float32
-    assert out_pos["context"].dtype == torch.bfloat16
+    assert out_pos["context"].dtype == torch.float32
     assert out_pos["context_mask"].dtype == torch.int64
     assert out_neg is None and out_joint is None
 
@@ -50,17 +50,18 @@ def test_family_override_timestep_default():
     assert out_timesteps.dtype == torch.bfloat16
 
 
-def test_none_axis_passes_through():
+def test_cast_policy_casts_floats_only():
     latents, timesteps, pos_cond = _inputs()
     out_latents, _, (out_pos, _, _) = apply_input_dtype_policy(
-        {"latents": None, "cond": None, "timestep": None},
+        {"latents": "default", "cond": "default", "timestep": "fp32"},
         latents=latents,
         timesteps=timesteps,
         conds=(pos_cond, None, None),
         default_dtype=torch.bfloat16,
     )
-    assert out_latents.dtype == torch.float32
-    assert out_pos["context"].dtype == torch.float32
+    assert out_latents.dtype == torch.bfloat16
+    assert out_pos["context"].dtype == torch.bfloat16
+    assert out_pos["context_mask"].dtype == torch.int64
 
 
 def test_unknown_key_rejected():
