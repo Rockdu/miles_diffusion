@@ -156,7 +156,17 @@ def compile_precision(
     *,
     default_dtype: torch.dtype,
 ) -> CompiledPrecision:
-    """Resolve the spec against the (pre-LoRA, pre-FSDP) model, then lower it per module."""
+    """Resolve the spec against the (pre-LoRA, pre-FSDP) model, then lower it per module.
+
+    ``named_modules`` yields parents before children, so a module's parent is already resolved when
+    we reach it: inheriting the subtree decision is one dict lookup, and every rule only has to be
+    tested against the module it names. Two FQN-keyed dicts carry that state forward:
+
+      masters        the master dtype *intent*, inherited down the subtree so a rule on a container
+                     also casts the tensors its descendants own
+      gather_dtypes  the *effective* gather dtype, i.e. what the innermost enclosing wrap unit
+                     provides — seeded from the parent, advanced only where a unit is emitted
+    """
     master_casts: list[MasterCast] = []
     wrap_units: list[WrapUnit] = []
     masters: dict[str, torch.dtype | None] = {"": None}
@@ -166,6 +176,8 @@ def compile_precision(
     for mod_fqn, module in model.named_modules():
         parent_fqn = _parent_fqn(mod_fqn)
         master, gather = masters[parent_fqn], gather_dtypes[parent_fqn]
+        # Rules selecting this module apply in spec order, so the later one wins per axis; rules on
+        # ancestors already took effect through the inherited values above.
         for i, rule in enumerate(spec.rules):
             if not _selects(rule.select, mod_fqn, module):
                 continue
@@ -174,8 +186,10 @@ def compile_precision(
                 master = _resolve_axis(rule.master, default_dtype)
             if rule.gather is not None:
                 gather = _resolve_axis(rule.gather, default_dtype)
+        # Seed the effective dtype from the parent; it only advances if this module emits a unit.
         masters[mod_fqn], gather_dtypes[mod_fqn] = master, gather_dtypes[parent_fqn]
 
+        # Master is per tensor: cast what this module owns, descendants get their own turn.
         if master is not None:
             prefix = f"{mod_fqn}." if mod_fqn else ""
             own = list(module.named_parameters(recurse=False)) + list(module.named_buffers(recurse=False))
@@ -183,6 +197,8 @@ def compile_precision(
                 if tensor.is_floating_point() and tensor.dtype != master:
                     master_casts.append(MasterCast(f"{prefix}{name}", tensor, master))
 
+        # Gather is per module: a unit is needed only where the dtype changes and there is something
+        # to gather at all, which is what keeps the units a minimal cover of the tree.
         if gather == gather_dtypes[parent_fqn] or not any(p.is_floating_point() for p in module.parameters()):
             continue
         if mod_fqn == "":
@@ -190,6 +206,7 @@ def compile_precision(
         wrap_units.append(WrapUnit(mod_fqn, module, gather))
         gather_dtypes[mod_fqn] = gather
 
+    # A rule that selected nothing is a typo'd pattern or class name, not a silent no-op.
     for rule, hit in zip(spec.rules, hits, strict=True):
         if not hit:
             raise ValueError(f"precision rule matched no module: {rule}")
