@@ -112,6 +112,22 @@ def _patched_apply_rotary_emb(x, cos, sin, is_neox_style, interleaved=False):
     return _rope_fp32(x, cos, sin)
 
 
+def _upcast_head_table_pre_hook(module, args, kwargs=None):
+    # The trainer keeps the ROOT scale_shift_table resident fp32 (diffusers
+    # _keep_in_fp32_modules) but FSDP gathers it bf16, so its effective values
+    # are bf16 held in an fp32 sum: (table + temb) promotes to fp32 and the
+    # final shift/scale reach norm_out unrounded. sgl-d loads the table bf16,
+    # so the same sum stays bf16 and rounds -- the last non-bit-exact site
+    # (proj_out input rel 3.3e-3, final output rel 1.1e-3). Re-dtype the param
+    # to fp32 holding the SAME bf16-rounded values (offline: makes the site
+    # bitwise against the trainer). Lazy, after weights load; idempotent.
+    table = getattr(module, "scale_shift_table", None)
+    if table is not None and table.dtype != torch.float32:
+        module.scale_shift_table = torch.nn.Parameter(
+            table.data.float(), requires_grad=table.requires_grad
+        )
+
+
 def apply() -> None:
     import importlib
 
@@ -134,3 +150,14 @@ def apply() -> None:
             mod.apply_flashinfer_rope_qk_inplace = _patched_flashinfer_rope_qk_inplace
         if hasattr(mod, "_apply_rotary_emb"):
             mod._apply_rotary_emb = _patched_apply_rotary_emb
+        for cls_name in ("WanTransformer3DModel",):
+            cls = getattr(mod, cls_name, None)
+            if cls is not None and not getattr(cls, "_wan_head_table_hooked", False):
+                orig_init = cls.__init__
+
+                def _init(self, *a, _orig=orig_init, **kw):
+                    _orig(self, *a, **kw)
+                    self.register_forward_pre_hook(_upcast_head_table_pre_hook)
+
+                cls.__init__ = _init
+                cls._wan_head_table_hooked = True
