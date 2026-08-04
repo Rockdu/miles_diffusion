@@ -15,11 +15,19 @@ class Rope(nn.Module):
         self.register_buffer("freqs", torch.zeros(4))
 
 
+class Attn(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.norm_q = nn.LayerNorm(8)
+
+
 class Block(nn.Module):
     def __init__(self):
         super().__init__()
+        self.scale = nn.Parameter(torch.zeros(8))
         self.linear = nn.Linear(8, 8)
         self.norm = nn.LayerNorm(8)
+        self.attn = Attn()
         self.rope = Rope()
 
 
@@ -33,32 +41,35 @@ def _model(dtype=torch.bfloat16):
     return Tiny().to(dtype)
 
 
+def _norms(model):
+    return [model.blocks[0].norm, model.blocks[0].attn.norm_q, model.blocks[1].norm, model.blocks[1].attn.norm_q]
+
+
 def test_empty_spec_compiles_to_nothing():
     compiled = compile_precision_plan(_model(), PrecisionSpec(), default_dtype=torch.bfloat16)
     assert compiled.master_casts == []
     assert compiled.subshard_groups == []
 
 
-def test_cls_rule_lowers_norms_to_one_subshard_group():
+def test_fqn_wildcard_selects_norms_across_depths():
     model = _model()
-    spec = PrecisionSpec(rules=(Rule(ModuleSel(cls="LayerNorm"), master="fp32", gather="fp32"),))
+    spec = PrecisionSpec(rules=(Rule(ModuleSel(fqn="*norm*"), master="fp32", gather="fp32"),))
     compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
     assert len(compiled.subshard_groups) == 1
     group = compiled.subshard_groups[0]
     assert group.param_dtype is torch.float32
-    assert group.modules == [model.blocks[0].norm, model.blocks[1].norm]
-    assert set(group.param_fqns) == {f"blocks.{i}.norm.{n}" for i in range(2) for n in ("weight", "bias")}
+    assert group.modules == _norms(model)
     compiled.apply_master_casts()
-    assert model.blocks[0].norm.weight.dtype is torch.float32
+    assert model.blocks[0].attn.norm_q.weight.dtype is torch.float32
     assert model.blocks[0].linear.weight.dtype is torch.bfloat16
 
 
-def test_gather_without_master_is_allowed():
-    # Nested policy casts at all-gather, so gather may diverge from master.
+def test_cls_rule_selects_by_class():
+    model = _model()
     spec = PrecisionSpec(rules=(Rule(ModuleSel(cls="LayerNorm"), gather="fp32"),))
-    compiled = compile_precision_plan(_model(), spec, default_dtype=torch.bfloat16)
+    compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
     assert compiled.master_casts == []
-    assert compiled.subshard_groups[0].param_dtype is torch.float32
+    assert compiled.subshard_groups[0].modules == _norms(model)
 
 
 def test_master_rule_covers_matched_subtree():
@@ -103,7 +114,23 @@ def test_last_rule_wins_per_axis():
         )
     )
     compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
-    assert compiled.subshard_groups[0].modules == [model.blocks[1].norm]
+    assert compiled.subshard_groups[0].modules == _norms(model)[1:]
+
+
+def test_nested_gather_groups_wrap_bottom_up():
+    model = _model()
+    spec = PrecisionSpec(
+        rules=(
+            Rule(ModuleSel(fqn="blocks.0"), gather="fp16"),
+            Rule(ModuleSel(fqn="blocks.0.norm"), gather="fp32"),
+        )
+    )
+    compiled = compile_precision_plan(model, spec, default_dtype=torch.bfloat16)
+    # Deeper fp32 norm group wraps first; same-dtype children coalesce into blocks.0.
+    assert [group.param_dtype for group in compiled.subshard_groups] == [torch.float32, torch.float16]
+    assert compiled.subshard_groups[0].modules == [model.blocks[0].norm]
+    assert compiled.subshard_groups[1].modules == [model.blocks[0]]
+    assert "blocks.0.linear.weight" in compiled.subshard_groups[1].param_fqns
 
 
 def test_unmatched_rule_rejected():

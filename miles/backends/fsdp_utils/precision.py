@@ -26,9 +26,9 @@ monkey-patch registry.
                                SubShardGroup per dtype (buffer-only and
                                paramless modules have nothing to gather: skipped)
         |
-    apply_fsdp2: fully_shard(group.modules, param_dtype=group dtype),
-    nested before the block/root wrap; one extra all-gather per group per
-    step (reshard_after_forward=False, so backward re-uses the forward gather)
+    apply_fsdp2: fully_shard(group.modules, param_dtype=group dtype), deepest
+    group first then blocks then root (FSDP2 nests bottom-up); one extra
+    all-gather per group per step (reshard_after_forward=False)
 
 Module granularity is the floor FSDP2 gives us (fully_shard wraps modules,
 and FSDP2 requires uniform master dtype among trainable params per unit), so
@@ -157,9 +157,9 @@ def compile_precision_plan(
     def _covers(prefixes: list[str], mod_fqn: str) -> bool:
         return any(p == "" or mod_fqn == p or mod_fqn.startswith(f"{p}.") for p in prefixes)
 
-    # (2)-(4) Fold rules per module, lower master to casts and gather to sub-shard groups.
+    # (2)-(4) Fold rules per module, lower master to casts and gather to sub-shard requests.
     master_casts: list[MasterCast] = []
-    groups: dict[torch.dtype, SubShardGroup] = {}
+    pending: dict[torch.dtype, list[tuple[str, torch.nn.Module, list[str]]]] = {}
     for mod_fqn, module in model.named_modules():
         master = gather = None
         for rule, prefixes in zip(spec.rules, rule_prefixes, strict=True):
@@ -181,16 +181,40 @@ def compile_precision_plan(
 
         gather_dtype = _resolve_axis(gather, default_dtype)
         if gather_dtype is not None and gather_dtype != default_dtype:
-            float_params = [name for name, param in params if param.is_floating_point()]
+            float_params = [f"{prefix}{name}" for name, param in params if param.is_floating_point()]
             if not float_params:
                 continue
             if mod_fqn == "":
                 raise ValueError("cannot sub-wrap the root module for a gather override")
-            group = groups.setdefault(gather_dtype, SubShardGroup(param_dtype=gather_dtype))
-            group.modules.append(module)
-            group.param_fqns.extend(f"{prefix}{name}" for name in float_params)
+            pending.setdefault(gather_dtype, []).append((mod_fqn, module, float_params))
 
-    return CompiledPrecision(master_casts=master_casts, subshard_groups=list(groups.values()))
+    # (5) Bottom-up wrap order: same-dtype descendants coalesce into their ancestor entry
+    # (named_modules is parent-first), groups sort deepest-first, and cross-dtype nesting
+    # that cannot wrap child-before-parent is rejected.
+    built: list[tuple[int, list[str], SubShardGroup]] = []
+    for dtype, entries in pending.items():
+        kept: list[tuple[str, torch.nn.Module, list[str]]] = []
+        for mod_fqn, module, float_params in entries:
+            ancestor = next((entry for entry in kept if mod_fqn.startswith(f"{entry[0]}.")), None)
+            if ancestor is not None:
+                ancestor[2].extend(float_params)
+                continue
+            kept.append((mod_fqn, module, float_params))
+        depth = max(mod_fqn.count(".") for mod_fqn, _, _ in kept)
+        group = SubShardGroup(
+            param_dtype=dtype,
+            modules=[module for _, module, _ in kept],
+            param_fqns=[fqn for _, _, fqns in kept for fqn in fqns],
+        )
+        built.append((depth, [mod_fqn for mod_fqn, _, _ in kept], group))
+    built.sort(key=lambda item: -item[0])
+    for i, (_, fqns_i, _) in enumerate(built):
+        for _, fqns_j, _ in built[i + 1 :]:
+            for fqn_j in fqns_j:
+                if any(fqn_j.startswith(f"{fqn_i}.") for fqn_i in fqns_i):
+                    raise ValueError(f"sub-shard nesting cannot wrap bottom-up: {fqn_j} sits inside an earlier group")
+
+    return CompiledPrecision(master_casts=master_casts, subshard_groups=[group for _, _, group in built])
 
 
 # ---------------------------------------------------------------------------
