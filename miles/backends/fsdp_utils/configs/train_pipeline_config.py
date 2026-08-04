@@ -83,7 +83,7 @@ class TrainPipelineConfig(abc.ABC):
     supports_cfg_training: bool = True
     # Rollout parity patch group applied by the engine (see monkey_patches; None = none).
     rollout_patch_group: str | None = None
-    # Weight-precision rules (master/gather dtypes) compiled onto FSDP2; see precision.py.
+    # Gather-dtype rules compiled onto FSDP2 wrap units; see precision.py.
     precision_spec: PrecisionSpec = PrecisionSpec()
     # Model-boundary input dtypes (see precision.apply_input_dtype_policy); families opt into casts explicitly.
     input_dtype_policy: dict = {"latents": None, "cond": None, "timestep": None}

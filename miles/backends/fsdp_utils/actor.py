@@ -129,7 +129,7 @@ class FSDPTrainRayActor(TrainRayActor):
             if args.gradient_checkpointing:
                 self.model_backend.enable_gradient_checkpointing(model)
 
-            # Resolve the family precision plan on clean FQNs (pre-LoRA, pre-FSDP).
+            # Resolve the family precision spec on clean FQNs (pre-LoRA, pre-FSDP).
             compiled_precision = compile_precision(
                 model,
                 self.train_pipeline_config.precision_spec,

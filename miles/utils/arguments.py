@@ -1505,9 +1505,7 @@ def set_default_diffusion_args(args) -> None:
         else:
             args.ref_mode = "none"
 
-    # --precision-default-dtype fills whichever side was left unset; disagreements are rejected in
-    # miles_validate_args. Without it the training side falls back to bf16 and the rollout engine
-    # keeps its own per-pipeline default.
+    # --precision-default-dtype fills whichever side was left unset; validate rejects disagreements.
     if args.diffusion_forward_dtype is None:
         args.diffusion_forward_dtype = args.precision_default_dtype or "bf16"
     if args.sglang_dit_precision is None:
