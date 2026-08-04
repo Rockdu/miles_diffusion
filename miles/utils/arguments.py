@@ -1409,6 +1409,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
         parser.set_defaults(sglang_tensor_parallel_size=add_sglang_tp_size())
         # None means unset: the engine then forwards nothing and sglang keeps its per-pipeline dtype.
         parser.set_defaults(sglang_dit_precision=None)
+        parser.set_defaults(sglang_text_encoder_precisions=None)
         return parser
 
     return add_miles_arguments

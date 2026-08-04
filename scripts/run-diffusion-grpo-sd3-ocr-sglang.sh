@@ -100,6 +100,7 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --globalize-reward-std \
   --rm-type ocr \
   --precision-default-dtype fp32 \
+  --sglang-text-encoder-precisions fp32 fp32 fp32 \
   --sglang-vae-slicing \
   --diffusion-num-steps 10 \
   --diffusion-step-strategy-path miles.rollout.step_strategy_hub.sde_window \
