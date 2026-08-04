@@ -135,42 +135,40 @@ def compile_precision(
     *,
     default_dtype: torch.dtype,
 ) -> CompiledPrecision:
-    """Resolve the spec against the (pre-LoRA, pre-FSDP) model, then lower it per module.
+    """Resolve the spec against the (pre-LoRA, pre-FSDP) model into FSDP2 wrap units.
 
-    ``named_modules`` yields parents before children, so a module's parent is already resolved when
-    we reach it: inheriting the subtree decision is one dict lookup, and every rule only has to be
-    tested against the module it names. ``gather_dtypes`` carries that state forward — the effective
-    dtype of each module, i.e. what its innermost enclosing wrap unit provides.
+    The rule is one line: **a module becomes its own wrap unit exactly when its gather dtype differs
+    from its parent's.** Anything matching its parent is already covered by the parent's unit, so the
+    emitted units are the minimal set of fully_shard calls that realises the spec.
+
+    The traversal makes that cheap. ``named_modules`` yields parents before children, so the parent's
+    dtype is already in ``gather_dtypes`` when we reach a module: inheritance is one dict lookup, and
+    each rule only has to be tested against the module it names rather than against its ancestors.
     """
     wrap_units: list[WrapUnit] = []
     gather_dtypes: dict[str, torch.dtype] = {"": default_dtype}
     hits = [0] * len(spec.rules)
 
     for mod_fqn, module in model.named_modules():
-        parent_fqn = _parent_fqn(mod_fqn)
-        inherited = gather_dtypes[parent_fqn]
-        # Rules selecting this module apply in spec order, so the later one wins; rules on ancestors
-        # already took effect through the inherited value.
-        gather = inherited
+        parent_gather = gather_dtypes[_parent_fqn(mod_fqn)]
+        # Start from what the parent provides, then let the rules selecting this module override it
+        # in spec order: the later one wins, and rules on ancestors already acted via the parent.
+        gather = parent_gather
         for i, rule in enumerate(spec.rules):
             if not _selects(rule.select, mod_fqn, module):
                 continue
             hits[i] += 1
             gather = _resolve_axis(rule.gather, default_dtype)
-        # Seed the effective dtype from the parent; it only advances if this module emits a unit.
-        gather_dtypes[mod_fqn] = inherited
 
-        # Minimal cover: a unit is only needed where the dtype changes.
-        if gather == inherited:
-            continue
-        # Nothing to gather: parameters() recurses so a container still counts, but buffers are
-        # never gathered and non-float params never cast, so wrapping those is pure overhead.
-        if not any(param.is_floating_point() for param in module.parameters()):
-            continue
-        if mod_fqn == "":
+        # Differs from the parent -> this module needs its own unit, unless it has nothing to gather:
+        # parameters() recurses so containers still count, but buffers are never gathered, so a
+        # buffer-only module like a RoPE cache would only add an empty FSDP group.
+        needs_unit = gather != parent_gather and next(module.parameters(), None) is not None
+        if needs_unit and mod_fqn == "":
             raise ValueError("cannot wrap the root module for a gather override")
-        wrap_units.append(WrapUnit(mod_fqn, module, gather))
-        gather_dtypes[mod_fqn] = gather
+        if needs_unit:
+            wrap_units.append(WrapUnit(mod_fqn, module, gather))
+        gather_dtypes[mod_fqn] = gather if needs_unit else parent_gather
 
     # A rule that selected nothing is a typo'd pattern or class name, not a silent no-op.
     for rule, hit in zip(spec.rules, hits, strict=True):
