@@ -52,6 +52,13 @@ def resolve_dtype(name: str) -> torch.dtype:
     return _DTYPES[name]
 
 
+def _resolve_axis(axis: str | None, default_dtype: torch.dtype) -> torch.dtype | None:
+    """Shared axis semantics: None -> untouched, "default" -> the run's default dtype, else a dtype name."""
+    if axis is None:
+        return None
+    return default_dtype if axis == "default" else _DTYPES[axis]
+
+
 # ---------------------------------------------------------------------------
 # Spec: per-family declaration (see TrainPipelineConfig.precision_spec)
 # ---------------------------------------------------------------------------
@@ -150,11 +157,6 @@ def compile_precision_plan(
     def _covers(prefixes: list[str], mod_fqn: str) -> bool:
         return any(p == "" or mod_fqn == p or mod_fqn.startswith(f"{p}.") for p in prefixes)
 
-    def _resolve_axis(axis: str | None) -> torch.dtype | None:
-        if axis is None:
-            return None
-        return default_dtype if axis == "default" else _DTYPES[axis]
-
     # (2)-(4) Fold rules per module, lower master to casts and gather to sub-shard groups.
     master_casts: list[MasterCast] = []
     groups: dict[torch.dtype, SubShardGroup] = {}
@@ -171,13 +173,13 @@ def compile_precision_plan(
         prefix = f"{mod_fqn}." if mod_fqn else ""
         params = list(module.named_parameters(recurse=False))
         tensors = params + list(module.named_buffers(recurse=False))
-        master_dtype = _resolve_axis(master)
+        master_dtype = _resolve_axis(master, default_dtype)
         if master_dtype is not None:
             for name, tensor in tensors:
                 if tensor.is_floating_point() and tensor.dtype != master_dtype:
                     master_casts.append(MasterCast(f"{prefix}{name}", tensor, master_dtype))
 
-        gather_dtype = _resolve_axis(gather)
+        gather_dtype = _resolve_axis(gather, default_dtype)
         if gather_dtype is not None and gather_dtype != default_dtype:
             float_params = [name for name, param in params if param.is_floating_point()]
             if not float_params:
@@ -214,11 +216,9 @@ def apply_input_dtype_policy(
 
     def _axis(key: str) -> torch.dtype | None:
         axis = policy.get(key)
-        if axis is None:
-            return None
-        if axis != "default" and axis not in _DTYPES:
+        if axis is not None and axis != "default" and axis not in _DTYPES:
             raise ValueError(f"input_dtype_policy[{key!r}] has unknown dtype {axis!r}")
-        return default_dtype if axis == "default" else _DTYPES[axis]
+        return _resolve_axis(axis, default_dtype)
 
     def _cast(value, dtype: torch.dtype | None):
         if dtype is None or not torch.is_tensor(value) or not value.is_floating_point():
