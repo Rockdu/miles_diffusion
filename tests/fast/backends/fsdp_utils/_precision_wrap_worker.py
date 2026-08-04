@@ -1,6 +1,6 @@
 """Gloo worker asserting the compiled precision plan really wraps under FSDP2 (2 ranks).
 
-Master is fp32 everywhere, default gather dtype is bf16, and the spec is
+Master is fp32 everywhere (--fsdp-master-dtype), default gather dtype is bf16, and the spec is
 
     Rule(cls="Norm",                     gather=fp32)
     Rule(fqn="blocks.0.attn",            gather=fp16)
@@ -108,7 +108,6 @@ def main() -> None:
     model = Net().to(torch.float32)  # fp32 master
 
     compiled = compile_precision(model, SPEC, default_dtype=DEFAULT_DTYPE)
-    compiled.apply_master_casts()
 
     def fsdp_kwargs(param_dtype):
         policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=torch.float32, cast_forward_inputs=False)

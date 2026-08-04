@@ -135,7 +135,6 @@ class FSDPTrainRayActor(TrainRayActor):
                 self.train_pipeline_config.precision_spec,
                 default_dtype=self._forward_dtype,
             )
-            compiled_precision.apply_master_casts()
             if rank == 0:
                 log_precision_summary(component, compiled_precision, default_dtype=self._forward_dtype)
 
