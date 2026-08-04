@@ -15,6 +15,11 @@ from .train_pipeline_config import TrainPipelineConfig, register_train_pipeline_
 @register_train_pipeline_config("wan2_2")
 class Wan2_2TrainPipelineConfig(TrainPipelineConfig):
     hf_ckpt_name_patterns = ("wan2.2", "wan-2.2")
+    # Rollout parity: replace the fused norm/residual kernels with Wan-exact
+    # fp32-once eager ops (patch_wan_norm_ops). The fused kernels quantize the
+    # normed value to bf16 mid-chain and inject ~3e-3 rel per site vs the
+    # trainer; eager costs rollout speed, which parity dumps accept.
+    rollout_patch_group = "wan"
     # Rollout (sglang-d) keeps every FP32LayerNorm's affine params resident and
     # consumed in fp32 (verified on the Wan2.2 full40 dump: rollout norm2
     # weight/bias are float32 in the forward while the FSDP default policy

@@ -55,6 +55,14 @@ def apply_sgld_monkey_patches() -> None:
     patch_qk_norm_rope.apply()
 
 
+@register_rollout_patch_group("wan")
+def apply_wan_monkey_patches() -> None:
+    """Wan fp32-once parity for the fused norm/residual kernels (see patch_wan_norm_ops)."""
+    from miles.backends.sglang_diffusion_utils.monkey_patches import patch_wan_norm_ops
+
+    patch_wan_norm_ops.apply()
+
+
 @register_rollout_patch_group("ltx")
 def apply_ltx2_rollout_patches() -> None:
     from miles.backends.sglang_diffusion_utils.monkey_patches import (
