@@ -1535,8 +1535,9 @@ def miles_validate_args(args):
         args.eval_reward_key = args.reward_key
 
     # Rollout and training must denoise at the same dtype, or the PPO ratio compares log-probs from
-    # two different precisions. sglang resolves dit_precision from a per-pipeline config class we
-    # cannot see here, so refuse a mismatch rather than overwrite its value.
+    # two different precisions. Recipes leave --sglang-dit-precision alone unless the model needs a
+    # non-default rollout dtype (SD3.5 is fp16), so this compares against the flag's default; a
+    # per-pipeline override inside sglang is resolved from the model path and is invisible here.
     if args.sglang_dit_precision != args.diffusion_forward_dtype:
         raise ValueError(
             f"--sglang-dit-precision {args.sglang_dit_precision} disagrees with the training forward "
