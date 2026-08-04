@@ -197,8 +197,8 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Default dtype for every module the family PrecisionSpec does not pin "
                     "explicitly, i.e. the training-side forward/gather dtype when "
-                    "--diffusion-forward-dtype is unset. Rollout must agree: pass the same value "
-                    "to --sglang-dit-precision or startup is refused."
+                    "--diffusion-forward-dtype is unset. The rollout engine has its own "
+                    "--sglang-dit-precision; keep them consistent in the recipe."
                 ),
             )
             parser.add_argument(
@@ -1533,19 +1533,6 @@ def miles_validate_args(args):
 
     if args.eval_reward_key is None:
         args.eval_reward_key = args.reward_key
-
-    # Rollout and training must denoise at the same dtype, or the PPO ratio compares log-probs from
-    # two different precisions. A value left at the parser default means "unspecified": sglang then
-    # resolves dit_precision from a per-pipeline config we cannot see here, so only an explicitly
-    # chosen rollout dtype is checked (this mirrors the engine's own forwarding rule).
-    from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
-
-    rollout_dtype = args.sglang_dit_precision
-    if rollout_dtype != PipelineConfig.dit_precision and rollout_dtype != args.diffusion_forward_dtype:
-        raise ValueError(
-            f"--sglang-dit-precision {rollout_dtype} disagrees with the training forward dtype "
-            f"{args.diffusion_forward_dtype}; pass both with the same value"
-        )
 
     args.update_weight_target_modules = [
         name.strip() for name in args.update_weight_target_module.split(",") if name.strip()
