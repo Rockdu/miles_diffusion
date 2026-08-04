@@ -75,6 +75,10 @@ class ModuleSel:
     fqn: str | None = None
     cls: str | None = None
 
+    def __post_init__(self) -> None:
+        if self.fqn is None and self.cls is None:
+            raise ValueError("ModuleSel needs fqn or cls; an empty selector silently matches every module")
+
 
 @dataclass(frozen=True)
 class Rule:
@@ -123,16 +127,6 @@ class CompiledPrecision:
             cast.tensor.data = cast.tensor.data.to(cast.dtype)
 
 
-def _validate_rule(rule: Rule) -> None:
-    if rule.master is None and rule.gather is None:
-        raise ValueError(f"precision rule sets no dtype axis: {rule}")
-    if rule.select.fqn is None and rule.select.cls is None:
-        raise ValueError(f"precision rule has an empty ModuleSel: {rule}")
-    for axis in (rule.master, rule.gather):
-        if axis is not None and axis != "default" and axis not in _DTYPES:
-            raise ValueError(f"precision rule has unknown dtype {axis!r}: {rule}")
-
-
 def _selects(sel: ModuleSel, mod_fqn: str, module: torch.nn.Module) -> bool:
     if sel.fqn is not None and not fnmatch(mod_fqn, sel.fqn):
         return False
@@ -175,9 +169,6 @@ def compile_precision_plan(
     default_dtype: torch.dtype,
 ) -> CompiledPrecision:
     """Resolve spec rules against the (pre-LoRA, pre-FSDP) model and lower them per module."""
-    for rule in spec.rules:
-        _validate_rule(rule)
-
     # (1) A rule matching nothing is almost certainly a typo'd pattern or class name.
     matched_fqns = []
     for rule in spec.rules:

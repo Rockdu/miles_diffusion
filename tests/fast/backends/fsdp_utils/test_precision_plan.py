@@ -173,9 +173,8 @@ def test_later_rule_overrides_earlier_selection():
 
 def test_empty_module_sel_rejected():
     """A selector with neither fqn nor cls would silently match every module."""
-    spec = PrecisionSpec(rules=(Rule(ModuleSel(), master="fp32"),))
-    with pytest.raises(ValueError, match="empty ModuleSel"):
-        compile_precision_plan(_model(), spec, default_dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="needs fqn or cls"):
+        ModuleSel()
 
 
 def test_every_node_of_a_nested_chain_wraps_bottom_up():
