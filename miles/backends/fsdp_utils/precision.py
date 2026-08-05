@@ -114,7 +114,7 @@ class CompiledPrecision:
             depths[module], fqns[module] = mod_fqn.count("."), mod_fqn
         for module in block_modules:
             fqn = fqns[module]
-            plan.setdefault(module, WrapUnit(fqn, module, self.gather_dtypes[fqn]))
+            plan.setdefault(module, WrapUnit(fqn, module, self.gather_dtypes[fqn.removeprefix("base_model.model.")]))
         return [plan[module] for module in sorted(plan, key=lambda module: -depths[module])]
 
 
