@@ -40,6 +40,8 @@ def test_compile_param_dtype_maps_scopes_fqns():
         model.blocks[1]: {"norm.weight": torch.float32},
     }
     assert compiled.root_map == {"root_scale": torch.float32}
+    assert compiled.override_count == 3
+    assert compiled.override_numel == 9
 
 
 def test_compile_param_dtype_maps_rejects_unmatched_pattern():
@@ -67,6 +69,28 @@ def test_compile_param_dtype_maps_rejects_overlap():
         )
 
 
+def test_compile_param_dtype_maps_rejects_unsupported_dtype():
+    model = Model()
+    with pytest.raises(ValueError, match="Unsupported dtype 'float8'"):
+        compile_param_dtype_maps(
+            model,
+            list(model.blocks),
+            {"root_scale": "float8"},
+            torch.bfloat16,
+        )
+
+
+def test_compile_param_dtype_maps_rejects_overlapping_wrap_modules():
+    model = Model()
+    with pytest.raises(ValueError, match="FSDP wrap modules overlap"):
+        compile_param_dtype_maps(
+            model,
+            [model.blocks, model.blocks[0]],
+            {"blocks.0.norm.weight": "fp32"},
+            torch.bfloat16,
+        )
+
+
 def test_compile_param_dtype_maps_omits_default_dtype():
     model = Model()
     compiled = compile_param_dtype_maps(
@@ -78,6 +102,8 @@ def test_compile_param_dtype_maps_omits_default_dtype():
 
     assert compiled.module_maps == {}
     assert compiled.root_map == {}
+    assert compiled.override_count == 0
+    assert compiled.override_numel == 0
 
 
 def test_compile_param_dtype_maps_canonicalizes_shared_parameter_alias():

@@ -26,10 +26,6 @@ on:
     paths:
       - 'docker/Dockerfile'
       - 'requirements.txt'
-      - 'miles/backends/fsdp_utils/actor.py'
-      - 'miles/backends/fsdp_utils/configs/**'
-      - 'miles/backends/fsdp_utils/fsdp_param_dtype_patch.py'
-      - 'miles/backends/fsdp_utils/mixed_precision.py'
 
 concurrency:
   group: docker-build
