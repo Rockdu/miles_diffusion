@@ -2,8 +2,9 @@
 
 Onboarding a model family:
 
-- **Diffusers checkpoint** (has ``model_index.json``): nothing to do here.
-  ``DiffusersModelBackend`` loads it; write only a ``configs/<family>.py``.
+- **Diffusers checkpoint** (has ``model_index.json``):
+  ``DiffusersModelBackend`` loads it; add
+  ``models/diffusers/<family>/parallel_plan.py`` for its FSDP precision plan.
 
 - **Native modeling** (official repo code, non-diffusers checkpoint): add a
   package ``models/<family>/`` with at least:
@@ -12,7 +13,7 @@ Onboarding a model family:
   - ``modeling.py`` — ``load_scheduler``, ``enable_gradient_checkpointing``,
     optional ``flash_attention_entrypoints`` /
     ``required_flash_kernel_label`` for deterministic flash patching
-  - ``parallel_plan.py`` — ``FSDP_NO_SPLIT_MODULES``,
+  - ``parallel_plan.py`` — ``FSDP_PARALLEL_PLAN``,
     ``sequence_parallel_plan``
   - ``attention.py`` — ``set_attention_backend``
 

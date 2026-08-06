@@ -14,6 +14,14 @@ class _LTXConfig:
 
 
 class TestLTXPackage:
+    def test_fsdp_parallel_plan(self):
+        plan = MilesModelBackend(_LTXConfig()).fsdp_parallel_plan(
+            torch.nn.Linear(2, 2)
+        )
+
+        assert plan.no_split_modules == ("BasicAVTransformerBlock",)
+        assert plan.param_dtype_patterns == {}
+
     def test_component_loading_delegates_to_loading_module(self, monkeypatch):
         backend = MilesModelBackend(_LTXConfig())
         sentinel = object()

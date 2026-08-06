@@ -26,7 +26,9 @@ def register_train_pipeline_config(family: str):
     """Decorator: register a TrainPipelineConfig subclass under a family key (``sd3``, ``wan``, ...)."""
 
     def wrapper(cls):
-        _REGISTRY[family.lower()] = cls
+        model_family = family.lower()
+        cls.model_family = model_family
+        _REGISTRY[model_family] = cls
         return cls
 
     return wrapper
@@ -74,8 +76,8 @@ def get_train_pipeline_config_cls(family: str) -> type[TrainPipelineConfig]:
 class TrainPipelineConfig(abc.ABC):
     """Base class. Subclass per model family."""
 
+    model_family: str | None = None
     lora_target_modules: list[str] = ["to_q", "to_k", "to_v", "to_out.0"]
-    fsdp_param_dtype_patterns: dict[str, str] = {}
     needs_timestep_scaling: bool = True
     optimizer_state_allowed_missing: list[str] = []
     # Case-insensitive substrings matched against the checkpoint name (--diffusion-model).

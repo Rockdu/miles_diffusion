@@ -6,7 +6,7 @@ concrete modeling rather than of the training loop:
 
   - ``load_component`` / ``load_scheduler``: checkpoint -> model components and scheduler
   - ``enable_gradient_checkpointing``: how this model turns on grad ckpt
-  - ``fsdp_no_split_modules``: which block classes FSDP wraps
+  - ``fsdp_parallel_plan``: FSDP wrapping and parameter precision policy
   - ``sequence_parallel_plan`` / ``install_sequence_parallel_attention``:
     the model's SP declaration and attention integration
 
@@ -21,11 +21,13 @@ import abc
 import functools
 import importlib
 import logging
+from dataclasses import replace
 from typing import Any
 
 import torch
 from diffusers import DiffusionPipeline
 
+from .models.parallel_plan import FSDPParallelPlan
 from .sequence_parallel.diffusers_dispatch import install_diffusers_usp_patch
 from .sequence_parallel.plan import MILES_SP_PLAN_ATTR, SequenceParallelPlan
 
@@ -62,8 +64,14 @@ class BaseModelBackend(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def fsdp_no_split_modules(self, model: torch.nn.Module) -> list[str]:
+    def fsdp_parallel_plan(self, model: torch.nn.Module) -> FSDPParallelPlan:
         raise NotImplementedError
+
+    def fsdp_no_split_modules(self, model: torch.nn.Module) -> list[str]:
+        no_split_modules = self.fsdp_parallel_plan(model).no_split_modules
+        if no_split_modules is None:
+            raise ValueError("FSDP parallel plan declares no no-split modules")
+        return list(no_split_modules)
 
     @abc.abstractmethod
     def set_attention_backend(self, model: torch.nn.Module, backend: str) -> None:
@@ -123,8 +131,8 @@ class MilesModelBackend(BaseModelBackend):
     def enable_gradient_checkpointing(self, model: torch.nn.Module) -> None:
         self._pkg.modeling.enable_gradient_checkpointing(model)
 
-    def fsdp_no_split_modules(self, model: torch.nn.Module) -> list[str]:
-        return list(self._pkg.parallel_plan.FSDP_NO_SPLIT_MODULES)
+    def fsdp_parallel_plan(self, model: torch.nn.Module) -> FSDPParallelPlan:
+        return self._pkg.parallel_plan.FSDP_PARALLEL_PLAN
 
     def set_attention_backend(self, model: torch.nn.Module, backend: str) -> None:
         self._pkg.attention.set_attention_backend(model, backend)
@@ -153,11 +161,21 @@ class DiffusersModelBackend(BaseModelBackend):
     def enable_gradient_checkpointing(self, model: torch.nn.Module) -> None:
         model.enable_gradient_checkpointing()
 
-    def fsdp_no_split_modules(self, model: torch.nn.Module) -> list[str]:
+    def fsdp_parallel_plan(self, model: torch.nn.Module) -> FSDPParallelPlan:
+        if self.config is not None and self.config.model_family is not None:
+            from .models.diffusers import load_fsdp_parallel_plan
+
+            plan = load_fsdp_parallel_plan(self.config.model_family)
+        else:
+            plan = FSDPParallelPlan()
+        if plan.no_split_modules is not None:
+            return plan
         no_split_modules = getattr(model, "_no_split_modules", None)
         if not no_split_modules:
-            raise ValueError(f"{model.__class__.__name__} declares no _no_split_modules for FSDP wrapping")
-        return list(no_split_modules)
+            raise ValueError(
+                f"{model.__class__.__name__} declares no _no_split_modules for FSDP wrapping"
+            )
+        return replace(plan, no_split_modules=tuple(no_split_modules))
 
     def install_sequence_parallel_attention(self, model: torch.nn.Module, parallel_state) -> None:
         install_diffusers_usp_patch(model, parallel_state)
