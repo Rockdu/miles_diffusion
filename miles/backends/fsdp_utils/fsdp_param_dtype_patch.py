@@ -109,8 +109,22 @@ def _patched_param_group_init(
         return
 
     # MILES_PATCH_UPSTREAM_BEGIN: fsdp-param-dtype-map
-    # Upstream forwards one group-wide mixed-precision policy to every
-    # FSDPParam without resolving per-parameter dtype overrides.
+    # self.modules = modules  # permit ref cycle because 1:1 lifetime
+    # param_module_infos = _get_param_module_infos(params, modules)
+    #
+    # self.fsdp_params = [
+    #     FSDPParam(
+    #         param,
+    #         module_info,
+    #         mesh_info,
+    #         post_forward_mesh_info,
+    #         device,
+    #         shard_placement_fn,
+    #         mp_policy,
+    #         offload_policy,
+    #     )
+    #     for param, module_info in zip(params, param_module_infos)
+    # ]
     # MILES_PATCH_UPSTREAM_END: fsdp-param-dtype-map
     # MILES_PATCH_REPLACEMENT_BEGIN: fsdp-param-dtype-map
     managed_params = set(params)
@@ -141,7 +155,6 @@ def _patched_param_group_init(
     }
     if len(effective_dtypes) > 1 and mp_policy.reduce_dtype is None:
         raise ValueError("Mixed parameter dtypes require an explicit reduce_dtype")
-    # MILES_PATCH_REPLACEMENT_END: fsdp-param-dtype-map
 
     _ORIGINAL_PARAM_GROUP_INIT(
         self,
@@ -155,10 +168,6 @@ def _patched_param_group_init(
         offload_policy,
     )
 
-    # MILES_PATCH_UPSTREAM_BEGIN: fsdp-param-dtype-map
-    # self.fsdp_params keeps the same group-wide mp_policy after construction.
-    # MILES_PATCH_UPSTREAM_END: fsdp-param-dtype-map
-    # MILES_PATCH_REPLACEMENT_BEGIN: fsdp-param-dtype-map
     for fsdp_param, param in zip(self.fsdp_params, params, strict=True):
         override = param_overrides.get(param)
         fsdp_param._param_dtype_override = override
