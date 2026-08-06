@@ -135,26 +135,32 @@ def test_policy_validation():
 
 
 def test_standard_policy_delegation():
-    torch.manual_seed(40)
-    model = nn.Linear(8, 8, bias=False).cuda()
-    ref_model = copy.deepcopy(model).to(torch.bfloat16)
-    fully_shard(
-        model,
-        mp_policy=MixedPrecisionPolicy(
+    policies = (
+        MixedPrecisionPolicy(
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
         ),
+        fsdp_param_dtype_patch.ParamDtypeMixedPrecisionPolicy(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            param_dtype_map={},
+        ),
     )
-    inp = torch.randn(3, 8, device="cuda")
-    output = model(inp)
-    ref_output = ref_model(inp.to(torch.bfloat16))
-    torch.testing.assert_close(output, ref_output)
-    output.sum().backward()
-    ref_output.sum().backward()
-    torch.testing.assert_close(
-        model.weight.grad.full_tensor(),
-        ref_model.weight.grad.to(torch.float32),
-    )
+    for policy in policies:
+        torch.manual_seed(40)
+        model = nn.Linear(8, 8, bias=False).cuda()
+        ref_model = copy.deepcopy(model).to(torch.bfloat16)
+        fully_shard(model, mp_policy=policy)
+        inp = torch.randn(3, 8, device="cuda")
+        output = model(inp)
+        ref_output = ref_model(inp.to(torch.bfloat16))
+        torch.testing.assert_close(output, ref_output)
+        output.sum().backward()
+        ref_output.sum().backward()
+        torch.testing.assert_close(
+            model.weight.grad.full_tensor(),
+            ref_model.weight.grad.to(torch.float32),
+        )
 
 
 def test_apply_fsdp2_integration():

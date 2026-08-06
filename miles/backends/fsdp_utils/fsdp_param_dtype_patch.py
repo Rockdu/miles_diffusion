@@ -94,7 +94,7 @@ def _patched_param_group_init(
         if isinstance(mp_policy, ParamDtypeMixedPrecisionPolicy)
         else None
     )
-    if param_dtype_map is None:
+    if not param_dtype_map:
         _ORIGINAL_PARAM_GROUP_INIT(
             self,
             params,
@@ -108,7 +108,11 @@ def _patched_param_group_init(
         )
         return
 
-    # MILES_PATCH_BEGIN: fsdp-param-dtype-map
+    # MILES_PATCH_UPSTREAM_BEGIN: fsdp-param-dtype-map
+    # Upstream forwards one group-wide mixed-precision policy to every
+    # FSDPParam without resolving per-parameter dtype overrides.
+    # MILES_PATCH_UPSTREAM_END: fsdp-param-dtype-map
+    # MILES_PATCH_REPLACEMENT_BEGIN: fsdp-param-dtype-map
     managed_params = set(params)
     fqn_to_param: dict[str, nn.Parameter] = {}
     for module in modules:
@@ -137,7 +141,7 @@ def _patched_param_group_init(
     }
     if len(effective_dtypes) > 1 and mp_policy.reduce_dtype is None:
         raise ValueError("Mixed parameter dtypes require an explicit reduce_dtype")
-    # MILES_PATCH_END: fsdp-param-dtype-map
+    # MILES_PATCH_REPLACEMENT_END: fsdp-param-dtype-map
 
     _ORIGINAL_PARAM_GROUP_INIT(
         self,
@@ -151,7 +155,10 @@ def _patched_param_group_init(
         offload_policy,
     )
 
-    # MILES_PATCH_BEGIN: fsdp-param-dtype-map
+    # MILES_PATCH_UPSTREAM_BEGIN: fsdp-param-dtype-map
+    # self.fsdp_params keeps the same group-wide mp_policy after construction.
+    # MILES_PATCH_UPSTREAM_END: fsdp-param-dtype-map
+    # MILES_PATCH_REPLACEMENT_BEGIN: fsdp-param-dtype-map
     for fsdp_param, param in zip(self.fsdp_params, params, strict=True):
         override = param_overrides.get(param)
         fsdp_param._param_dtype_override = override
@@ -163,18 +170,31 @@ def _patched_param_group_init(
             param_dtype=effective_param_dtype,
             param_dtype_map=None,
         )
-    # MILES_PATCH_END: fsdp-param-dtype-map
+    # MILES_PATCH_REPLACEMENT_END: fsdp-param-dtype-map
 
 
 def _patched_init_dtype_attrs(
     self: FSDPParam,
     mp_policy: TorchMixedPrecisionPolicy,
 ) -> None:
-    if not isinstance(mp_policy, ParamDtypeMixedPrecisionPolicy):
+    if (
+        not isinstance(mp_policy, ParamDtypeMixedPrecisionPolicy)
+        or not mp_policy.param_dtype_map
+    ):
         _ORIGINAL_INIT_DTYPE_ATTRS(self, mp_policy)
         return
 
-    # MILES_PATCH_BEGIN: fsdp-param-dtype-map
+    # MILES_PATCH_UPSTREAM_BEGIN: fsdp-param-dtype-map
+    # param_dtype, reduce_dtype = (mp_policy.param_dtype, mp_policy.reduce_dtype)
+    # self.orig_dtype = self.sharded_param.dtype
+    # if reduce_dtype == param_dtype:
+    #     reduce_dtype = None
+    # if param_dtype == self.orig_dtype:
+    #     param_dtype = None
+    # self.param_dtype = param_dtype
+    # self.reduce_dtype = reduce_dtype
+    # MILES_PATCH_UPSTREAM_END: fsdp-param-dtype-map
+    # MILES_PATCH_REPLACEMENT_BEGIN: fsdp-param-dtype-map
     param_dtype = (
         self._param_dtype_override
         if self._param_dtype_override is not None
@@ -188,7 +208,7 @@ def _patched_init_dtype_attrs(
         param_dtype = None
     self.param_dtype = param_dtype
     self.reduce_dtype = reduce_dtype
-    # MILES_PATCH_END: fsdp-param-dtype-map
+    # MILES_PATCH_REPLACEMENT_END: fsdp-param-dtype-map
 
 
 # Copied from PyTorch v2.11.0 at 70d99e998b4955e0049d13a98d77ae1b14db1f45.
@@ -209,7 +229,42 @@ def _patched_get_param_all_gather_inputs(
         )
 
     param_all_gather_inputs: list[list[torch.Tensor]] = [[] for _ in fsdp_params]
-    # MILES_PATCH_BEGIN: fsdp-param-dtype-map
+    # MILES_PATCH_UPSTREAM_BEGIN: fsdp-param-dtype-map
+    # foreach_copy_indices: list[int] = []
+    # foreach_copy_inputs: list[torch.Tensor] = []
+    # foreach_copy_input_numels: list[int] = []
+    #
+    # for i, fsdp_param in enumerate(fsdp_params):
+    #     if use_foreach_copy(fsdp_param):
+    #         foreach_copy_indices.append(i)
+    #         all_gather_input = (
+    #             fsdp_param._sharded_param_data
+    #             if fsdp_param.sharded_state == ShardedState.SHARDED
+    #             else cast(
+    #                 torch.Tensor, fsdp_param._sharded_post_forward_param_data
+    #             )
+    #         )
+    #         foreach_copy_inputs.append(all_gather_input)
+    #         foreach_copy_input_numels.append(all_gather_input.numel())
+    #     else:
+    #         param_all_gather_inputs[i] = fsdp_param.all_gather_inputs
+    #
+    # if foreach_copy_inputs:
+    #     fsdp_param_0 = fsdp_params[foreach_copy_indices[0]]
+    #     param_dtype, device = fsdp_param_0.param_dtype, fsdp_param_0.device
+    #     flat_foreach_copy_input = torch.empty(
+    #         (sum(foreach_copy_input_numels),),
+    #         device=device,
+    #         dtype=param_dtype,
+    #     )
+    #     splits = torch.split(
+    #         flat_foreach_copy_input, foreach_copy_input_numels
+    #     )
+    #     torch._foreach_copy_(splits, foreach_copy_inputs)
+    #     for i, split in zip(foreach_copy_indices, splits):
+    #         param_all_gather_inputs[i] = [split]
+    # MILES_PATCH_UPSTREAM_END: fsdp-param-dtype-map
+    # MILES_PATCH_REPLACEMENT_BEGIN: fsdp-param-dtype-map
     foreach_copy_infos: dict[
         torch.dtype, tuple[list[int], list[torch.Tensor], list[int]]
     ] = {}
@@ -243,7 +298,7 @@ def _patched_get_param_all_gather_inputs(
         torch._foreach_copy_(splits, inputs)
         for i, split in zip(indices, splits):
             param_all_gather_inputs[i] = [split]
-    # MILES_PATCH_END: fsdp-param-dtype-map
+    # MILES_PATCH_REPLACEMENT_END: fsdp-param-dtype-map
 
     return param_all_gather_inputs
 
@@ -278,7 +333,19 @@ def _patched_foreach_reduce(
     autograd, so clearing the list frees the gradients.
     """
 
-    # MILES_PATCH_BEGIN: fsdp-param-dtype-map
+    # MILES_PATCH_UPSTREAM_BEGIN: fsdp-param-dtype-map
+    # grad_dtypes = {grad.dtype for grad in unsharded_grads}
+    # if len(grad_dtypes) != 1:
+    #     # Check this at runtime since it could be a real runtime error if e.g.
+    #     # fp8 weights do not produce the correct higher precision gradients
+    #     _raise_assert_with_print(
+    #         "FSDP reduce-scatter expects uniform gradient dtype but got "
+    #         f"{grad_dtypes}"
+    #     )
+    # grad_dtype = unsharded_grads[0].dtype
+    # reduce_dtype = reduce_dtype or grad_dtype
+    # MILES_PATCH_UPSTREAM_END: fsdp-param-dtype-map
+    # MILES_PATCH_REPLACEMENT_BEGIN: fsdp-param-dtype-map
     grad_dtypes = {grad.dtype for grad in unsharded_grads}
     if reduce_dtype is None and len(grad_dtypes) != 1:
         _raise_assert_with_print(
@@ -286,7 +353,7 @@ def _patched_foreach_reduce(
             f"gradient dtypes but got {grad_dtypes}"
         )
     reduce_dtype = reduce_dtype or unsharded_grads[0].dtype
-    # MILES_PATCH_END: fsdp-param-dtype-map
+    # MILES_PATCH_REPLACEMENT_END: fsdp-param-dtype-map
     (predivide_factor, postdivide_factor, reduce_scatter_op, all_reduce_op) = (
         _get_gradient_divide_factors(
             reduce_scatter_group,
@@ -487,7 +554,15 @@ def _patched_foreach_reduce_scatter_copy_in(
     world_size: int,
 ) -> None:
     reduce_scatter_input = reduce_scatter_input.view(world_size, -1)
-    # MILES_PATCH_BEGIN: fsdp-param-dtype-map
+    # MILES_PATCH_UPSTREAM_BEGIN: fsdp-param-dtype-map
+    # torch.ops.fsdp.chunk_cat(
+    #     unsharded_grads,
+    #     dim=0,
+    #     num_chunks=world_size,
+    #     out=reduce_scatter_input,
+    # )
+    # MILES_PATCH_UPSTREAM_END: fsdp-param-dtype-map
+    # MILES_PATCH_REPLACEMENT_BEGIN: fsdp-param-dtype-map
     if len({grad.dtype for grad in unsharded_grads}) == 1:
         torch.ops.fsdp.chunk_cat(
             unsharded_grads,
@@ -534,7 +609,7 @@ def _patched_foreach_reduce_scatter_copy_in(
         torch._foreach_copy_(destinations, sources)
     if padding_views:
         torch._foreach_zero_(padding_views)
-    # MILES_PATCH_END: fsdp-param-dtype-map
+    # MILES_PATCH_REPLACEMENT_END: fsdp-param-dtype-map
 
 
 def apply_param_dtype_map_patch() -> None:
