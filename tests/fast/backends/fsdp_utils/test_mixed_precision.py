@@ -1,0 +1,94 @@
+from tests.ci.ci_register import register_cpu_ci
+
+register_cpu_ci(est_time=5, suite="stage-a-cpu", labels=["fsdp"])
+
+import pytest
+import torch
+from torch import nn
+
+from miles.backends.fsdp_utils.mixed_precision import compile_param_dtype_maps
+
+
+class Block(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(4, 4)
+        self.norm = nn.LayerNorm(4)
+
+
+class Model(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.root_scale = nn.Parameter(torch.ones(1))
+        self.blocks = nn.ModuleList([Block(), Block()])
+
+
+def test_compile_param_dtype_maps_scopes_fqns():
+    model = Model()
+    compiled = compile_param_dtype_maps(
+        model,
+        list(model.blocks),
+        {
+            "blocks.*.norm.weight": "fp32",
+            "root_scale": "fp32",
+        },
+        torch.bfloat16,
+    )
+
+    assert compiled.module_maps == {
+        model.blocks[0]: {"norm.weight": torch.float32},
+        model.blocks[1]: {"norm.weight": torch.float32},
+    }
+    assert compiled.root_map == {"root_scale": torch.float32}
+
+
+def test_compile_param_dtype_maps_rejects_unmatched_pattern():
+    model = Model()
+    with pytest.raises(ValueError, match="did not match any parameter"):
+        compile_param_dtype_maps(
+            model,
+            list(model.blocks),
+            {"blocks.*.missing": "fp32"},
+            torch.bfloat16,
+        )
+
+
+def test_compile_param_dtype_maps_rejects_overlap():
+    model = Model()
+    with pytest.raises(ValueError, match="matches both"):
+        compile_param_dtype_maps(
+            model,
+            list(model.blocks),
+            {
+                "blocks.*.norm.weight": "fp32",
+                "*.0.norm.weight": "fp32",
+            },
+            torch.bfloat16,
+        )
+
+
+def test_compile_param_dtype_maps_omits_default_dtype():
+    model = Model()
+    compiled = compile_param_dtype_maps(
+        model,
+        list(model.blocks),
+        {"blocks.*.norm.weight": "bf16"},
+        torch.bfloat16,
+    )
+
+    assert compiled.module_maps == {}
+    assert compiled.root_map == {}
+
+
+def test_compile_param_dtype_maps_canonicalizes_shared_parameter_alias():
+    model = nn.Module()
+    model.shared = nn.Linear(4, 4, bias=False)
+    model.alias = model.shared
+    compiled = compile_param_dtype_maps(
+        model,
+        [],
+        {"alias.weight": "fp32"},
+        torch.bfloat16,
+    )
+
+    assert compiled.root_map == {"shared.weight": torch.float32}

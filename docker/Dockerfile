@@ -1,6 +1,9 @@
 ARG SGLANG_IMAGE_TAG=v0.5.12-cu129
 FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG} AS sglang
 
+ARG TORCH_VERSION=2.11.0+cu129
+RUN python -c "import torch; assert torch.__version__ == '${TORCH_VERSION}', f'expected torch ${TORCH_VERSION}, got {torch.__version__}'"
+
 # ======================================== Setup =============================================
 
 WORKDIR /root/
