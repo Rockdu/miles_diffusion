@@ -28,7 +28,7 @@ from torch.distributed.fsdp._fully_shard._fsdp_param_group import FSDPParamGroup
 from torch.distributed.tensor import DTensor
 
 
-_EXPECTED_TORCH_VERSION = "2.11.0+cu129"
+_EXPECTED_TORCH_VERSION = "2.11.0"
 _PATCH_SENTINEL = "_miles_param_dtype_map_patch_applied"
 _SOURCE_HASHES = {
     "FSDPParam.init_dtype_attrs": "2cc968770804055cdde959db7cfa47b92a1137badcdaf2e448555741c2fd282c",
@@ -540,7 +540,8 @@ def _patched_foreach_reduce_scatter_copy_in(
 def apply_param_dtype_map_patch() -> None:
     if getattr(_fsdp_collectives, _PATCH_SENTINEL, False):
         return
-    if torch.__version__ != _EXPECTED_TORCH_VERSION:
+    torch_version = torch.__version__.partition("+")[0]
+    if torch_version != _EXPECTED_TORCH_VERSION:
         raise RuntimeError(
             "The Miles FSDP param-dtype patch requires "
             f"torch=={_EXPECTED_TORCH_VERSION}, got {torch.__version__}"

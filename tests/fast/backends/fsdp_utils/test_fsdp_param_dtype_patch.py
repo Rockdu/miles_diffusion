@@ -14,13 +14,9 @@ def test_patch_rejects_unpinned_torch(monkeypatch):
         fsdp_param_dtype_patch._PATCH_SENTINEL,
         raising=False,
     )
-    monkeypatch.setattr(
-        fsdp_param_dtype_patch,
-        "_EXPECTED_TORCH_VERSION",
-        "unsupported-version",
-    )
+    monkeypatch.setattr(torch, "__version__", "2.12.0+cu130")
 
-    with pytest.raises(RuntimeError, match="requires torch==unsupported-version"):
+    with pytest.raises(RuntimeError, match="requires torch==2.11.0"):
         fsdp_param_dtype_patch.apply_param_dtype_map_patch()
 
 
@@ -30,11 +26,7 @@ def test_patch_rejects_source_drift(monkeypatch):
         fsdp_param_dtype_patch._PATCH_SENTINEL,
         raising=False,
     )
-    monkeypatch.setattr(
-        fsdp_param_dtype_patch,
-        "_EXPECTED_TORCH_VERSION",
-        torch.__version__,
-    )
+    monkeypatch.setattr(torch, "__version__", "2.11.0+cu130")
     monkeypatch.setitem(
         fsdp_param_dtype_patch._SOURCE_HASHES,
         "FSDPParamGroup.__init__",
