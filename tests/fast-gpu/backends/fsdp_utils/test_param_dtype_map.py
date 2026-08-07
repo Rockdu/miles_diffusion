@@ -17,6 +17,9 @@ import pytest
 
 
 _E2E_WORKER = Path(__file__).with_name("_param_dtype_map_worker.py")
+_ADVERSARIAL_WORKER = Path(__file__).with_name(
+    "_param_dtype_map_adversarial_worker.py"
+)
 _VALIDATION_WORKER = Path(__file__).with_name(
     "_param_dtype_map_validation_worker.py"
 )
@@ -48,6 +51,17 @@ def _run_worker(worker, *args):
 
 def test_param_dtype_map_full_size_blocks():
     _run_worker(_E2E_WORKER)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "fully-shard-prime-dtype-zoo",
+        "hybrid-grouped-prime-dtype-zoo",
+    ],
+)
+def test_param_dtype_map_adversarial(case):
+    _run_worker(_ADVERSARIAL_WORKER, case)
 
 
 @pytest.mark.parametrize(
