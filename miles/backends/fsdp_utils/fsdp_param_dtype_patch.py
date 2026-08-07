@@ -1,3 +1,5 @@
+"""Source-guarded FSDP param-dtype-map monkeypatch for PyTorch 2.11 only."""
+
 from __future__ import annotations
 
 import hashlib
