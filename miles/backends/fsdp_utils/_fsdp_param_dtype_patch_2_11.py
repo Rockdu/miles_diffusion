@@ -136,7 +136,7 @@ def _resolve_param_dtype_map(
             f"by this fully_shard call: {unknown_fqns}"
         )
     return resolved_map
-# ============================ END MILES PATCH ================================
+    # ============================ END MILES PATCH ================================
 
 
 # Copied from PyTorch v2.11.0 at 70d99e998b4955e0049d13a98d77ae1b14db1f45.
@@ -163,7 +163,7 @@ def _patched_init_param_group(
     # +++++++++++++++++++++++++++++++++ MILES +++++++++++++++++++++++++++++++++++++++
     if params:
         param_dtype_map = _resolve_param_dtype_map(mp_policy, modules, params)
-    # ============================ END MILES PATCH ================================
+        # ============================ END MILES PATCH ================================
 
         state._fsdp_param_group = FSDPParamGroup(
             params,
