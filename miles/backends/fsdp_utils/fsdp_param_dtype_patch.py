@@ -21,10 +21,7 @@ def apply_param_dtype_map_patch() -> None:
 
         apply_torch_2_11_patch()
         return
-    raise RuntimeError(
-        "The Miles FSDP param-dtype patch supports torch==2.11.0, "
-        f"got {torch.__version__}"
-    )
+    raise RuntimeError("The Miles FSDP param-dtype patch supports torch==2.11.0, " f"got {torch.__version__}")
 
 
 __all__ = [

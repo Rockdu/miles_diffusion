@@ -11,9 +11,7 @@ from miles.backends.fsdp_utils import fsdp_param_dtype_patch
 
 
 def test_patch_rejects_unpinned_torch(monkeypatch):
-    implementation_module = (
-        "miles.backends.fsdp_utils._fsdp_param_dtype_patch_2_11"
-    )
+    implementation_module = "miles.backends.fsdp_utils._fsdp_param_dtype_patch_2_11"
     monkeypatch.delitem(sys.modules, implementation_module, raising=False)
     monkeypatch.setattr(torch, "__version__", "2.12.0+cu130")
 

@@ -12,9 +12,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 import torch
 import torch.distributed as dist
-from miles.backends.fsdp_utils.fsdp_param_dtype_patch import (
-    ParamDtypeMixedPrecisionPolicy,
-)
 from torch import nn
 from torch.distributed.fsdp import MixedPrecisionPolicy as TorchMixedPrecisionPolicy
 from torch.distributed.fsdp._fully_shard import _fsdp_collectives, _fsdp_init, _fsdp_param_group, _fully_shard
@@ -42,6 +39,8 @@ from torch.distributed.fsdp._fully_shard._fsdp_param_group import (
     _ModuleToHandleDict,
 )
 from torch.distributed.tensor import DTensor, Shard
+
+from miles.backends.fsdp_utils.fsdp_param_dtype_patch import ParamDtypeMixedPrecisionPolicy
 
 if TYPE_CHECKING:
     from torch.distributed.fsdp._fully_shard._fsdp_collectives import (
