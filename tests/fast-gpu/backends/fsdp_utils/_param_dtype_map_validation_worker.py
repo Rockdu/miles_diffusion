@@ -48,6 +48,16 @@ class DtypeProbeStack(nn.Module):
         return sum(layer(x) for layer in self.layers)
 
 
+class SharedAliasModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.first = nn.Module()
+        self.second = nn.Module()
+        shared_param = nn.Parameter(torch.randn(8, device="cuda"))
+        self.first.register_parameter("weight", shared_param)
+        self.second.register_parameter("weight", shared_param)
+
+
 def _policy(param_dtype_map, reduce_dtype=torch.float32):
     return fsdp_param_dtype_patch.ParamDtypeMixedPrecisionPolicy(
         param_dtype=torch.bfloat16,
@@ -107,20 +117,29 @@ def test_same_fqn_for_shared_parameter():
     )
 
 
+def test_shared_parameter_aliases_same_dtype():
+    model = SharedAliasModel()
+    fully_shard(
+        model,
+        mp_policy=_policy(
+            {
+                "first.weight": torch.float32,
+                "second.weight": torch.float32,
+            }
+        ),
+    )
+
+
 def test_shared_parameter_alias_dtype_conflict():
-    shared_param = nn.Parameter(torch.randn(8, device="cuda"))
-    first = nn.Module()
-    first.register_parameter("first", shared_param)
-    second = nn.Module()
-    second.register_parameter("second", shared_param)
+    model = SharedAliasModel()
     _assert_value_error(
         "conflicting dtypes to shared parameter aliases",
         lambda: fully_shard(
-            [first, second],
+            model,
             mp_policy=_policy(
                 {
-                    "first": torch.float32,
-                    "second": torch.bfloat16,
+                    "first.weight": torch.float32,
+                    "second.weight": torch.bfloat16,
                 }
             ),
         ),
@@ -265,6 +284,7 @@ TEST_CASES = {
     "duplicate-multi-module-fqn": test_duplicate_multi_module_fqn_broadcasts,
     "same-fqn-separate-wraps": test_same_fqn_in_separate_wraps,
     "same-fqn-shared-parameter": test_same_fqn_for_shared_parameter,
+    "shared-parameter-aliases-same-dtype": test_shared_parameter_aliases_same_dtype,
     "shared-parameter-alias-conflict": test_shared_parameter_alias_dtype_conflict,
     "unknown-fqn": test_unknown_fqn,
     "mixed-requires-reduce-dtype": (test_mixed_trainable_dtypes_require_reduce_dtype),
