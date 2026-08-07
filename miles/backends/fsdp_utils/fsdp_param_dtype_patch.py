@@ -13,8 +13,10 @@ import torch.distributed as dist
 from torch import nn
 from torch.distributed.fsdp import MixedPrecisionPolicy as TorchMixedPrecisionPolicy
 from torch.distributed.fsdp._fully_shard import _fsdp_collectives, _fsdp_param_group
-from torch.distributed.fsdp._fully_shard._fsdp_api import ReduceScatter
+from torch.distributed.fsdp._fully_shard._fsdp_api import OffloadPolicy, ReduceScatter
 from torch.distributed.fsdp._fully_shard._fsdp_collectives import (
+    AllGather,
+    AllGatherResult,
     _div_if_needed,
     _get_device_handle,
     _get_dim0_padded_size,
@@ -23,14 +25,28 @@ from torch.distributed.fsdp._fully_shard._fsdp_collectives import (
     _to_dtype_if_needed,
     compiled_autograd_enabled,
 )
+from torch.distributed.fsdp._fully_shard._fsdp_common import (
+    DataParallelMeshInfo,
+    FSDPMeshInfo,
+)
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam, ShardedState
-from torch.distributed.fsdp._fully_shard._fsdp_param_group import FSDPParamGroup
-from torch.distributed.tensor import DTensor
+from torch.distributed.fsdp._fully_shard._fsdp_param_group import (
+    _get_param_module_infos,
+    _ModuleToHandleDict,
+    AllReduceState,
+    DefaultAllGather,
+    DefaultReduceScatter,
+    FSDPCommContext,
+    FSDPParamGroup,
+    TrainingState,
+)
+from torch.distributed.tensor import DTensor, Shard
 
 
 _EXPECTED_TORCH_VERSION = "2.11.0"
 _PATCH_SENTINEL = "_miles_param_dtype_map_patch_applied"
 _SOURCE_HASHES = {
+    "FSDPParam.__init__": "5973449ece76930fa71e8d8d2aa43b481660bcd79b1b40fa9556b686664a9466",
     "FSDPParam.init_dtype_attrs": "2cc968770804055cdde959db7cfa47b92a1137badcdaf2e448555741c2fd282c",
     "FSDPParamGroup.__init__": "323868f31033bb5696eaf30f278838901c0d6b7e0da031c517177707b716409b",
     "_get_param_all_gather_inputs": "a70fbae57b8aa3dc669d01a409d30c74428546bc4d69635a90cffe9380a5785f",
@@ -38,6 +54,7 @@ _SOURCE_HASHES = {
     "foreach_reduce_scatter_copy_in": "559a065467abbaa578f348bd6a8c6478cfc8ee516e602227b795bc3f6727eb22",
 }
 
+_ORIGINAL_PARAM_INIT = FSDPParam.__init__
 _ORIGINAL_PARAM_GROUP_INIT = FSDPParamGroup.__init__
 _ORIGINAL_INIT_DTYPE_ATTRS = FSDPParam.init_dtype_attrs
 _ORIGINAL_GET_PARAM_ALL_GATHER_INPUTS = _fsdp_collectives._get_param_all_gather_inputs
@@ -78,40 +95,22 @@ def _bind_to_collectives(fn, name: str, *, no_grad: bool):
     return torch.no_grad()(bound) if no_grad else bound
 
 
+# Copied from PyTorch v2.11.0 at 70d99e998b4955e0049d13a98d77ae1b14db1f45.
 def _patched_param_group_init(
     self,
     params: list[nn.Parameter],
     modules: tuple[nn.Module, ...],
-    mesh_info,
-    post_forward_mesh_info,
+    mesh_info: DataParallelMeshInfo,
+    post_forward_mesh_info: FSDPMeshInfo | None,
     device: torch.device,
-    shard_placement_fn,
+    shard_placement_fn: Callable[[nn.Parameter], Shard | None] | None,
     mp_policy: TorchMixedPrecisionPolicy,
-    offload_policy,
+    offload_policy: OffloadPolicy,
 ) -> None:
-    param_dtype_map = (
-        mp_policy.param_dtype_map
-        if isinstance(mp_policy, ParamDtypeMixedPrecisionPolicy)
-        else None
-    )
-    if not param_dtype_map:
-        _ORIGINAL_PARAM_GROUP_INIT(
-            self,
-            params,
-            modules,
-            mesh_info,
-            post_forward_mesh_info,
-            device,
-            shard_placement_fn,
-            mp_policy,
-            offload_policy,
-        )
-        return
+    self.modules = modules  # permit ref cycle because 1:1 lifetime
+    param_module_infos = _get_param_module_infos(params, modules)
 
     # MILES_PATCH_UPSTREAM_BEGIN: fsdp-param-dtype-map
-    # self.modules = modules  # permit ref cycle because 1:1 lifetime
-    # param_module_infos = _get_param_module_infos(params, modules)
-    #
     # self.fsdp_params = [
     #     FSDPParam(
     #         param,
@@ -127,83 +126,173 @@ def _patched_param_group_init(
     # ]
     # MILES_PATCH_UPSTREAM_END: fsdp-param-dtype-map
     # MILES_PATCH_REPLACEMENT_BEGIN: fsdp-param-dtype-map
-    managed_params = set(params)
-    fqn_to_param: dict[str, nn.Parameter] = {}
-    for module in modules:
-        for fqn, param in module.named_parameters():
-            if param not in managed_params:
-                continue
-            previous = fqn_to_param.get(fqn)
-            if previous is not None and previous is not param:
-                raise ValueError(
-                    f"param_dtype_map FQN {fqn!r} is ambiguous across the fully_shard modules"
-                )
-            fqn_to_param[fqn] = param
-    unknown_fqns = sorted(set(param_dtype_map).difference(fqn_to_param))
-    if unknown_fqns:
-        raise ValueError(
-            "param_dtype_map contains FQNs that do not name a parameter managed "
-            f"by this fully_shard call: {unknown_fqns}"
-        )
-    param_overrides = {
-        fqn_to_param[fqn]: dtype for fqn, dtype in param_dtype_map.items()
-    }
-    effective_dtypes = {
-        param_overrides.get(param, mp_policy.param_dtype) or param.dtype
-        for param in params
-        if param.requires_grad
-    }
-    if len(effective_dtypes) > 1 and mp_policy.reduce_dtype is None:
-        raise ValueError("Mixed parameter dtypes require an explicit reduce_dtype")
-
-    _ORIGINAL_PARAM_GROUP_INIT(
-        self,
-        params,
-        modules,
-        mesh_info,
-        post_forward_mesh_info,
-        device,
-        shard_placement_fn,
-        mp_policy,
-        offload_policy,
+    param_dtype_map = (
+        mp_policy.param_dtype_map
+        if isinstance(mp_policy, ParamDtypeMixedPrecisionPolicy)
+        else None
     )
+    param_overrides: dict[nn.Parameter, torch.dtype] = {}
+    if param_dtype_map:
+        managed_params = set(params)
+        fqn_to_param: dict[str, nn.Parameter] = {}
+        for module in modules:
+            for fqn, param in module.named_parameters():
+                if param not in managed_params:
+                    continue
+                previous = fqn_to_param.get(fqn)
+                # A managed FQN must not identify different parameter tensors.
+                if previous is not None and previous is not param:
+                    raise ValueError(
+                        f"param_dtype_map FQN {fqn!r} is ambiguous across the fully_shard modules"
+                    )
+                fqn_to_param[fqn] = param
+        unknown_fqns = sorted(set(param_dtype_map).difference(fqn_to_param))
+        if unknown_fqns:
+            raise ValueError(
+                "param_dtype_map contains FQNs that do not name a parameter managed "
+                f"by this fully_shard call: {unknown_fqns}"
+            )
+        param_overrides = {
+            fqn_to_param[fqn]: dtype for fqn, dtype in param_dtype_map.items()
+        }
+        effective_dtypes = {
+            param_overrides.get(param, mp_policy.param_dtype) or param.dtype
+            for param in params
+            if param.requires_grad
+        }
+        if len(effective_dtypes) > 1 and mp_policy.reduce_dtype is None:
+            raise ValueError(
+                "Mixed parameter dtypes require an explicit reduce_dtype"
+            )
 
-    for fsdp_param, param in zip(self.fsdp_params, params, strict=True):
+    self.fsdp_params = []
+    for param, module_info in zip(params, param_module_infos):
         override = param_overrides.get(param)
+        param_mp_policy = (
+            replace(
+                mp_policy,
+                param_dtype=(
+                    override if override is not None else mp_policy.param_dtype
+                ),
+                param_dtype_map=None,
+            )
+            if param_dtype_map
+            else mp_policy
+        )
+        fsdp_param = FSDPParam(
+            param,
+            module_info,
+            mesh_info,
+            post_forward_mesh_info,
+            device,
+            shard_placement_fn,
+            param_mp_policy,
+            offload_policy,
+        )
         fsdp_param._param_dtype_override = override
-        effective_param_dtype = (
-            override if override is not None else mp_policy.param_dtype
-        )
-        fsdp_param.mp_policy = replace(
-            mp_policy,
-            param_dtype=effective_param_dtype,
-            param_dtype_map=None,
-        )
+        self.fsdp_params.append(fsdp_param)
     # MILES_PATCH_REPLACEMENT_END: fsdp-param-dtype-map
 
+    self.mesh_info = mesh_info
+    self.post_forward_mesh_info = post_forward_mesh_info
+    # pyrefly: ignore [read-only]
+    self.device = device
+    self.device_handle = _get_device_handle(device.type)
+    self.mp_policy = mp_policy
+    self.offload_policy = offload_policy
+    self._training_state = TrainingState.IDLE
+    # Group's sharded state always matches its parameters' sharded states
+    self._sharded_state = ShardedState.SHARDED
+    self._module_fqn: str | None = None  # prefixed from root module
+    # Only consider resetting sharded parameters once in lazy init since it
+    # can incur nontrivial overhead to reset them
+    self._reset_sharded_params: bool = False
 
+    # - Hook state
+    self._module_to_pre_save_state_dict_hook_handle: _ModuleToHandleDict = {}
+    self._module_to_pre_load_state_dict_hook_handle: _ModuleToHandleDict = {}
+    self._all_reduce_hook: Callable[[torch.Tensor], None] | None = None
+    self._all_gather_comm: AllGather = DefaultAllGather()
+    self._all_gather_output = torch.empty(0, device=self.device)
+    self._reduce_scatter_comm: ReduceScatter = DefaultReduceScatter()
+    # Optional stream to run the user-defined all-reduce hook in
+    # Saved here and not in the comm. context because we allow the user to
+    # specify it, possibly at construction time before lazy init
+    self._all_reduce_hook_stream: torch.cuda.Stream | None = None
+
+    # - Communication and communication/computation overlap
+    self.comm_ctx = FSDPCommContext()
+    # Group's indices in the shared post-forward order
+    self._post_forward_indices: list[int] = []
+    # Whether to reduce gradients at all (whether for FSDP or HSDP)
+    self.reduce_grads: bool = True
+    # Whether to all-reduce gradients for HSDP; only used if
+    # `self.reduce_grads` is true, in which case setting this to false
+    # means reduce-scatter but no all-reduce
+    self.all_reduce_grads: bool = True
+    # Whether to reshard parameters after backward (only useful for
+    # gradient accumulation)
+    self.reshard_after_backward: bool = True
+    # Optional custom factor for the gradient reduction op (e.g. to divide
+    # by a factor other than the world size)
+    self.gradient_divide_factor: float | None = None
+    # Whether reduce-scatter and all-reduce should be issued using only
+    # summations, potentially with separate pre-/post-scaling.
+    self.force_sum_reduction_for_comms: bool = False
+    # `async_op` arg used for pre-forward/pre-backward unshard; can be
+    # overridden to only do explicit prefetching and avoid inter-stream
+    # fragmentation from using separate unshard streams
+    self.unshard_async_op: bool = False
+    # Whether to unshard in backward: can be overridden by the user if the
+    # parameters in this group are not needed for backward (e.g. embedding)
+    self.unshard_in_backward: bool = True
+
+    # - CUDA events for stream synchronization
+    # Holds the all-gather output buffer, sync objects, and metadata
+    self._all_gather_result: AllGatherResult | None = None
+    # Holds the reduce-scatter/all-reduce view-out CUDA event that marks the end of
+    # the group's post-backward (e.g. reduce-scatter, all-reduce and div), which
+    # should be waited on at the end of backward
+    self._post_reduce_event: torch.Event | None = None
+    # Holds the reshard-after-forward CUDA event when resharding to a
+    # different world size, which should be waited on in the next unshard
+    self._reshard_after_forward_event: torch.Event | None = None
+
+    # Only for HSDP, if accumulating gradients without all-reduce, save the
+    # partial reduce output (only reduce-scattered but not all-reduced)
+    self._partial_reduce_output: torch.Tensor | None = None
+    # Holds the all-reduce input and all-reduce event to keep it alive
+    # until the end of backward (critical when doing bf16 reduction with
+    # fp32 parameters since the all-reduce input is allocated in the RS
+    # stream and will have no refs to it after being upcast to fp32)
+    self._all_reduce_state: AllReduceState | None = None
+
+
+# Copied from PyTorch v2.11.0 at 70d99e998b4955e0049d13a98d77ae1b14db1f45.
 def _patched_init_dtype_attrs(
     self: FSDPParam,
     mp_policy: TorchMixedPrecisionPolicy,
 ) -> None:
-    if (
-        not isinstance(mp_policy, ParamDtypeMixedPrecisionPolicy)
-        or not mp_policy.param_dtype_map
-    ):
-        _ORIGINAL_INIT_DTYPE_ATTRS(self, mp_policy)
-        return
-
     # MILES_PATCH_UPSTREAM_BEGIN: fsdp-param-dtype-map
     # param_dtype, reduce_dtype = (mp_policy.param_dtype, mp_policy.reduce_dtype)
     # self.orig_dtype = self.sharded_param.dtype
+    # # Clamp `reduce_dtype` to `None` if no casting is required: since
+    # # gradients are computed in `param_dtype`, if `reduce_dtype` matches,
+    # # then we do not need extra casting
     # if reduce_dtype == param_dtype:
     #     reduce_dtype = None
+    # # Clamp `param_dtype` to `None` if no casting is required
     # if param_dtype == self.orig_dtype:
     #     param_dtype = None
     # self.param_dtype = param_dtype
     # self.reduce_dtype = reduce_dtype
+    # # None indicates that the mixed precision is not enabled
     # MILES_PATCH_UPSTREAM_END: fsdp-param-dtype-map
     # MILES_PATCH_REPLACEMENT_BEGIN: fsdp-param-dtype-map
+    has_param_dtype_map = (
+        isinstance(mp_policy, ParamDtypeMixedPrecisionPolicy)
+        and bool(mp_policy.param_dtype_map)
+    )
     param_dtype = (
         self._param_dtype_override
         if self._param_dtype_override is not None
@@ -211,12 +300,18 @@ def _patched_init_dtype_attrs(
     )
     reduce_dtype = mp_policy.reduce_dtype
     self.orig_dtype = self.sharded_param.dtype
-    if mp_policy.param_dtype_map is None and reduce_dtype == param_dtype:
+    # Clamp `reduce_dtype` to `None` if no casting is required: since
+    # gradients are computed in `param_dtype`, if `reduce_dtype` matches,
+    # then we do not need extra casting
+    # Per-parameter mixed dtypes require one explicit group reduce dtype.
+    if not has_param_dtype_map and reduce_dtype == param_dtype:
         reduce_dtype = None
+    # Clamp `param_dtype` to `None` if no casting is required
     if param_dtype == self.orig_dtype:
         param_dtype = None
     self.param_dtype = param_dtype
     self.reduce_dtype = reduce_dtype
+    # None indicates that the mixed precision is not enabled
     # MILES_PATCH_REPLACEMENT_END: fsdp-param-dtype-map
 
 
@@ -243,32 +338,29 @@ def _patched_get_param_all_gather_inputs(
     # foreach_copy_inputs: list[torch.Tensor] = []
     # foreach_copy_input_numels: list[int] = []
     #
+    # # 1st pass: for foreach-copy parameters, get inputs and metadata for the
+    # # foreach copy, and for the others, actually get their all-gather inputs
     # for i, fsdp_param in enumerate(fsdp_params):
     #     if use_foreach_copy(fsdp_param):
     #         foreach_copy_indices.append(i)
     #         all_gather_input = (
     #             fsdp_param._sharded_param_data
     #             if fsdp_param.sharded_state == ShardedState.SHARDED
-    #             else cast(
-    #                 torch.Tensor, fsdp_param._sharded_post_forward_param_data
-    #             )
+    #             else cast(torch.Tensor, fsdp_param._sharded_post_forward_param_data)
     #         )
     #         foreach_copy_inputs.append(all_gather_input)
     #         foreach_copy_input_numels.append(all_gather_input.numel())
     #     else:
     #         param_all_gather_inputs[i] = fsdp_param.all_gather_inputs
     #
+    # # 2nd pass: use foreach copy to compute the remaining all-gather inputs
     # if foreach_copy_inputs:
     #     fsdp_param_0 = fsdp_params[foreach_copy_indices[0]]
     #     param_dtype, device = fsdp_param_0.param_dtype, fsdp_param_0.device
     #     flat_foreach_copy_input = torch.empty(
-    #         (sum(foreach_copy_input_numels),),
-    #         device=device,
-    #         dtype=param_dtype,
+    #         (sum(foreach_copy_input_numels),), device=device, dtype=param_dtype
     #     )
-    #     splits = torch.split(
-    #         flat_foreach_copy_input, foreach_copy_input_numels
-    #     )
+    #     splits = torch.split(flat_foreach_copy_input, foreach_copy_input_numels)
     #     torch._foreach_copy_(splits, foreach_copy_inputs)
     #     for i, split in zip(foreach_copy_indices, splits):
     #         param_all_gather_inputs[i] = [split]
@@ -323,10 +415,10 @@ def _patched_foreach_reduce(
     reduce_dtype: torch.dtype | None,
     device: torch.device,
     gradient_divide_factor: float | None,
-    all_reduce_group: dist.ProcessGroup | None,
+    all_reduce_group: dist.ProcessGroup | None,  # not `None` iff HSDP
     all_reduce_stream: torch.Stream,
     all_reduce_grads: bool,
-    partial_reduce_output: torch.Tensor | None,
+    partial_reduce_output: torch.Tensor | None,  # only used for HSDP
     all_reduce_hook: Callable[[torch.Tensor], None] | None,
     force_sum_reduction_for_comms: bool = False,
 ) -> tuple[
@@ -348,8 +440,7 @@ def _patched_foreach_reduce(
     #     # Check this at runtime since it could be a real runtime error if e.g.
     #     # fp8 weights do not produce the correct higher precision gradients
     #     _raise_assert_with_print(
-    #         "FSDP reduce-scatter expects uniform gradient dtype but got "
-    #         f"{grad_dtypes}"
+    #         f"FSDP reduce-scatter expects uniform gradient dtype but got {grad_dtypes}"
     #     )
     # grad_dtype = unsharded_grads[0].dtype
     # reduce_dtype = reduce_dtype or grad_dtype
@@ -565,10 +656,7 @@ def _patched_foreach_reduce_scatter_copy_in(
     reduce_scatter_input = reduce_scatter_input.view(world_size, -1)
     # MILES_PATCH_UPSTREAM_BEGIN: fsdp-param-dtype-map
     # torch.ops.fsdp.chunk_cat(
-    #     unsharded_grads,
-    #     dim=0,
-    #     num_chunks=world_size,
-    #     out=reduce_scatter_input,
+    #     unsharded_grads, dim=0, num_chunks=world_size, out=reduce_scatter_input
     # )
     # MILES_PATCH_UPSTREAM_END: fsdp-param-dtype-map
     # MILES_PATCH_REPLACEMENT_BEGIN: fsdp-param-dtype-map
@@ -581,6 +669,9 @@ def _patched_foreach_reduce_scatter_copy_in(
         )
         return
 
+    # Pack each parameter's padded rank chunks directly into the rank-major
+    # reduce-scatter input, grouping by source dtype to batch cast-and-copy
+    # without an intermediate buffer.
     copy_infos: dict[
         torch.dtype, tuple[list[torch.Tensor], list[torch.Tensor]]
     ] = {}
@@ -588,7 +679,7 @@ def _patched_foreach_reduce_scatter_copy_in(
     output_offset = 0
     for grad in unsharded_grads:
         chunk_size = math.ceil(grad.size(0) / world_size)
-        trailing_numel = grad.numel() // grad.size(0)
+        trailing_numel = math.prod(grad.shape[1:])
         padded_chunk_numel = chunk_size * trailing_numel
         destinations, sources = copy_infos.setdefault(grad.dtype, ([], []))
         for rank in range(world_size):
@@ -631,8 +722,9 @@ def apply_param_dtype_map_patch() -> None:
             f"torch=={_EXPECTED_TORCH_VERSION}, got {torch.__version__}"
         )
 
-    _verify_source("FSDPParamGroup.__init__", _ORIGINAL_PARAM_GROUP_INIT)
+    _verify_source("FSDPParam.__init__", _ORIGINAL_PARAM_INIT)
     _verify_source("FSDPParam.init_dtype_attrs", _ORIGINAL_INIT_DTYPE_ATTRS)
+    _verify_source("FSDPParamGroup.__init__", _ORIGINAL_PARAM_GROUP_INIT)
     _verify_source(
         "_get_param_all_gather_inputs",
         _ORIGINAL_GET_PARAM_ALL_GATHER_INPUTS,
