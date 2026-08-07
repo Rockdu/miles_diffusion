@@ -21,12 +21,6 @@ def test_patch_rejects_unpinned_torch(monkeypatch):
 
 
 def test_patch_rejects_source_drift(monkeypatch):
-    monkeypatch.delattr(
-        fsdp_param_dtype_patch._fsdp_collectives,
-        fsdp_param_dtype_patch._PATCH_SENTINEL,
-        raising=False,
-    )
-    monkeypatch.setattr(torch, "__version__", "2.11.0+cu130")
     monkeypatch.setitem(
         fsdp_param_dtype_patch._SOURCE_HASHES,
         "FSDPParamGroup.__init__",
@@ -37,7 +31,10 @@ def test_patch_rejects_source_drift(monkeypatch):
         RuntimeError,
         match="source hash for FSDPParamGroup.__init__ changed",
     ):
-        fsdp_param_dtype_patch.apply_param_dtype_map_patch()
+        fsdp_param_dtype_patch._verify_source(
+            "FSDPParamGroup.__init__",
+            fsdp_param_dtype_patch._ORIGINAL_PARAM_GROUP_INIT,
+        )
 
 
 def test_param_dtype_policy_keeps_exact_sparse_map():
