@@ -12,12 +12,7 @@ import torch
 import torch.distributed as dist
 from torch import nn
 from torch.distributed.fsdp import MixedPrecisionPolicy as TorchMixedPrecisionPolicy
-from torch.distributed.fsdp._fully_shard import (
-    _fsdp_collectives,
-    _fsdp_init,
-    _fsdp_param_group,
-    _fully_shard,
-)
+from torch.distributed.fsdp._fully_shard import _fsdp_collectives, _fsdp_init, _fsdp_param_group, _fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_api import OffloadPolicy, ReduceScatter
 from torch.distributed.fsdp._fully_shard._fsdp_collectives import (
     AllGather,
@@ -30,23 +25,19 @@ from torch.distributed.fsdp._fully_shard._fsdp_collectives import (
     _to_dtype_if_needed,
     compiled_autograd_enabled,
 )
-from torch.distributed.fsdp._fully_shard._fsdp_common import (
-    DataParallelMeshInfo,
-    FSDPMeshInfo,
-)
+from torch.distributed.fsdp._fully_shard._fsdp_common import DataParallelMeshInfo, FSDPMeshInfo
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam, ShardedState
 from torch.distributed.fsdp._fully_shard._fsdp_param_group import (
-    _get_param_module_infos,
-    _ModuleToHandleDict,
     AllReduceState,
     DefaultAllGather,
     DefaultReduceScatter,
     FSDPCommContext,
     FSDPParamGroup,
     TrainingState,
+    _get_param_module_infos,
+    _ModuleToHandleDict,
 )
 from torch.distributed.tensor import DTensor, Shard
-
 
 _EXPECTED_TORCH_VERSION = "2.11.0"
 _PATCH_SENTINEL = "_miles_param_dtype_map_patch_applied"
@@ -107,11 +98,7 @@ def _resolve_param_dtype_map(
     modules: tuple[nn.Module, ...],
     params: list[nn.Parameter],
 ) -> dict[nn.Parameter, torch.dtype]:
-    param_dtype_map = (
-        mp_policy.param_dtype_map
-        if isinstance(mp_policy, ParamDtypeMixedPrecisionPolicy)
-        else None
-    )
+    param_dtype_map = mp_policy.param_dtype_map if isinstance(mp_policy, ParamDtypeMixedPrecisionPolicy) else None
     if not param_dtype_map:
         return {}
     managed_params = set(params)
@@ -123,10 +110,7 @@ def _resolve_param_dtype_map(
             previous = fqn_to_param.get(fqn)
             # A managed FQN must not identify different parameter tensors.
             if previous is not None and previous is not param:
-                raise ValueError(
-                    "param_dtype_map FQN "
-                    f"{fqn!r} is ambiguous across the fully_shard modules"
-                )
+                raise ValueError("param_dtype_map FQN " f"{fqn!r} is ambiguous across the fully_shard modules")
             fqn_to_param[fqn] = param
     unknown_fqns = sorted(set(param_dtype_map).difference(fqn_to_param))
     if unknown_fqns:
@@ -139,13 +123,13 @@ def _resolve_param_dtype_map(
 
 # Copied from PyTorch v2.11.0 at 70d99e998b4955e0049d13a98d77ae1b14db1f45.
 def _patched_init_param_group(
-    state: "FSDPState",
+    state: FSDPState,
     params: list[nn.Parameter],
     modules: tuple[nn.Module, ...],
     mesh_info: DataParallelMeshInfo,
     post_forward_mesh_info: FSDPMeshInfo | None,
     device: torch.device,
-    shard_placement_fn: "Callable[[nn.Parameter], Any] | None",
+    shard_placement_fn: Callable[[nn.Parameter], Any] | None,
     mp_policy: TorchMixedPrecisionPolicy,
     offload_policy: OffloadPolicy,
 ) -> None:
@@ -221,14 +205,10 @@ def _patched_param_group_init(
     param_dtype_map = param_dtype_map or {}
     if param_dtype_map:
         effective_dtypes = {
-            param_dtype_map.get(param, mp_policy.param_dtype) or param.dtype
-            for param in params
-            if param.requires_grad
+            param_dtype_map.get(param, mp_policy.param_dtype) or param.dtype for param in params if param.requires_grad
         }
         if len(effective_dtypes) > 1 and mp_policy.reduce_dtype is None:
-            raise ValueError(
-                "Mixed parameter dtypes require an explicit reduce_dtype"
-            )
+            raise ValueError("Mixed parameter dtypes require an explicit reduce_dtype")
 
     self.fsdp_params = []
     for param, module_info in zip(params, param_module_infos):
@@ -236,9 +216,7 @@ def _patched_param_group_init(
         param_mp_policy = (
             replace(
                 mp_policy,
-                param_dtype=(
-                    override if override is not None else mp_policy.param_dtype
-                ),
+                param_dtype=(override if override is not None else mp_policy.param_dtype),
                 param_dtype_map=None,
             )
             if param_dtype_map
@@ -354,15 +332,8 @@ def _patched_init_dtype_attrs(
     # # None indicates that the mixed precision is not enabled
     # MILES_PATCH_UPSTREAM_END: fsdp-param-dtype-map
     # MILES_PATCH_REPLACEMENT_BEGIN: fsdp-param-dtype-map
-    has_param_dtype_map = (
-        isinstance(mp_policy, ParamDtypeMixedPrecisionPolicy)
-        and bool(mp_policy.param_dtype_map)
-    )
-    param_dtype = (
-        self._param_dtype_override
-        if self._param_dtype_override is not None
-        else mp_policy.param_dtype
-    )
+    has_param_dtype_map = isinstance(mp_policy, ParamDtypeMixedPrecisionPolicy) and bool(mp_policy.param_dtype_map)
+    param_dtype = self._param_dtype_override if self._param_dtype_override is not None else mp_policy.param_dtype
     reduce_dtype = mp_policy.reduce_dtype
     self.orig_dtype = self.sharded_param.dtype
     # Clamp `reduce_dtype` to `None` if no casting is required: since
@@ -431,18 +402,14 @@ def _patched_get_param_all_gather_inputs(
     #         param_all_gather_inputs[i] = [split]
     # MILES_PATCH_UPSTREAM_END: fsdp-param-dtype-map
     # MILES_PATCH_REPLACEMENT_BEGIN: fsdp-param-dtype-map
-    foreach_copy_infos: dict[
-        torch.dtype, tuple[list[int], list[torch.Tensor], list[int]]
-    ] = {}
+    foreach_copy_infos: dict[torch.dtype, tuple[list[int], list[torch.Tensor], list[int]]] = {}
 
     # 1st pass: for foreach-copy parameters, get inputs and metadata for the
     # foreach copy, and for the others, actually get their all-gather inputs
     for i, fsdp_param in enumerate(fsdp_params):
         if use_foreach_copy(fsdp_param):
             param_dtype = cast(torch.dtype, fsdp_param.param_dtype)
-            indices, inputs, input_numels = foreach_copy_infos.setdefault(
-                param_dtype, ([], [], [])
-            )
+            indices, inputs, input_numels = foreach_copy_infos.setdefault(param_dtype, ([], [], []))
             indices.append(i)
             all_gather_input = (
                 fsdp_param._sharded_param_data
@@ -457,9 +424,7 @@ def _patched_get_param_all_gather_inputs(
     # 2nd pass: use foreach copy to compute the remaining all-gather inputs
     for param_dtype, (indices, inputs, input_numels) in foreach_copy_infos.items():
         device = fsdp_params[indices[0]].device
-        flat_foreach_copy_input = torch.empty(
-            (sum(input_numels),), device=device, dtype=param_dtype
-        )
+        flat_foreach_copy_input = torch.empty((sum(input_numels),), device=device, dtype=param_dtype)
         splits = torch.split(flat_foreach_copy_input, input_numels)
         torch._foreach_copy_(splits, inputs)
         for i, split in zip(indices, splits):
@@ -514,20 +479,17 @@ def _patched_foreach_reduce(
     grad_dtypes = {grad.dtype for grad in unsharded_grads}
     if reduce_dtype is None and len(grad_dtypes) != 1:
         _raise_assert_with_print(
-            "FSDP reduce-scatter requires an explicit reduce dtype for mixed "
-            f"gradient dtypes but got {grad_dtypes}"
+            "FSDP reduce-scatter requires an explicit reduce dtype for mixed " f"gradient dtypes but got {grad_dtypes}"
         )
     reduce_dtype = reduce_dtype or unsharded_grads[0].dtype
     # MILES_PATCH_REPLACEMENT_END: fsdp-param-dtype-map
-    (predivide_factor, postdivide_factor, reduce_scatter_op, all_reduce_op) = (
-        _get_gradient_divide_factors(
-            reduce_scatter_group,
-            all_reduce_group,
-            reduce_dtype,
-            device.type,
-            gradient_divide_factor,
-            force_sum_reduction_for_comms,
-        )
+    (predivide_factor, postdivide_factor, reduce_scatter_op, all_reduce_op) = _get_gradient_divide_factors(
+        reduce_scatter_group,
+        all_reduce_group,
+        reduce_dtype,
+        device.type,
+        gradient_divide_factor,
+        force_sum_reduction_for_comms,
     )
 
     if reduce_scatter_group is None:
@@ -538,9 +500,7 @@ def _patched_foreach_reduce(
     current_stream = device_handle.current_stream()
 
     if world_size > 1:
-        for i, (fsdp_param, unsharded_grad) in enumerate(
-            zip(fsdp_params, unsharded_grads)
-        ):
+        for i, (fsdp_param, unsharded_grad) in enumerate(zip(fsdp_params, unsharded_grads)):
             if (shard_dim := fsdp_param.fsdp_placement.dim) == 0:
                 continue
             if unsharded_grad.size(shard_dim) % world_size != 0:
@@ -550,9 +510,7 @@ def _patched_foreach_reduce(
             chunks = torch.chunk(unsharded_grad, world_size, dim=shard_dim)
             unsharded_grads[i] = torch.cat(chunks, dim=0)
 
-    padded_unsharded_sizes = tuple(
-        _get_dim0_padded_size(grad.size(), world_size) for grad in unsharded_grads
-    )
+    padded_unsharded_sizes = tuple(_get_dim0_padded_size(grad.size(), world_size) for grad in unsharded_grads)
     reduce_scatter_input_numel = sum(s.numel() for s in padded_unsharded_sizes)
     reduce_scatter_output_numel = reduce_scatter_input_numel // world_size
     reduce_scatter_input = reduce_scatter_comm.allocate(
@@ -561,9 +519,7 @@ def _patched_foreach_reduce(
         device=device,
     )
 
-    foreach_reduce_scatter_copy_in(
-        unsharded_grads, reduce_scatter_input, world_size
-    )
+    foreach_reduce_scatter_copy_in(unsharded_grads, reduce_scatter_input, world_size)
 
     # Only after the copy-in finishes can we free the gradients
     unsharded_grads.clear()
@@ -589,9 +545,7 @@ def _patched_foreach_reduce(
             # For single GPU, just copy the input to output (no actual reduce-scatter needed), and
             # account for a possible gradient_divide_factor.
             if gradient_divide_factor is not None:
-                reduce_output.copy_(
-                    reduce_scatter_input / gradient_divide_factor
-                )
+                reduce_output.copy_(reduce_scatter_input / gradient_divide_factor)
             else:
                 reduce_output.copy_(reduce_scatter_input)
         reduce_scatter_event = reduce_scatter_stream.record_event()
@@ -643,9 +597,7 @@ def _patched_foreach_reduce(
         reduce_output = _to_dtype_if_needed(reduce_output, orig_dtype)
         # View out and accumulate sharded gradients
         flat_grad_offset = 0  # [0, reduce_scatter_output_numel - 1]
-        for padded_unsharded_size, fsdp_param in zip(
-            padded_unsharded_sizes, fsdp_params
-        ):
+        for padded_unsharded_size, fsdp_param in zip(padded_unsharded_sizes, fsdp_params):
             # Assume even sharding for Shard(i), i > 0; otherwise would require
             # copy-out for contiguous strides
             new_sharded_grad = torch.as_strided(
@@ -663,15 +615,11 @@ def _patched_foreach_reduce(
                 # Since the GPU sharded gradient is allocated in the RS stream,
                 # we can free it here by not keeping a ref without waiting for
                 # the D2H copy since future RS-stream ops run after the copy
-                new_sharded_grad = new_sharded_grad.to(
-                    torch.device("cpu"), non_blocking=non_blocking
-                )
+                new_sharded_grad = new_sharded_grad.to(torch.device("cpu"), non_blocking=non_blocking)
                 if non_blocking:
                     # Record an event on which to block the CPU thread to
                     # ensure that the D2H copy finishes before the optimizer
-                    fsdp_param.grad_offload_event = (
-                        post_reduce_stream.record_event()
-                    )
+                    fsdp_param.grad_offload_event = post_reduce_stream.record_event()
             if to_accumulate_grad:
                 if not isinstance(fsdp_param.sharded_param.grad, DTensor):
                     raise AssertionError(
@@ -679,9 +627,7 @@ def _patched_foreach_reduce(
                     )
                 fsdp_param.sharded_param.grad._local_tensor += new_sharded_grad
             else:
-                new_sharded_dtensor_grad = fsdp_param.to_sharded_dtensor(
-                    new_sharded_grad
-                )
+                new_sharded_dtensor_grad = fsdp_param.to_sharded_dtensor(new_sharded_grad)
                 fsdp_param.sharded_param.grad = new_sharded_dtensor_grad
             if not compiled_autograd_enabled():
                 for hook in (
@@ -693,9 +639,7 @@ def _patched_foreach_reduce(
                     or {}
                 ).values():
                     hook(fsdp_param.sharded_param)
-            padded_sharded_numel = (
-                padded_unsharded_size.numel() // world_size
-            )
+            padded_sharded_numel = padded_unsharded_size.numel() // world_size
             flat_grad_offset += padded_sharded_numel
         post_reduce_event = post_reduce_stream.record_event()
     # The RS output is allocated in the RS stream and used in the default
@@ -737,9 +681,7 @@ def _patched_foreach_reduce_scatter_copy_in(
     # Pack each parameter's padded rank chunks directly into the rank-major
     # reduce-scatter input, grouping by source dtype to batch cast-and-copy
     # without an intermediate buffer.
-    copy_infos: dict[
-        torch.dtype, tuple[list[torch.Tensor], list[torch.Tensor]]
-    ] = {}
+    copy_infos: dict[torch.dtype, tuple[list[torch.Tensor], list[torch.Tensor]]] = {}
     padding_views: list[torch.Tensor] = []
     output_offset = 0
     for grad in unsharded_grads:
@@ -748,16 +690,12 @@ def _patched_foreach_reduce_scatter_copy_in(
         padded_chunk_numel = chunk_size * trailing_numel
         destinations, sources = copy_infos.setdefault(grad.dtype, ([], []))
         for rank in range(world_size):
-            destination = reduce_scatter_input[rank].narrow(
-                0, output_offset, padded_chunk_numel
-            )
+            destination = reduce_scatter_input[rank].narrow(0, output_offset, padded_chunk_numel)
             start = rank * chunk_size
             length = min(chunk_size, max(grad.size(0) - start, 0))
             if length > 0:
                 source = grad.narrow(0, start, length).reshape(-1)
-                destinations.append(
-                    destination.narrow(0, 0, source.numel())
-                )
+                destinations.append(destination.narrow(0, 0, source.numel()))
                 sources.append(source)
             if length < chunk_size:
                 padding_start = length * trailing_numel
@@ -784,8 +722,7 @@ def apply_param_dtype_map_patch() -> None:
     torch_version = torch.__version__.partition("+")[0]
     if torch_version != _EXPECTED_TORCH_VERSION:
         raise RuntimeError(
-            "The Miles FSDP param-dtype patch requires "
-            f"torch=={_EXPECTED_TORCH_VERSION}, got {torch.__version__}"
+            "The Miles FSDP param-dtype patch requires " f"torch=={_EXPECTED_TORCH_VERSION}, got {torch.__version__}"
         )
 
     _verify_source("_init_param_group", _ORIGINAL_INIT_PARAM_GROUP)
@@ -823,9 +760,7 @@ def apply_param_dtype_map_patch() -> None:
     FSDPParamGroup.__init__ = _patched_param_group_init
     FSDPParam.init_dtype_attrs = _patched_init_dtype_attrs
     _fsdp_collectives._get_param_all_gather_inputs = get_param_all_gather_inputs
-    _fsdp_collectives.foreach_reduce_scatter_copy_in = (
-        foreach_reduce_scatter_copy_in
-    )
+    _fsdp_collectives.foreach_reduce_scatter_copy_in = foreach_reduce_scatter_copy_in
     _fsdp_collectives.foreach_reduce = foreach_reduce
     _fsdp_param_group.foreach_reduce = foreach_reduce
     setattr(_fsdp_collectives, _PATCH_SENTINEL, True)

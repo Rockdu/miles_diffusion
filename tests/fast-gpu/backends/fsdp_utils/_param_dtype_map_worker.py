@@ -4,9 +4,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
-from diffusers.models.transformers.transformer_ltx2 import (
-    LTX2VideoTransformerBlock,
-)
+from diffusers.models.transformers.transformer_ltx2 import LTX2VideoTransformerBlock
 from diffusers.models.transformers.transformer_wan import WanTransformerBlock
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
@@ -14,7 +12,6 @@ from torch.distributed.tensor import DTensor
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from miles.backends.fsdp_utils import fsdp_param_dtype_patch
-
 
 MODEL_NAMES = ("wan2_2", "ltx2_3")
 TOPOLOGIES = ("fully_shard_1x4", "hybrid_shard_2x2")
@@ -116,20 +113,14 @@ def _full_grad(param):
 
 
 def _assert_bitwise_equal(actual, expected, context):
-    assert actual.dtype == expected.dtype, (
-        f"{context}: expected dtype {expected.dtype}, got {actual.dtype}"
-    )
-    assert actual.shape == expected.shape, (
-        f"{context}: expected shape {expected.shape}, got {actual.shape}"
-    )
+    assert actual.dtype == expected.dtype, f"{context}: expected dtype {expected.dtype}, got {actual.dtype}"
+    assert actual.shape == expected.shape, f"{context}: expected shape {expected.shape}, got {actual.shape}"
     assert torch.equal(actual, expected), f"{context}: tensors are not bitwise equal"
 
 
 def _assert_run_equal(actual, expected, context):
     assert len(actual.outputs) == len(expected.outputs)
-    for index, (actual_output, expected_output) in enumerate(
-        zip(actual.outputs, expected.outputs)
-    ):
+    for index, (actual_output, expected_output) in enumerate(zip(actual.outputs, expected.outputs)):
         _assert_bitwise_equal(
             actual_output,
             expected_output,
@@ -161,16 +152,14 @@ def _register_unsharded_param_hook(
         assert params.keys() == expected_shapes.keys()
         for name, param in params.items():
             expected_shape = expected_shapes[name]
-            assert tuple(param.shape) == expected_shape, (
-                f"{name}: expected shape {expected_shape}, got {tuple(param.shape)}"
-            )
+            assert (
+                tuple(param.shape) == expected_shape
+            ), f"{name}: expected shape {expected_shape}, got {tuple(param.shape)}"
             assert param.numel() == expected_shape.numel(), (
-                f"{name}: expected {expected_shape.numel()} elements, "
-                f"got {param.numel()}"
+                f"{name}: expected {expected_shape.numel()} elements, " f"got {param.numel()}"
             )
             assert param.dtype == expected_dtypes[name], (
-                f"{name}: expected dtype {expected_dtypes[name]}, "
-                f"got {param.dtype}"
+                f"{name}: expected dtype {expected_dtypes[name]}, " f"got {param.dtype}"
             )
         hook_calls.append(True)
 
@@ -182,10 +171,7 @@ def _selected_param_fqns(model, model_name):
     fqns = []
     for module_fqn in FP32_MODULES[model_name]:
         module = model.get_submodule(module_fqn)
-        fqns.extend(
-            f"{module_fqn}.{param_fqn}"
-            for param_fqn, _ in module.named_parameters()
-        )
+        fqns.extend(f"{module_fqn}.{param_fqn}" for param_fqn, _ in module.named_parameters())
     return fqns
 
 
@@ -194,9 +180,7 @@ def _register_fp32_boundaries(model, model_name):
 
     for module_fqn in FP32_MODULES[model_name]:
         module = model.get_submodule(module_fqn)
-        expected_shapes = {
-            name: param.shape for name, param in module.named_parameters()
-        }
+        expected_shapes = {name: param.shape for name, param in module.named_parameters()}
         calls = []
         hook_calls[module_fqn] = calls
 
@@ -215,9 +199,7 @@ def _register_fp32_boundaries(model, model_name):
                 assert param.numel() == expected_shapes[name].numel()
             calls.append(True)
             return tuple(
-                value.float()
-                if isinstance(value, torch.Tensor) and value.is_floating_point()
-                else value
+                value.float() if isinstance(value, torch.Tensor) and value.is_floating_point() else value
                 for value in inputs
             )
 
@@ -238,22 +220,17 @@ def _run_case(
     rank,
 ):
     model, inputs = _create_case(model_name, rank)
-    expected_shapes = {
-        name: param.shape for name, param in model.named_parameters()
-    }
+    expected_shapes = {name: param.shape for name, param in model.named_parameters()}
     shard_size = 4 if topology == "fully_shard_1x4" else 2
     assert any(
-        len(shape) > 0 and shape[0] % shard_size != 0
-        for shape in expected_shapes.values()
+        len(shape) > 0 and shape[0] % shard_size != 0 for shape in expected_shapes.values()
     ), f"{model_name} does not exercise dim-0 padding for shard size {shard_size}"
 
     selected_fqns = _selected_param_fqns(model, model_name)
     expected_dtypes = dict.fromkeys(expected_shapes, torch.bfloat16)
     boundary_hooks = {}
     if policy_kind == "all_bf16_map":
-        param_dtype_map = {
-            name: torch.bfloat16 for name in expected_shapes
-        }
+        param_dtype_map = {name: torch.bfloat16 for name in expected_shapes}
         mp_policy = fsdp_param_dtype_patch.ParamDtypeMixedPrecisionPolicy(
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
@@ -275,18 +252,14 @@ def _run_case(
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
         )
-        expected_dtypes.update(
-            dict.fromkeys(selected_fqns, torch.float32)
-        )
+        expected_dtypes.update(dict.fromkeys(selected_fqns, torch.float32))
     elif policy_kind == "mapped_fp32":
         mp_policy = fsdp_param_dtype_patch.ParamDtypeMixedPrecisionPolicy(
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
             param_dtype_map=dict.fromkeys(selected_fqns, torch.float32),
         )
-        expected_dtypes.update(
-            dict.fromkeys(selected_fqns, torch.float32)
-        )
+        expected_dtypes.update(dict.fromkeys(selected_fqns, torch.float32))
     else:
         mp_policy = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16,
@@ -310,10 +283,7 @@ def _run_case(
 
     result = RunResult(
         outputs=tuple(tensor.detach().clone() for tensor in output_tuple),
-        grads={
-            name: _full_grad(param)
-            for name, param in model.named_parameters()
-        },
+        grads={name: _full_grad(param) for name, param in model.named_parameters()},
     )
     del model, inputs, output, output_tuple
     gc.collect()
