@@ -55,11 +55,7 @@ def _make_tensor(spec):
             dtype=torch.float32,
         ).reshape(spec.shape)
     if spec.dtype == torch.bool:
-        return (
-            torch.arange(numel, device="cuda").remainder(2).bool().reshape(
-                spec.shape
-            )
-        )
+        return torch.arange(numel, device="cuda").remainder(2).bool().reshape(spec.shape)
     if spec.dtype.is_complex:
         real = torch.arange(numel, device="cuda", dtype=torch.float32)
         value = torch.complex(real.remainder(11), real.remainder(7))
@@ -120,9 +116,7 @@ def _policy(specs):
     return fsdp_param_dtype_patch.ParamDtypeMixedPrecisionPolicy(
         param_dtype=torch.bfloat16,
         reduce_dtype=torch.float32,
-        param_dtype_map={
-            spec.name: spec.dtype for spec in specs if spec.trainable
-        },
+        param_dtype_map={spec.name: spec.dtype for spec in specs if spec.trainable},
     )
 
 
@@ -137,9 +131,7 @@ def _ignored_params(*modules):
 
 
 def _register_gather_hook(module):
-    expected = {
-        spec.name: (spec.shape, spec.dtype) for spec in module.specs
-    }
+    expected = {spec.name: (spec.shape, spec.dtype) for spec in module.specs}
     calls = []
 
     def check_params(gathered_module, _inputs):
@@ -161,11 +153,15 @@ def _assert_grads(model, rank):
     for spec in PARAM_SPECS:
         if not spec.trainable or spec.dtype in expected_by_dtype:
             continue
-        expected = torch.tensor(
-            rank + 1,
-            device="cuda",
-            dtype=torch.float32,
-        ).to(spec.dtype).to(torch.float32)
+        expected = (
+            torch.tensor(
+                rank + 1,
+                device="cuda",
+                dtype=torch.float32,
+            )
+            .to(spec.dtype)
+            .to(torch.float32)
+        )
         dist.all_reduce(expected)
         expected /= dist.get_world_size()
         expected_by_dtype[spec.dtype] = expected
@@ -186,9 +182,7 @@ def _assert_grads(model, rank):
             torch.full_like(grad, expected_by_dtype[spec.dtype]),
         ), f"Unexpected gradient for {name}"
         seen_dtypes.add(spec.dtype)
-    assert seen_dtypes == {
-        spec.dtype for spec in PARAM_SPECS if spec.trainable
-    }
+    assert seen_dtypes == {spec.dtype for spec in PARAM_SPECS if spec.trainable}
 
 
 def _inputs(rank):
@@ -248,12 +242,8 @@ def test_hybrid_grouped_prime_dtype_zoo(rank):
     output.backward()
     assert len(left_calls) == 1
     assert len(right_calls) == 1
-    assert model.left.forwarded_params == tuple(
-        spec.name for spec in model.left.specs
-    )
-    assert model.right.forwarded_params == tuple(
-        spec.name for spec in model.right.specs
-    )
+    assert model.left.forwarded_params == tuple(spec.name for spec in model.left.specs)
+    assert model.right.forwarded_params == tuple(spec.name for spec in model.right.specs)
     _assert_grads(model, rank)
 
 

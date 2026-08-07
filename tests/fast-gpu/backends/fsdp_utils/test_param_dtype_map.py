@@ -17,12 +17,8 @@ import pytest
 
 
 _E2E_WORKER = Path(__file__).with_name("_param_dtype_map_worker.py")
-_ADVERSARIAL_WORKER = Path(__file__).with_name(
-    "_param_dtype_map_adversarial_worker.py"
-)
-_VALIDATION_WORKER = Path(__file__).with_name(
-    "_param_dtype_map_validation_worker.py"
-)
+_ADVERSARIAL_WORKER = Path(__file__).with_name("_param_dtype_map_adversarial_worker.py")
+_VALIDATION_WORKER = Path(__file__).with_name("_param_dtype_map_validation_worker.py")
 
 
 def _run_worker(worker, *args):

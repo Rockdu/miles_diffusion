@@ -23,12 +23,8 @@ class MixedParamDtypeModel(nn.Module):
             self.full_precision.weight.dtype,
         )
         low_precision_output = self.low_precision(x)
-        full_precision_output = self.full_precision(
-            x.to(self.full_precision.weight.dtype)
-        )
-        return low_precision_output + full_precision_output.to(
-            low_precision_output.dtype
-        )
+        full_precision_output = self.full_precision(x.to(self.full_precision.weight.dtype))
+        return low_precision_output + full_precision_output.to(low_precision_output.dtype)
 
 
 def _policy(param_dtype_map, reduce_dtype=torch.float32):
@@ -43,9 +39,7 @@ def _assert_value_error(expected, fn):
     try:
         fn()
     except ValueError as error:
-        assert expected in str(error), (
-            f"Expected error containing {expected!r}, got {error!r}"
-        )
+        assert expected in str(error), f"Expected error containing {expected!r}, got {error!r}"
     else:
         raise AssertionError(f"Expected ValueError containing {expected!r}")
 
@@ -208,9 +202,7 @@ def test_empty_map_delegates_to_standard_policy():
 
 
 def test_reduce_scatter_copy_in_with_empty_grad():
-    copy_in = (
-        fsdp_param_dtype_patch._fsdp_collectives.foreach_reduce_scatter_copy_in
-    )
+    copy_in = fsdp_param_dtype_patch._fsdp_collectives.foreach_reduce_scatter_copy_in
     empty_grad = torch.empty((0, 2), device="cuda", dtype=torch.bfloat16)
     fp32_grad = torch.arange(
         6,
@@ -227,12 +219,8 @@ TEST_CASES = {
     "same-fqn-separate-wraps": test_same_fqn_in_separate_wraps,
     "same-fqn-shared-parameter": test_same_fqn_for_shared_parameter,
     "unknown-fqn": test_unknown_fqn,
-    "mixed-requires-reduce-dtype": (
-        test_mixed_trainable_dtypes_require_reduce_dtype
-    ),
-    "frozen-override-no-reduce-dtype": (
-        test_frozen_override_does_not_require_reduce_dtype
-    ),
+    "mixed-requires-reduce-dtype": (test_mixed_trainable_dtypes_require_reduce_dtype),
+    "frozen-override-no-reduce-dtype": (test_frozen_override_does_not_require_reduce_dtype),
     "mixed-forward-backward": test_mixed_forward_backward,
     "empty-map-delegation": test_empty_map_delegates_to_standard_policy,
     "reduce-scatter-empty-grad": test_reduce_scatter_copy_in_with_empty_grad,
