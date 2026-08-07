@@ -109,48 +109,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="The backend for training.",
             )
             parser.add_argument(
-                "--diffusion-clip-range",
-                type=float,
-                default=1e-4,
-                help="Clip range for diffusion GRPO ratio.",
-            )
-            parser.add_argument(
-                "--diffusion-adv-clip-max",
-                type=float,
-                default=5.0,
-                help="Max absolute value for advantage clipping in diffusion training.",
-            )
-            parser.add_argument(
-                "--diffusion-recompute-old-log-prob",
-                action="store_true",
-                help=(
-                    "Recompute old log-probs with the trainer forward (pre-update weights) "
-                    "instead of using rollout-stored values, making the PPO ratio "
-                    "implementation-consistent. The first optimizer window skips the extra "
-                    "pass and reuses its training forward's log-prob (ratio == 1)."
-                ),
-            )
-            parser.add_argument(
-                "--diffusion-kl-beta",
-                type=float,
-                default=0.0,
-                help=(
-                    "Reference KL coefficient for diffusion GRPO. When > 0, enables a "
-                    "reference DiT forward (see --ref-mode; default lora_base)."
-                ),
-            )
-            parser.add_argument(
-                "--ref-mode",
-                type=str,
-                choices=["none", "lora_base", "ema"],
-                default=None,
-                help=(
-                    "Which reference weights to use for the no-grad DiT forward. "
-                    "Auto: lora_base when --diffusion-kl-beta > 0 and ema for --loss-type nft. "
-                    "Explicit values skip auto inference."
-                ),
-            )
-            parser.add_argument(
                 "--fsdp-cfg-batching",
                 action=argparse.BooleanOptionalAction,
                 default=False,
@@ -281,12 +239,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Diffusion rollout microgroup size (sub-batch of samples per prompt). Defaults to 1.",
             )
             parser.add_argument(
-                "--diffusion-eval-num-steps",
-                type=int,
-                default=None,
-                help="Number of diffusion inference steps for eval rollout. Defaults to diffusion-num-steps.",
-            )
-            parser.add_argument(
                 "--diffusion-fps",
                 type=float,
                 default=None,
@@ -408,24 +360,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
-                "--diffusion-debug-mode",
-                action="store_true",
-                default=False,
-                help="Set rollout_debug_mode=true on POST /rollout/generate.",
-            )
-            parser.add_argument(
-                "--diffusion-log-images",
-                type=int,
-                default=0,
-                help="Number of diffusion images to log to W&B per rollout (0 disables).",
-            )
-            parser.add_argument(
-                "--diffusion-log-image-interval",
-                type=int,
-                default=1,
-                help="Log diffusion images every N rollouts. Only used when diffusion-log-images > 0.",
-            )
-            parser.add_argument(
                 "--update-weight-target-module",
                 type=str,
                 default="transformer",
@@ -495,26 +429,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
-                "--custom-rollout-log-function-path",
-                type=str,
-                default=None,
-                help=(
-                    "Custom function for logging train rollout data. Signature: "
-                    "`def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_time) -> bool`. "
-                    "Truthy return skips the default logging."
-                ),
-            )
-            parser.add_argument(
-                "--custom-eval-rollout-log-function-path",
-                type=str,
-                default=None,
-                help=(
-                    "Custom function for logging eval rollout data. Signature: "
-                    "`def log_eval_rollout_data(rollout_id, args, data, extra_metrics) -> bool`. "
-                    "Truthy return skips the default logging."
-                ),
-            )
-            parser.add_argument(
                 "--custom-convert-samples-to-train-data-path",
                 type=str,
                 default=None,
@@ -554,6 +468,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "This is used for updating weights by chunk and should be useful for MoE models."
                 ),
             )
+            parser.add_argument("--use-distributed-post", action="store_true", default=False)
             return parser
 
         def add_fault_tolerance_arguments(parser):
@@ -772,6 +687,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="number of responses for each prompt in generation",
             )
 
+            parser.add_argument(
+                "--diffusion-eval-num-steps",
+                type=int,
+                default=None,
+                help="Number of diffusion inference steps for eval rollout. Defaults to diffusion-num-steps.",
+            )
             return parser
 
         def add_algo_arguments(parser):
@@ -906,6 +827,48 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "flow_grpo's pickscore recipe sets global_std=True, so enable this for parity."
                 ),
             )
+            parser.add_argument(
+                "--ref-mode",
+                type=str,
+                choices=["none", "lora_base", "ema"],
+                default=None,
+                help=(
+                    "Which reference weights to use for the no-grad DiT forward. "
+                    "Auto: lora_base when --diffusion-kl-beta > 0 and ema for --loss-type nft. "
+                    "Explicit values skip auto inference."
+                ),
+            )
+            parser.add_argument(
+                "--diffusion-kl-beta",
+                type=float,
+                default=0.0,
+                help=(
+                    "Reference KL coefficient for diffusion GRPO. When > 0, enables a "
+                    "reference DiT forward (see --ref-mode; default lora_base)."
+                ),
+            )
+            parser.add_argument(
+                "--diffusion-clip-range",
+                type=float,
+                default=1e-4,
+                help="Clip range for diffusion GRPO ratio.",
+            )
+            parser.add_argument(
+                "--diffusion-adv-clip-max",
+                type=float,
+                default=5.0,
+                help="Max absolute value for advantage clipping in diffusion training.",
+            )
+            parser.add_argument(
+                "--diffusion-recompute-old-log-prob",
+                action="store_true",
+                help=(
+                    "Recompute old log-probs with the trainer forward (pre-update weights) "
+                    "instead of using rollout-stored values, making the PPO ratio "
+                    "implementation-consistent. The first optimizer window skips the extra "
+                    "pass and reuses its training forward's log-prob (ratio == 1)."
+                ),
+            )
             return parser
 
         def add_router_arguments(parser):
@@ -968,6 +931,134 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument("--wandb-run-id", type=str, default=None)
+            parser.add_argument(
+                "--diffusion-log-images",
+                type=int,
+                default=0,
+                help="Number of diffusion images to log to W&B per rollout (0 disables).",
+            )
+            parser.add_argument(
+                "--diffusion-log-image-interval",
+                type=int,
+                default=1,
+                help="Log diffusion images every N rollouts. Only used when diffusion-log-images > 0.",
+            )
+            parser.add_argument(
+                "--custom-rollout-log-function-path",
+                type=str,
+                default=None,
+                help=(
+                    "Custom function for logging train rollout data. Signature: "
+                    "`def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_time) -> bool`. "
+                    "Truthy return skips the default logging."
+                ),
+            )
+            parser.add_argument(
+                "--custom-eval-rollout-log-function-path",
+                type=str,
+                default=None,
+                help=(
+                    "Custom function for logging eval rollout data. Signature: "
+                    "`def log_eval_rollout_data(rollout_id, args, data, extra_metrics) -> bool`. "
+                    "Truthy return skips the default logging."
+                ),
+            )
+            parser.add_argument(
+                "--use-miles-dashboard",
+                action="store_true",
+                default=False,
+                help="Collect phase and trajectory telemetry asynchronously.",
+            )
+            parser.add_argument(
+                "--miles-dashboard-workspace",
+                type=str,
+                default="./miles_dashboard",
+                help="Base directory for miles dashboard telemetry; each launch writes to its own run_<ts> subdir.",
+            )
+            return parser
+
+        def add_lora_arguments(parser):
+            parser.add_argument(
+                "--use-lora", action="store_true", default=False, help="Use LoRA adapters instead of full finetune."
+            )
+            parser.add_argument("--lora-rank", type=int, default=64)
+            parser.add_argument("--lora-alpha", type=int, default=64)
+            parser.add_argument(
+                "--lora-target-modules",
+                type=str,
+                nargs="+",
+                default=None,
+                help="Override LoRA target modules. Default: per-model from TrainPipelineConfig.",
+            )
+            parser.add_argument(
+                "--diffusion-init-lora-weight",
+                type=str,
+                default="gaussian",
+                help=(
+                    "PEFT LoraConfig.init_lora_weights. flow_grpo's Qwen-Image uses 'gaussian' "
+                    "(N(0, 1/r) for lora_A, 0 for lora_B). 'kaiming-uniform' maps to PEFT's "
+                    "default Kaiming-uniform init. Other PEFT schemes ('olora', 'pissa', "
+                    "'pissa_niter_N', 'loftq', ...) pass through unchanged."
+                ),
+            )
+            parser.add_argument(
+                "--lora-ipc-weight-sync",
+                action="store_true",
+                default=False,
+                help=(
+                    "Sync only lora_A/lora_B to rollout via IPC with weight_update_mode=lora_merge "
+                    "(requires matching sglang-d LoRAPipeline support)."
+                ),
+            )
+
+            return parser
+
+        def add_ema_arguments(parser):
+            parser.add_argument(
+                "--ema-shadow",
+                action="store_true",
+                default=False,
+                help=(
+                    "Maintain an EMA shadow of trainable weights (pi_old; LoRA or full finetune). "
+                    "Consumed when --ref-mode ema; combine with --ema-rollout-policy ema to "
+                    "sample under pi_old."
+                ),
+            )
+            parser.add_argument(
+                "--ema-rollout-policy",
+                type=str,
+                choices=["live", "ema"],
+                default="live",
+                help=(
+                    "Which trainable weights to push to rollout after each rollout_end when "
+                    "--ema-shadow is set: live weights, or EMA shadow (pi_old)."
+                ),
+            )
+            parser.add_argument(
+                "--ema-decay",
+                type=float,
+                default=0.001,
+                help="EMA decay while step <= flat_steps.",
+            )
+            parser.add_argument(
+                "--ema-uprate",
+                type=float,
+                default=0.001,
+                help="EMA warmup rate after flat_steps.",
+            )
+            parser.add_argument(
+                "--ema-uphold",
+                type=float,
+                default=0.5,
+                help="EMA warmup cap.",
+            )
+            parser.add_argument(
+                "--ema-flat-steps",
+                type=int,
+                default=0,
+                help="EMA flat steps before warmup begins.",
+            )
+
             return parser
 
         # debug
@@ -1027,82 +1118,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             )
 
             # LoRA
-            parser.add_argument(
-                "--use-lora", action="store_true", default=False, help="Use LoRA adapters instead of full finetune."
-            )
-            parser.add_argument("--lora-rank", type=int, default=64)
-            parser.add_argument("--lora-alpha", type=int, default=64)
-            parser.add_argument(
-                "--lora-target-modules",
-                type=str,
-                nargs="+",
-                default=None,
-                help="Override LoRA target modules. Default: per-model from TrainPipelineConfig.",
-            )
-            parser.add_argument(
-                "--lora-ipc-weight-sync",
-                action="store_true",
-                default=False,
-                help=(
-                    "Sync only lora_A/lora_B to rollout via IPC with weight_update_mode=lora_merge "
-                    "(requires matching sglang-d LoRAPipeline support)."
-                ),
-            )
-            parser.add_argument(
-                "--ema-shadow",
-                action="store_true",
-                default=False,
-                help=(
-                    "Maintain an EMA shadow of trainable weights (pi_old; LoRA or full finetune). "
-                    "Consumed when --ref-mode ema; combine with --ema-rollout-policy ema to "
-                    "sample under pi_old."
-                ),
-            )
-            parser.add_argument(
-                "--ema-rollout-policy",
-                type=str,
-                choices=["live", "ema"],
-                default="live",
-                help=(
-                    "Which trainable weights to push to rollout after each rollout_end when "
-                    "--ema-shadow is set: live weights, or EMA shadow (pi_old)."
-                ),
-            )
-            parser.add_argument(
-                "--ema-decay",
-                type=float,
-                default=0.001,
-                help="EMA decay while step <= flat_steps.",
-            )
-            parser.add_argument(
-                "--ema-uprate",
-                type=float,
-                default=0.001,
-                help="EMA warmup rate after flat_steps.",
-            )
-            parser.add_argument(
-                "--ema-uphold",
-                type=float,
-                default=0.5,
-                help="EMA warmup cap.",
-            )
-            parser.add_argument(
-                "--ema-flat-steps",
-                type=int,
-                default=0,
-                help="EMA flat steps before warmup begins.",
-            )
-            parser.add_argument(
-                "--diffusion-init-lora-weight",
-                type=str,
-                default="gaussian",
-                help=(
-                    "PEFT LoraConfig.init_lora_weights. flow_grpo's Qwen-Image uses 'gaussian' "
-                    "(N(0, 1/r) for lora_A, 0 for lora_B). 'kaiming-uniform' maps to PEFT's "
-                    "default Kaiming-uniform init. Other PEFT schemes ('olora', 'pissa', "
-                    "'pissa_niter_N', 'loftq', ...) pass through unchanged."
-                ),
-            )
 
             parser.add_argument(
                 "--save-debug-train-data",
@@ -1120,22 +1135,13 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help=("Dump all details of training for post-hoc analysis and visualization."),
             )
             parser.add_argument(
-                "--use-miles-dashboard",
+                "--diffusion-debug-mode",
                 action="store_true",
                 default=False,
-                help="Collect phase and trajectory telemetry asynchronously.",
-            )
-            parser.add_argument(
-                "--miles-dashboard-workspace",
-                type=str,
-                default="./miles_dashboard",
-                help="Base directory for miles dashboard telemetry; each launch writes to its own run_<ts> subdir.",
+                help="Set rollout_debug_mode=true on POST /rollout/generate.",
             )
             return parser
 
-        def add_network_arguments(parser):
-            parser.add_argument("--use-distributed-post", action="store_true", default=False)
-            return parser
 
         def add_reward_model_arguments(parser):
             parser.add_argument(
@@ -1290,11 +1296,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
         parser = add_data_arguments(parser)
         parser = add_eval_arguments(parser)
         parser = add_algo_arguments(parser)
+        parser = add_lora_arguments(parser)
+        parser = add_ema_arguments(parser)
         parser = add_wandb_arguments(parser)
         parser = add_router_arguments(parser)
         parser = add_debug_arguments(parser)
         parser = add_sglang_diffusion_arguments(parser)
-        parser = add_network_arguments(parser)
         parser = add_reward_model_arguments(parser)
         parser = add_ci_arguments(parser)
         reset_arg(
