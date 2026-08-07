@@ -18,6 +18,10 @@ from miles.backends.fsdp_utils import fsdp_param_dtype_patch
 
 MODEL_NAMES = ("wan2_2", "ltx2_3")
 TOPOLOGIES = ("fully_shard_1x4", "hybrid_shard_2x2")
+FP32_MODULES = {
+    "wan2_2": ("attn1.to_q", "attn2.to_out.0", "ffn.net.2"),
+    "ltx2_3": ("attn1.to_q", "audio_attn1.to_q", "audio_ff.net.2"),
+}
 MODEL_SEED = 42
 INPUT_SEED = 123
 
@@ -174,6 +178,58 @@ def _register_unsharded_param_hook(
     return hook_calls
 
 
+def _selected_param_fqns(model, model_name):
+    fqns = []
+    for module_fqn in FP32_MODULES[model_name]:
+        module = model.get_submodule(module_fqn)
+        fqns.extend(
+            f"{module_fqn}.{param_fqn}"
+            for param_fqn, _ in module.named_parameters()
+        )
+    return fqns
+
+
+def _register_fp32_boundaries(model, model_name):
+    hook_calls = {}
+
+    for module_fqn in FP32_MODULES[model_name]:
+        module = model.get_submodule(module_fqn)
+        expected_shapes = {
+            name: param.shape for name, param in module.named_parameters()
+        }
+        calls = []
+        hook_calls[module_fqn] = calls
+
+        def cast_inputs(
+            gathered_module,
+            inputs,
+            *,
+            expected_shapes=expected_shapes,
+            calls=calls,
+        ):
+            params = dict(gathered_module.named_parameters())
+            assert params.keys() == expected_shapes.keys()
+            for name, param in params.items():
+                assert param.dtype == torch.float32
+                assert param.shape == expected_shapes[name]
+                assert param.numel() == expected_shapes[name].numel()
+            calls.append(True)
+            return tuple(
+                value.float()
+                if isinstance(value, torch.Tensor) and value.is_floating_point()
+                else value
+                for value in inputs
+            )
+
+        def cast_outputs(_module, _inputs, output):
+            return output.to(torch.bfloat16)
+
+        module.register_forward_pre_hook(cast_inputs)
+        module.register_forward_hook(cast_outputs)
+
+    return hook_calls
+
+
 def _run_case(
     model_name,
     topology,
@@ -191,6 +247,9 @@ def _run_case(
         for shape in expected_shapes.values()
     ), f"{model_name} does not exercise dim-0 padding for shard size {shard_size}"
 
+    selected_fqns = _selected_param_fqns(model, model_name)
+    expected_dtypes = dict.fromkeys(expected_shapes, torch.bfloat16)
+    boundary_hooks = {}
     if policy_kind == "all_bf16_map":
         param_dtype_map = {
             name: torch.bfloat16 for name in expected_shapes
@@ -199,6 +258,34 @@ def _run_case(
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
             param_dtype_map=param_dtype_map,
+        )
+    elif policy_kind == "nested_fp32":
+        fp32_policy = MixedPrecisionPolicy(
+            param_dtype=torch.float32,
+            reduce_dtype=torch.float32,
+            cast_forward_inputs=False,
+        )
+        for module_fqn in FP32_MODULES[model_name]:
+            fully_shard(
+                model.get_submodule(module_fqn),
+                mesh=mesh,
+                mp_policy=fp32_policy,
+            )
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+        )
+        expected_dtypes.update(
+            dict.fromkeys(selected_fqns, torch.float32)
+        )
+    elif policy_kind == "mapped_fp32":
+        mp_policy = fsdp_param_dtype_patch.ParamDtypeMixedPrecisionPolicy(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            param_dtype_map=dict.fromkeys(selected_fqns, torch.float32),
+        )
+        expected_dtypes.update(
+            dict.fromkeys(selected_fqns, torch.float32)
         )
     else:
         mp_policy = MixedPrecisionPolicy(
@@ -210,13 +297,16 @@ def _run_case(
     hook_calls = _register_unsharded_param_hook(
         model,
         expected_shapes,
-        dict.fromkeys(expected_shapes, torch.bfloat16),
+        expected_dtypes,
     )
+    if policy_kind in ("nested_fp32", "mapped_fp32"):
+        boundary_hooks = _register_fp32_boundaries(model, model_name)
     with sdpa_kernel(SDPBackend.MATH):
         output = model(*inputs)
         output_tuple = _as_output_tuple(output)
         sum(tensor.float().sum() for tensor in output_tuple).backward()
     assert len(hook_calls) == 1
+    assert all(len(calls) == 1 for calls in boundary_hooks.values())
 
     result = RunResult(
         outputs=tuple(tensor.detach().clone() for tensor in output_tuple),
@@ -244,6 +334,7 @@ def main():
     meshes = {topology: _create_mesh(topology) for topology in TOPOLOGIES}
 
     references = {}
+    nested_references = {}
     for model_name in MODEL_NAMES:
         for topology in TOPOLOGIES:
             references[(model_name, topology)] = _run_case(
@@ -251,6 +342,13 @@ def main():
                 topology,
                 meshes[topology],
                 "unpatched",
+                rank,
+            )
+            nested_references[(model_name, topology)] = _run_case(
+                model_name,
+                topology,
+                meshes[topology],
+                "nested_fp32",
                 rank,
             )
 
@@ -281,6 +379,18 @@ def main():
                 mapped,
                 reference,
                 f"{model_name} {topology} all-BF16 map",
+            )
+            mapped_fp32 = _run_case(
+                model_name,
+                topology,
+                meshes[topology],
+                "mapped_fp32",
+                rank,
+            )
+            _assert_run_equal(
+                mapped_fp32,
+                nested_references[(model_name, topology)],
+                f"{model_name} {topology} mapped vs nested FP32",
             )
 
     if rank == 0:
