@@ -82,6 +82,8 @@ class TrainPipelineConfig(abc.ABC):
     supports_cfg_training: bool = True
     # Rollout parity patch group applied by the engine (see monkey_patches; None = none).
     rollout_patch_group: str | None = None
+    # Model-boundary input dtypes (see input_dtype_policy); families opt into casts explicitly.
+    input_dtype_policy: dict = {"latents": None, "cond": None, "timestep": None}
     # Default component paths (miles custom-function style); CLI args override.
     model_backend_path: str = "miles.backends.fsdp_utils.model_backend.DiffusersModelBackend"
     # Native model package import path; required when model_backend_path is MilesModelBackend.
