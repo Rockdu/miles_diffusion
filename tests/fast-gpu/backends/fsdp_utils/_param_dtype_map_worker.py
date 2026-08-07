@@ -120,7 +120,9 @@ def _assert_bitwise_equal(actual, expected, context):
 
 def _assert_run_equal(actual, expected, context):
     assert len(actual.outputs) == len(expected.outputs)
-    for index, (actual_output, expected_output) in enumerate(zip(actual.outputs, expected.outputs)):
+    for index, (actual_output, expected_output) in enumerate(
+        zip(actual.outputs, expected.outputs, strict=True)
+    ):
         _assert_bitwise_equal(
             actual_output,
             expected_output,

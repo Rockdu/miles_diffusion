@@ -6,7 +6,7 @@ import math
 import types
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 import torch.distributed as dist
@@ -23,7 +23,6 @@ from torch.distributed.fsdp._fully_shard._fsdp_collectives import (
     _get_gradient_divide_factors,
     _raise_assert_with_print,
     _to_dtype_if_needed,
-    compiled_autograd_enabled,
 )
 from torch.distributed.fsdp._fully_shard._fsdp_common import DataParallelMeshInfo, FSDPMeshInfo
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam, ShardedState
@@ -38,6 +37,13 @@ from torch.distributed.fsdp._fully_shard._fsdp_param_group import (
     _ModuleToHandleDict,
 )
 from torch.distributed.tensor import DTensor, Shard
+
+if TYPE_CHECKING:
+    from torch.distributed.fsdp._fully_shard._fsdp_collectives import (
+        compiled_autograd_enabled,
+        foreach_reduce_scatter_copy_in,
+    )
+    from torch.distributed.fsdp._fully_shard._fsdp_state import FSDPState
 
 _EXPECTED_TORCH_VERSION = "2.11.0"
 _PATCH_SENTINEL = "_miles_param_dtype_map_patch_applied"
@@ -211,7 +217,7 @@ def _patched_param_group_init(
             raise ValueError("Mixed parameter dtypes require an explicit reduce_dtype")
 
     self.fsdp_params = []
-    for param, module_info in zip(params, param_module_infos):
+    for param, module_info in zip(params, param_module_infos, strict=True):
         override = param_dtype_map.get(param)
         param_mp_policy = (
             replace(
@@ -427,7 +433,7 @@ def _patched_get_param_all_gather_inputs(
         flat_foreach_copy_input = torch.empty((sum(input_numels),), device=device, dtype=param_dtype)
         splits = torch.split(flat_foreach_copy_input, input_numels)
         torch._foreach_copy_(splits, inputs)
-        for i, split in zip(indices, splits):
+        for i, split in zip(indices, splits, strict=True):
             param_all_gather_inputs[i] = [split]
     # MILES_PATCH_REPLACEMENT_END: fsdp-param-dtype-map
 
@@ -500,7 +506,9 @@ def _patched_foreach_reduce(
     current_stream = device_handle.current_stream()
 
     if world_size > 1:
-        for i, (fsdp_param, unsharded_grad) in enumerate(zip(fsdp_params, unsharded_grads)):
+        for i, (fsdp_param, unsharded_grad) in enumerate(
+            zip(fsdp_params, unsharded_grads, strict=True)
+        ):
             if (shard_dim := fsdp_param.fsdp_placement.dim) == 0:
                 continue
             if unsharded_grad.size(shard_dim) % world_size != 0:
@@ -597,7 +605,9 @@ def _patched_foreach_reduce(
         reduce_output = _to_dtype_if_needed(reduce_output, orig_dtype)
         # View out and accumulate sharded gradients
         flat_grad_offset = 0  # [0, reduce_scatter_output_numel - 1]
-        for padded_unsharded_size, fsdp_param in zip(padded_unsharded_sizes, fsdp_params):
+        for padded_unsharded_size, fsdp_param in zip(
+            padded_unsharded_sizes, fsdp_params, strict=True
+        ):
             # Assume even sharding for Shard(i), i > 0; otherwise would require
             # copy-out for contiguous strides
             new_sharded_grad = torch.as_strided(

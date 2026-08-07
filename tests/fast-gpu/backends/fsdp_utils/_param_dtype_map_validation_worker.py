@@ -155,6 +155,7 @@ def test_mixed_forward_backward():
     for (name, param), (reference_name, reference_param) in zip(
         model.named_parameters(),
         reference.named_parameters(),
+        strict=True,
     ):
         assert name == reference_name
         assert param.grad is not None
@@ -192,6 +193,7 @@ def test_empty_map_delegates_to_standard_policy():
     for standard_param, empty_map_param in zip(
         standard_model.parameters(),
         empty_map_model.parameters(),
+        strict=True,
     ):
         assert standard_param.grad is not None
         assert empty_map_param.grad is not None
