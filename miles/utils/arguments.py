@@ -208,20 +208,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default="{}",
                 help="Extra environment variables for training process, e.g. PyTorch memory management ones.",
             )
-            parser.add_argument(
-                "--train-memory-margin-bytes",
-                type=int,
-                default=1024**3,
-                help="Add margin for train memory allocation. By default we will reserve 1GB as margin.",
-            )
-            parser.add_argument(
-                "--recompute-loss-function",
-                action="store_true",
-                help="Whether to disable recompute loss function to save memory during training.",
-            )
-            parser.add_argument(
-                "--log-probs-chunk-size", type=int, default=-1, help="Chunk size to compute log probs to save memory"
-            )
 
             return parser
 
@@ -237,16 +223,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "Note that, we will always update the parameters in sglang with that of megatron before training, "
                     "so you only need to provide a huggingface checkpoint that has the same architecture as the model you want to train. "
                     "It doesn't necessary need to contain the most up-to-date parameters."
-                ),
-            )
-            parser.add_argument(
-                "--model-name",
-                type=str,
-                default=None,
-                help=(
-                    "The name of the model, this is used to convert the megatron weights into huggingface format. "
-                    "If not set, we will use `type(AutoConfig.from_pretrained(args.hf_checkpoint)).__name__.lower()` as model_name. "
-                    "Also, sometimes this will help alleviate the bug that transformers cannot find certain model."
                 ),
             )
             parser.add_argument(
@@ -280,12 +256,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=str,
                 default=None,
                 help="Model loading function path; default from the family config.",
-            )
-            parser.add_argument(
-                "--diffusion-device",
-                type=str,
-                default=None,
-                help="Device for diffusion rollout, e.g. cuda or cpu. Defaults to auto.",
             )
             parser.add_argument(
                 "--diffusion-num-steps",
@@ -444,23 +414,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Set rollout_debug_mode=true on POST /rollout/generate.",
             )
             parser.add_argument(
-                "--diffusion-return-prev-latents-mean",
-                action="store_true",
-                help="Whether to store prev_latents_mean for KL regularization.",
-            )
-            parser.add_argument(
-                "--diffusion-reward",
-                type=str,
-                default="pickscore",
-                help="Reward function name for diffusion rollout.",
-            )
-            parser.add_argument(
-                "--diffusion-reward-device",
-                type=str,
-                default=None,
-                help="Device for diffusion reward model, defaults to diffusion-device.",
-            )
-            parser.add_argument(
                 "--diffusion-log-images",
                 type=int,
                 default=0,
@@ -600,12 +553,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "buffer size for update weight, in bytes. "
                     "This is used for updating weights by chunk and should be useful for MoE models."
                 ),
-            )
-            parser.add_argument(
-                "--update-weights-interval",
-                type=int,
-                default=1,
-                help="Interval for updating the weights",
             )
             return parser
 
@@ -862,11 +809,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             )
             reset_arg(parser, "--seed", type=int, default=1234)
             reset_arg(parser, "--clip-grad", type=float, default=1.0)
-            reset_arg(parser, "--calculate-per-token-loss", action="store_true")
             reset_arg(parser, "--lr", type=float, default=1e-6)
-
-            parser.add_argument("--eps-clip", type=float, default=0.2, help="PPO clip range")
-            parser.add_argument("--eps-clip-high", type=float, default=None, help="PPO clip upper range")
             parser.add_argument(
                 "--loss-type",
                 type=str,
@@ -939,18 +882,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default="grpo",
             )
             parser.add_argument(
-                "--disable-compute-advantages-and-returns",
-                action="store_false",
-                dest="compute_advantages_and_returns",
-                help=(
-                    "Whether to disable computing advantages and returns. "
-                    "If set, we will not compute the advantages and returns, "
-                    "This is useful for sft or custom loss function."
-                ),
-            )
-            parser.add_argument("--entropy-coef", type=float, default=0.0, help="Entropy loss coef")
-            parser.add_argument("--normalize-advantages", action="store_true", default=False)
-            parser.add_argument(
                 "--disable-grpo-std-normalization",
                 action="store_false",
                 dest="grpo_std_normalization",
@@ -973,15 +904,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Use batch-wide std instead of per-group std for GRPO advantage. "
                     "flow_grpo's pickscore recipe sets global_std=True, so enable this for parity."
-                ),
-            )
-            parser.add_argument(
-                "--use-rollout-entropy",
-                action="store_true",
-                default=False,
-                help=(
-                    "Whether to calculate the entropy when calculating the logprobs from actor and reference model. "
-                    "This is useful for doing special loss mask."
                 ),
             )
             return parser
@@ -1105,12 +1027,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             )
 
             # LoRA
-            parser.add_argument(
-                "--diffusion-ignore-last",
-                type=int,
-                default=0,
-                help="Skip last N denoising steps for training (avoids small-sigma numerical issues). FlowGRPO/DanceGRPO use 1.",
-            )
             parser.add_argument(
                 "--use-lora", action="store_true", default=False, help="Use LoRA adapters instead of full finetune."
             )
@@ -1245,12 +1161,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             )
             parser.add_argument(
                 "--group-rm", action="store_true", default=False, help="Whether to do rm on a whole group."
-            )
-            parser.add_argument(
-                "--rm-url",
-                type=str,
-                default=None,
-                help="URL for the reward model service for --rm-type remote_rm, e.g. http://localhost:8000",
             )
             parser.add_argument(
                 "--ocr-num-workers",
@@ -1502,15 +1412,6 @@ def miles_validate_args(args):
     if args.save_interval is not None:
         assert args.save is not None, "'--save' is required when save_interval is set."
 
-    if args.advantage_estimator in ["reinforce_plus_plus", "reinforce_plus_plus_baseline"]:
-        assert args.normalize_advantages, (
-            "The 'reinforce_plus_plus' and 'reinforce_plus_plus_baseline' advantage estimators "
-            "require advantage normalization. Please add `--normalize-advantages` to your command."
-        )
-
-    if args.eps_clip_high is None:
-        args.eps_clip_high = args.eps_clip
-
     if (args.micro_batch_size_sample is None) != (args.micro_batch_size_tstep is None):
         raise ValueError("--micro-batch-size-sample and --micro-batch-size-tstep must be set together")
     if args.micro_batch_size_sample is not None:
@@ -1635,9 +1536,6 @@ def miles_validate_args(args):
             args.actor_num_nodes = args.rollout_num_gpus // args.actor_num_gpus_per_node
         args.colocate = False
         args.offload_train = args.offload_rollout = False
-        if args.train_memory_margin_bytes > 0:
-            logger.warning("Force train_memory_margin_bytes=0 since debug_rollout_only does not support it")
-            args.train_memory_margin_bytes = 0
 
     assert not (args.debug_rollout_only and args.debug_train_only), (
         "debug_rollout_only and debug_train_only cannot be set at the same time, " "please set only one of them."
