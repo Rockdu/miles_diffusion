@@ -27,6 +27,18 @@ class MixedParamDtypeModel(nn.Module):
         return low_precision_output + full_precision_output.to(low_precision_output.dtype)
 
 
+class DtypeProbe(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(8))
+        self.bias = nn.Parameter(torch.randn(8))
+        self.seen_param_dtypes = None
+
+    def forward(self, x):
+        self.seen_param_dtypes = (self.weight.dtype, self.bias.dtype)
+        return x * self.weight + self.bias.to(x.dtype)
+
+
 def _policy(param_dtype_map, reduce_dtype=torch.float32):
     return fsdp_param_dtype_patch.ParamDtypeMixedPrecisionPolicy(
         param_dtype=torch.bfloat16,
@@ -44,18 +56,21 @@ def _assert_value_error(expected, fn):
         raise AssertionError(f"Expected ValueError containing {expected!r}")
 
 
-def test_ambiguous_multi_module_fqn():
-    modules = [
-        nn.Linear(8, 8).cuda(),
-        nn.Linear(8, 8).cuda(),
-    ]
-    _assert_value_error(
-        "param_dtype_map FQN 'weight' is ambiguous",
-        lambda: fully_shard(
-            modules,
-            mp_policy=_policy({"weight": torch.float32}),
+def test_duplicate_multi_module_fqn_broadcasts():
+    modules = [DtypeProbe().cuda() for _ in range(3)]
+    fully_shard(
+        modules,
+        mp_policy=_policy(
+            {
+                "weight": torch.float32,
+                "bias": torch.bfloat16,
+            }
         ),
     )
+    output = sum(module(torch.randn(2, 8, device="cuda")) for module in modules)
+    output.sum().backward()
+    for module in modules:
+        assert module.seen_param_dtypes == (torch.float32, torch.bfloat16)
 
 
 def test_same_fqn_in_separate_wraps():
@@ -79,6 +94,26 @@ def test_same_fqn_for_shared_parameter():
     fully_shard(
         modules,
         mp_policy=_policy({"weight": torch.float32}),
+    )
+
+
+def test_shared_parameter_alias_dtype_conflict():
+    shared_param = nn.Parameter(torch.randn(8, device="cuda"))
+    first = nn.Module()
+    first.register_parameter("first", shared_param)
+    second = nn.Module()
+    second.register_parameter("second", shared_param)
+    _assert_value_error(
+        "conflicting dtypes to shared parameter aliases",
+        lambda: fully_shard(
+            [first, second],
+            mp_policy=_policy(
+                {
+                    "first": torch.float32,
+                    "second": torch.bfloat16,
+                }
+            ),
+        ),
     )
 
 
@@ -217,9 +252,10 @@ def test_reduce_scatter_copy_in_with_empty_grad():
 
 
 TEST_CASES = {
-    "ambiguous-multi-module-fqn": test_ambiguous_multi_module_fqn,
+    "duplicate-multi-module-fqn": test_duplicate_multi_module_fqn_broadcasts,
     "same-fqn-separate-wraps": test_same_fqn_in_separate_wraps,
     "same-fqn-shared-parameter": test_same_fqn_for_shared_parameter,
+    "shared-parameter-alias-conflict": test_shared_parameter_alias_dtype_conflict,
     "unknown-fqn": test_unknown_fqn,
     "mixed-requires-reduce-dtype": (test_mixed_trainable_dtypes_require_reduce_dtype),
     "frozen-override-no-reduce-dtype": (test_frozen_override_does_not_require_reduce_dtype),
