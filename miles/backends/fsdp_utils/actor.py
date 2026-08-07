@@ -669,16 +669,21 @@ def apply_fsdp2(
     }
 
     def make_mp_policy(param_dtype_map):
+        # cast_forward_inputs defaults to True and reaches into dataclass arguments, so it
+        # silently bf16s inputs a family passes in fp32 on purpose (LTX's sigma: 2e-3 rel
+        # before the AdaLN sinusoid). Boundary dtypes belong to the family forward.
         if param_dtype_map:
             assert param_dtype_policy_cls is not None
             return param_dtype_policy_cls(
                 param_dtype=param_dtype,
                 reduce_dtype=reduce_dtype,
                 param_dtype_map=param_dtype_map,
+                cast_forward_inputs=False,
             )
         return MixedPrecisionPolicy(
             param_dtype=param_dtype,
             reduce_dtype=reduce_dtype,
+            cast_forward_inputs=False,
         )
 
     if args.gradient_checkpointing:
