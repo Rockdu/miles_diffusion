@@ -59,12 +59,8 @@ class MixedParamDtypeBlock(nn.Module):
             self.full_precision.weight.dtype,
         )
         low_precision_output = self.low_precision(x)
-        full_precision_output = self.full_precision(
-            x.to(self.full_precision.weight.dtype)
-        )
-        return low_precision_output + full_precision_output.to(
-            low_precision_output.dtype
-        )
+        full_precision_output = self.full_precision(x.to(self.full_precision.weight.dtype))
+        return low_precision_output + full_precision_output.to(low_precision_output.dtype)
 
 
 class MixedParamDtypeModel(nn.Module):
