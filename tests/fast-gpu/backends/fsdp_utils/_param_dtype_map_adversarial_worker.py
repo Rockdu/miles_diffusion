@@ -1,3 +1,34 @@
+"""Adversarial four-GPU coverage for mixed dtypes, padding, and aliases.
+
+The parameter zoo deliberately combines dimensions that shard unevenly and
+dtypes that exercise different cast paths:
+
+    prime/empty shapes                 parameter categories
+    +-----------------------+          +-------------------------------+
+    | 7, 97, 101, 103       |    x     | trainable: FP8/16/BF16/32/64 |
+    | (0, 97, 101)          |          | frozen: int/uint/bool/complex |
+    +-----------------------+          +-------------------------------+
+                 |
+                 +--------------------------+
+                 |                          |
+                 v                          v
+        one module, FSDP 1 x 4     left/right modules, HSDP 2 x 2
+                                   + shared frozen int16 alias
+                 |                          |
+                 +------------+-------------+
+                              v
+    dtype map -> shard -> all-gather -> forward touches every parameter
+                              |
+                              v
+              backward -> FP32 reduce -> reconstructed full gradients
+
+Forward-pre-hooks verify that all-gather removes padding from visible parameter
+shapes and preserves every expected dtype and numel. The backward check derives
+the exact rank-averaged gradient independently for each source dtype. Frozen
+non-floating and complex parameters are ignored by FSDP but still participate in
+the forward, proving that ignored parameters coexist with the mixed-dtype group.
+"""
+
 import argparse
 import os
 from dataclasses import dataclass

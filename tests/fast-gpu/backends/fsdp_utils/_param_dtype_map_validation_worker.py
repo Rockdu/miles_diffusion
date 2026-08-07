@@ -1,3 +1,38 @@
+"""Targeted four-GPU tests for API semantics and communication edge cases.
+
+The pytest driver launches this worker once per named case so that an expected
+initialization failure cannot contaminate the process state of another case:
+
+    torchrun (4 ranks)
+           |
+           v
+    install Miles patch
+           |
+           v
+    select exactly one TEST_CASES entry
+           |
+           +-- FQN selector semantics
+           |     duplicate FQN across modules ------> broadcast rule
+           |     separate wraps with the same FQN --> independent rules
+           |     shared aliases, same dtype --------> accepted
+           |     shared aliases, different dtype ---> rejected
+           |
+           +-- policy validation
+           |     unknown FQN -----------------------> rejected
+           |     mixed trainable dtypes, no reduce -> rejected
+           |     frozen override, no reduce --------> accepted
+           |     empty map -------------------------> standard-policy parity
+           |
+           +-- numerical/data-path checks
+                 grouped FP32 norms --> separate-wrap bitwise parity
+                 BF16 + FP32 params -> forward/backward gradient parity
+                 empty gradient ----> reduce-scatter packing parity
+
+The small models isolate one contract at a time. Tests that execute a forward
+record the gathered parameter dtype inside the module, and parity cases compare
+outputs and reconstructed full gradients exactly.
+"""
+
 import argparse
 import copy
 import os

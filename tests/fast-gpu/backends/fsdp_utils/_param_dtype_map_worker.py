@@ -1,3 +1,39 @@
+"""Four-GPU end-to-end parity tests for the FSDP param-dtype patch.
+
+Test matrix:
+
+    full-size block                 data-parallel topology
+    +----------------------+        +----------------------+
+    | Wan 2.2              |   x    | FSDP: 1 x 4 shards  |
+    | LTX 2.3              |        | HSDP: 2 x 2 mesh    |
+    +----------------------+        +----------------------+
+                |
+                v
+    deterministic model parameters + per-rank Gaussian inputs
+                |
+      +---------+---------------------------+
+      | before installing the patch         |
+      |                                     |
+      | standard BF16 ------> BF16 reference|
+      | nested FP32 wraps --> FP32 reference|
+      +---------+---------------------------+
+                |
+                v
+          install Miles patch
+                |
+      +---------+---------------------------+
+      | patched standard BF16 --bitwise----> BF16 reference
+      | all-BF16 dtype map -----bitwise----> BF16 reference
+      | mapped FP32 params ------bitwise----> nested FP32 reference
+      +-------------------------------------+
+
+Each path runs a real forward and backward. A forward-pre-hook observes parameters
+after all-gather and checks the complete FQN set, dtype, logical shape, and numel,
+including parameters that require dim-0 shard padding. FP32 boundary hooks make
+the mapped and nested paths use identical input/output casting semantics. Final
+outputs and reconstructed full gradients must be bitwise equal.
+"""
+
 import gc
 import os
 from dataclasses import dataclass
