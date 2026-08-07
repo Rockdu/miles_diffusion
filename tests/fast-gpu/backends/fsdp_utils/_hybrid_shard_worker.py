@@ -14,10 +14,7 @@ from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_common import HSDPMeshInfo
 from torch.distributed.tensor import DTensor, Replicate
 
-from miles.backends.fsdp_utils.checkpoint import (
-    broadcast_full_state_to_fsdp,
-    ModelState,
-)
+from miles.backends.fsdp_utils.checkpoint import ModelState, broadcast_full_state_to_fsdp
 from miles.backends.fsdp_utils.parallel import create_fsdp_parallel_state
 from miles.backends.fsdp_utils.sequence_parallel.plan import SequenceParallelPlan, apply_sequence_parallel
 from miles.utils.distributed_utils import init_gloo_group
