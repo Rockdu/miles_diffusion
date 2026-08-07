@@ -74,7 +74,7 @@ def prepare_flow_grpo_batch(
         if use_cfg
         else None
     )
-    cond_dtype = cond_dtype if config.cast_cond_to_forward_dtype else None
+    cond_dtype = ctx.forward_dtype if config.cast_cond_to_forward_dtype else None
     cfg_batching = use_cfg and bool(args.fsdp_cfg_batching)
     joint_cond = pos_cond = neg_cond = None
     if cfg_batching:
