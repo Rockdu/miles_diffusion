@@ -82,6 +82,21 @@ class TrainPipelineConfig(abc.ABC):
     supports_cfg_training: bool = True
     # Rollout parity patch group applied by the engine (see monkey_patches; None = none).
     rollout_patch_group: str | None = None
+
+    # Root-relative FQN glob -> dtype name ("fp32"/"fp16"/"bf16") compiled into
+    # per-wrap FSDP MixedPrecisionPolicy maps (see apply_fsdp2). Families pin
+    # params here whose rollout engine keeps them resident above forward dtype.
+    fsdp_param_dtype_patterns: dict[str, str] = {}
+    # Whether loss-hub batch prep casts cond kwargs to the forward dtype.
+    # Families whose rollout engine feeds the raw text-encoder dtype into the
+    # first context linear (verified: sglang-d never casts text cond) set this
+    # False so the training matmul consumes the same input dtype.
+    cast_cond_to_forward_dtype: bool = True
+    # Whether the actor casts the model timestep input to the forward dtype.
+    # Families whose rollout keeps the raw timestep fp32 set this False --
+    # a bf16 timestep rounds (960.129 -> 960.0) and the sinusoidal embedding
+    # amplifies the difference.
+    cast_timestep_to_forward_dtype: bool = True
     # Default component paths (miles custom-function style); CLI args override.
     model_backend_path: str = "miles.backends.fsdp_utils.model_backend.DiffusersModelBackend"
     # Native model package import path; required when model_backend_path is MilesModelBackend.

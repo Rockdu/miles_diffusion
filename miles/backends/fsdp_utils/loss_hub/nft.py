@@ -40,7 +40,7 @@ def prepare_nft_batch(
     pos_list = [config.prepare_cond_kwargs(batch[i]["denoising_env"].pos_cond_kwargs, device) for i in range(bsz)]
     pos_cond = cast_cond_to_dtype(
         config.collate_cond_for_sample_batch(pos_list, device, pad_to_len=pad_to_len),
-        ctx.forward_dtype,
+        (ctx.forward_dtype if config.cast_cond_to_forward_dtype else None),
     )
 
     num_train_timesteps = ctx.scheduler.config.num_train_timesteps

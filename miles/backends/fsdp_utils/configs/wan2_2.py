@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import types
+
 import torch
+import torch.nn.functional as F
 from miles.utils.types import CondKwargs
 
 from .train_pipeline_config import TrainPipelineConfig, register_train_pipeline_config
@@ -11,11 +14,53 @@ from .train_pipeline_config import TrainPipelineConfig, register_train_pipeline_
 @register_train_pipeline_config("wan2_2")
 class Wan2_2TrainPipelineConfig(TrainPipelineConfig):
     hf_ckpt_name_patterns = ("wan2.2", "wan-2.2")
+    # Rollout parity: replace the fused norm/residual kernels with Wan-exact
+    # fp32-once eager ops (patch_wan_norm_ops). The fused kernels quantize the
+    # normed value to bf16 mid-chain and inject ~3e-3 rel per site vs the
+    # trainer; eager costs rollout speed, which parity dumps accept.
+    rollout_patch_group = "wan"
+    # Rollout (sglang-d) keeps every FP32LayerNorm's affine params resident and
+    # consumed in fp32 (verified on the Wan2.2 full40 dump: rollout norm2
+    # weight/bias are float32 in the forward while the FSDP default policy
+    # gathered them as bf16). Pin them so the training matmul consumes the same
+    # weight dtype. Affine-less FP32LayerNorms (norm1/norm3/norm_out) carry no
+    # tensors; norm2 is the only affine one in the Wan DiT.
+    fsdp_param_dtype_patterns = {
+        "*.norm2.weight": "fp32",
+        "*.norm2.bias": "fp32",
+    }
+    # Boundary inputs, verified against paired sglang-d dumps: rollout casts
+    # the latent to the forward dtype at the boundary but passes the T5 text
+    # embeds through in fp32 -- the first context linear consumes an fp32
+    # input with bf16 weights -- and keeps the raw timestep fp32.
+    # Known residue: diffusers ties temb to the text embeds' dtype
+    # (WanTimeTextImageEmbedding: `.type_as(encoder_hidden_states)`), so the
+    # act_fn/time_proj input records read fp32 where rollout reads bf16;
+    # autocast re-quantizes at the time_proj matmul, so the effective compute
+    # dtype still matches everywhere.
+    cast_cond_to_forward_dtype = False
+    cast_timestep_to_forward_dtype = False
     # High-noise expert ("transformer") handles t >= boundary, low-noise expert
     # ("transformer_2") the rest.
     boundary_ratio = 0.875
     # Wan DiT expects raw scheduler timesteps (0..num_train_timesteps), no /1000 scaling.
     needs_timestep_scaling = False
+
+    def postprocess_model_after_materialize(self, model: torch.nn.Module) -> None:
+        """Patchify with a GEMM, matching the rollout engine, instead of cuDNN Conv3d.
+
+        sglang-d's PatchEmbed never runs the conv when kernel == stride: it
+        rearranges patches and applies F.linear, whose cuBLAS GEMM accumulates
+        in fp32. cuDNN's bf16 Conv3d accumulates less precisely: on paired
+        dumps the conv output disagreed with the engine at rel 2.7e-3 on a
+        bit-exact input while an fp32-accum GEMM reproduces the engine to
+        9e-6 -- and this seed is what every block's norm re-amplifies down the
+        depth. The rearrangement is mathematically identical (stride ==
+        kernel), so this changes the summation kernel, never the math.
+        """
+        for name, module in model.named_modules():
+            if name.endswith("patch_embedding") and isinstance(module, torch.nn.Conv3d):
+                module.forward = types.MethodType(_gemm_patchify_forward, module)
 
     def component_for_timestep(self, timestep: float, num_train_timesteps: int) -> str:
         if timestep >= self.boundary_ratio * num_train_timesteps:
@@ -66,3 +111,17 @@ class Wan2_2TrainPipelineConfig(TrainPipelineConfig):
     ) -> torch.Tensor:
         scale = true_cfg_scale if true_cfg_scale is not None else guidance_scale
         return noise_pred_neg + scale * (noise_pred_pos - noise_pred_neg)
+
+
+def _gemm_patchify_forward(self: torch.nn.Conv3d, x: torch.Tensor) -> torch.Tensor:
+    """Conv3d-as-GEMM for the kernel==stride patchify case (see hook above)."""
+    pt, ph, pw = self.kernel_size
+    batch, chan, t, h, w = x.shape
+    if tuple(self.stride) != (pt, ph, pw) or t % pt or h % ph or w % pw:
+        return F.conv3d(x, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+    t_, h_, w_ = t // pt, h // ph, w // pw
+    x = x.reshape(batch, chan, t_, pt, h_, ph, w_, pw)
+    x = x.permute(0, 2, 4, 6, 1, 3, 5, 7).contiguous()
+    x = x.reshape(batch, t_ * h_ * w_, chan * pt * ph * pw)
+    x = F.linear(x, self.weight.reshape(self.weight.shape[0], -1), self.bias)
+    return x.reshape(batch, t_, h_, w_, -1).permute(0, 4, 1, 2, 3).contiguous()

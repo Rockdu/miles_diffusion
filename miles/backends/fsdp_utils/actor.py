@@ -144,6 +144,7 @@ class FSDPTrainRayActor(TrainRayActor):
                 cpu_offload=self.args.fsdp_cpu_offload,
                 args=self.args,
                 no_split_modules=self.model_backend.fsdp_no_split_modules(model),
+                param_dtype_patterns=self.train_pipeline_config.fsdp_param_dtype_patterns,
             )
             checkpoint.broadcast_full_state_to_fsdp(
                 model,
@@ -514,7 +515,11 @@ class FSDPTrainRayActor(TrainRayActor):
         forward_dtype = self._forward_dtype
 
         latents_input = prepared.latents.to(forward_dtype)
-        timesteps_input = prepared.timesteps_for_model.to(forward_dtype)
+        timesteps_input = (
+            prepared.timesteps_for_model.to(forward_dtype)
+            if train_pipeline_config.cast_timestep_to_forward_dtype
+            else prepared.timesteps_for_model
+        )
 
         def _compute_noise_pred() -> torch.Tensor:
             return train_pipeline_config.compute_noise_pred(

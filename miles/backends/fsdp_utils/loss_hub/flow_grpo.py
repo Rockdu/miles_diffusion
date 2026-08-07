@@ -74,22 +74,23 @@ def prepare_flow_grpo_batch(
         if use_cfg
         else None
     )
+    cond_dtype = cond_dtype if config.cast_cond_to_forward_dtype else None
     cfg_batching = use_cfg and bool(args.fsdp_cfg_batching)
     joint_cond = pos_cond = neg_cond = None
     if cfg_batching:
         joint_cond = cast_cond_to_dtype(
             config.collate_cond_for_sample_batch(pos_list + neg_list, device, pad_to_len=pad_to_len),
-            ctx.forward_dtype,
+            cond_dtype,
         )
     else:
         pos_cond = cast_cond_to_dtype(
             config.collate_cond_for_sample_batch(pos_list, device, pad_to_len=pad_to_len),
-            ctx.forward_dtype,
+            cond_dtype,
         )
         if use_cfg and neg_list is not None:
             neg_cond = cast_cond_to_dtype(
                 config.collate_cond_for_sample_batch(neg_list, device, pad_to_len=pad_to_len),
-                ctx.forward_dtype,
+                cond_dtype,
             )
 
     return PreparedBatch(
