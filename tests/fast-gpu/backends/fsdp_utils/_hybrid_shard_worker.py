@@ -14,8 +14,10 @@ from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_common import HSDPMeshInfo
 from torch.distributed.tensor import DTensor, Replicate
 
-from miles.backends.fsdp_utils.actor import load_sharded_model
-from miles.backends.fsdp_utils.checkpoint import ModelState
+from miles.backends.fsdp_utils.checkpoint import (
+    broadcast_full_state_to_fsdp,
+    ModelState,
+)
 from miles.backends.fsdp_utils.parallel import create_fsdp_parallel_state
 from miles.backends.fsdp_utils.sequence_parallel.plan import SequenceParallelPlan, apply_sequence_parallel
 from miles.utils.distributed_utils import init_gloo_group
@@ -145,7 +147,7 @@ def main():
 
     torch.manual_seed(0)
     model = Tiny().cuda()
-    # Doubles as the rank0 full state dict, which load_sharded_model expects on CPU.
+    # Doubles as the rank0 full state dict, which the broadcast expects on CPU.
     reference = {k: v.detach().clone().cpu() for k, v in model.state_dict().items()}
     mp_policy = MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32)
     for block in model.blocks:
@@ -157,7 +159,11 @@ def main():
     check_fully_shard_topology(model, args.dp_replicate_size, world_size)
 
     # set_model_state_dict moves rank0's tensors onto the device, so hand it a copy.
-    load_sharded_model(model, {k: v.clone() for k, v in reference.items()} if rank == 0 else {}, cpu_offload=False)
+    broadcast_full_state_to_fsdp(
+        model,
+        {k: v.clone() for k, v in reference.items()} if rank == 0 else {},
+        cpu_offload=False,
+    )
     for name, param in model.named_parameters():
         torch.testing.assert_close(param.full_tensor().cpu(), reference[name])
 

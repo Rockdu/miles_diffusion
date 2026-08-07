@@ -5,7 +5,6 @@ from tests.ci.ci_register import register_cuda_ci
 register_cuda_ci(
     est_time=90,
     suite="stage-c-5-gpu-h200",
-    labels=["fsdp"],
 )
 
 import os
