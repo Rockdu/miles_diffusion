@@ -506,9 +506,7 @@ def _patched_foreach_reduce(
     current_stream = device_handle.current_stream()
 
     if world_size > 1:
-        for i, (fsdp_param, unsharded_grad) in enumerate(
-            zip(fsdp_params, unsharded_grads, strict=True)
-        ):
+        for i, (fsdp_param, unsharded_grad) in enumerate(zip(fsdp_params, unsharded_grads, strict=True)):
             if (shard_dim := fsdp_param.fsdp_placement.dim) == 0:
                 continue
             if unsharded_grad.size(shard_dim) % world_size != 0:
@@ -605,9 +603,7 @@ def _patched_foreach_reduce(
         reduce_output = _to_dtype_if_needed(reduce_output, orig_dtype)
         # View out and accumulate sharded gradients
         flat_grad_offset = 0  # [0, reduce_scatter_output_numel - 1]
-        for padded_unsharded_size, fsdp_param in zip(
-            padded_unsharded_sizes, fsdp_params, strict=True
-        ):
+        for padded_unsharded_size, fsdp_param in zip(padded_unsharded_sizes, fsdp_params, strict=True):
             # Assume even sharding for Shard(i), i > 0; otherwise would require
             # copy-out for contiguous strides
             new_sharded_grad = torch.as_strided(
