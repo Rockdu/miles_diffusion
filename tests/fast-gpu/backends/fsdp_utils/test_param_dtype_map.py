@@ -68,6 +68,7 @@ def test_param_dtype_map_adversarial(case):
         "same-fqn-shared-parameter",
         "shared-parameter-aliases-same-dtype",
         "shared-parameter-alias-conflict",
+        "grouped-layer-norm-wrap",
         "unknown-fqn",
         "mixed-requires-reduce-dtype",
         "frozen-override-no-reduce-dtype",
