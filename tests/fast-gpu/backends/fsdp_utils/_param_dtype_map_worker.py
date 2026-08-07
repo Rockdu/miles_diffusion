@@ -8,7 +8,6 @@ from diffusers.models.transformers.transformer_ltx2 import (
     LTX2VideoTransformerBlock,
 )
 from diffusers.models.transformers.transformer_wan import WanTransformerBlock
-from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 from torch.distributed.tensor import DTensor
@@ -32,17 +31,16 @@ class RunResult:
 def _create_wan_case(rank):
     torch.manual_seed(MODEL_SEED)
     model = WanTransformerBlock(
-        dim=64,
-        ffn_dim=96,
-        num_heads=4,
+        dim=5120,
+        ffn_dim=13824,
+        num_heads=40,
         cross_attn_norm=True,
-        added_kv_proj_dim=64,
     ).cuda()
     torch.manual_seed(INPUT_SEED + rank)
     inputs = (
-        torch.randn(2, 7, 64, device="cuda"),
-        torch.randn(2, 5, 64, device="cuda"),
-        torch.randn(2, 6, 64, device="cuda"),
+        torch.randn(1, 3, 5120, device="cuda"),
+        torch.randn(1, 2, 5120, device="cuda"),
+        torch.randn(1, 6, 5120, device="cuda"),
         None,
     )
     return model, inputs
@@ -51,27 +49,27 @@ def _create_wan_case(rank):
 def _create_ltx_case(rank):
     torch.manual_seed(MODEL_SEED)
     model = LTX2VideoTransformerBlock(
-        dim=64,
-        num_attention_heads=4,
-        attention_head_dim=16,
-        cross_attention_dim=64,
-        audio_dim=32,
-        audio_num_attention_heads=4,
-        audio_attention_head_dim=8,
-        audio_cross_attention_dim=32,
+        dim=4096,
+        num_attention_heads=32,
+        attention_head_dim=128,
+        cross_attention_dim=4096,
+        audio_dim=2048,
+        audio_num_attention_heads=32,
+        audio_attention_head_dim=64,
+        audio_cross_attention_dim=2048,
     ).cuda()
     torch.manual_seed(INPUT_SEED + rank)
     inputs = (
-        torch.randn(2, 7, 64, device="cuda"),
-        torch.randn(2, 5, 32, device="cuda"),
-        torch.randn(2, 3, 64, device="cuda"),
-        torch.randn(2, 4, 32, device="cuda"),
-        torch.randn(2, 1, 6 * 64, device="cuda"),
-        torch.randn(2, 1, 6 * 32, device="cuda"),
-        torch.randn(2, 1, 4 * 64, device="cuda"),
-        torch.randn(2, 1, 4 * 32, device="cuda"),
-        torch.randn(2, 1, 64, device="cuda"),
-        torch.randn(2, 1, 32, device="cuda"),
+        torch.randn(1, 3, 4096, device="cuda"),
+        torch.randn(1, 2, 2048, device="cuda"),
+        torch.randn(1, 2, 4096, device="cuda"),
+        torch.randn(1, 2, 2048, device="cuda"),
+        torch.randn(1, 1, 6 * 4096, device="cuda"),
+        torch.randn(1, 1, 6 * 2048, device="cuda"),
+        torch.randn(1, 1, 4 * 4096, device="cuda"),
+        torch.randn(1, 1, 4 * 2048, device="cuda"),
+        torch.randn(1, 1, 4096, device="cuda"),
+        torch.randn(1, 1, 2048, device="cuda"),
     )
     return model, inputs
 
