@@ -38,6 +38,7 @@ from .ema import EmaShadow
 from .loss_hub import DiffusionLossContext, flow_grpo_loss_formula, prepare_flow_grpo_batch
 from .lr_scheduler import get_lr_scheduler
 from .metrics import new_metric_buffer
+from .mixed_precision import compile_param_dtype_maps
 from .parallel import create_fsdp_parallel_state
 from .sequence_parallel.plan import apply_sequence_parallel
 
@@ -609,7 +610,20 @@ def apply_lora(model: torch.nn.Module, args: Namespace, train_pipeline_config) -
     return model
 
 
-def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules=None):
+def apply_fsdp2(
+    model,
+    mesh=None,
+    cpu_offload=False,
+    args=None,
+    no_split_modules=None,
+    param_dtype_patterns=None,
+):
+    """Apply FSDP2, optionally compiling root-relative parameter dtype rules.
+
+    ``param_dtype_patterns`` is matched against FQNs from ``model``. Each child
+    ``fully_shard`` call receives exact FQNs relative to that child module, while
+    parameters managed by the root call retain their root-relative FQNs.
+    """
     from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, fully_shard
 
     offload_policy = CPUOffloadPolicy() if cpu_offload else None
@@ -621,18 +635,48 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules
 
     param_dtype = _resolve_dtype(args.diffusion_forward_dtype)
     reduce_dtype = _resolve_dtype(args.fsdp_reduce_dtype)
+    param_dtype_maps = compile_param_dtype_maps(
+        model,
+        modules,
+        param_dtype_patterns or {},
+        param_dtype,
+    )
+    has_param_dtype_overrides = bool(
+        param_dtype_maps.module_maps or param_dtype_maps.root_map
+    )
+    param_dtype_policy_cls = None
+    if has_param_dtype_overrides:
+        from .fsdp_param_dtype_patch import (
+            ParamDtypeMixedPrecisionPolicy,
+            apply_param_dtype_map_patch,
+        )
+
+        apply_param_dtype_map_patch()
+        param_dtype_policy_cls = ParamDtypeMixedPrecisionPolicy
     logger.info(
-        f"FSDP: wrapping {len(modules)} modules of type {layer_cls_to_wrap}, param_dtype={param_dtype}, reduce_dtype={reduce_dtype}"
+        f"FSDP: wrapping {len(modules)} modules of type {layer_cls_to_wrap}, "
+        f"param_dtype={param_dtype}, reduce_dtype={reduce_dtype}, "
+        f"param_dtype_overrides={param_dtype_maps.override_count} "
+        f"({param_dtype_maps.override_numel:,} parameters)"
     )
 
     fsdp_kwargs = {
-        "mp_policy": MixedPrecisionPolicy(
-            param_dtype=param_dtype,
-            reduce_dtype=reduce_dtype,
-        ),
         "offload_policy": offload_policy,
         "mesh": mesh,
     }
+
+    def make_mp_policy(param_dtype_map):
+        if param_dtype_map:
+            assert param_dtype_policy_cls is not None
+            return param_dtype_policy_cls(
+                param_dtype=param_dtype,
+                reduce_dtype=reduce_dtype,
+                param_dtype_map=param_dtype_map,
+            )
+        return MixedPrecisionPolicy(
+            param_dtype=param_dtype,
+            reduce_dtype=reduce_dtype,
+        )
 
     if args.gradient_checkpointing:
         # MixedPrecisionPolicy does not cast buffers; a buffer above param_dtype
@@ -644,8 +688,16 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules
                     module.register_buffer(name, buf.to(param_dtype), persistent=persistent)
 
     for module in modules:
-        fully_shard(module, **fsdp_kwargs)
+        fully_shard(
+            module,
+            mp_policy=make_mp_policy(param_dtype_maps.module_maps.get(module)),
+            **fsdp_kwargs,
+        )
 
-    fully_shard(model, **fsdp_kwargs)
+    fully_shard(
+        model,
+        mp_policy=make_mp_policy(param_dtype_maps.root_map),
+        **fsdp_kwargs,
+    )
 
     return model
