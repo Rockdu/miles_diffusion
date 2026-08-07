@@ -98,6 +98,11 @@ def _bind_to_collectives(fn, name: str, *, no_grad: bool):
     return torch.no_grad()(bound) if no_grad else bound
 
 
+# =============================================================================
+# MILES PATCH: Resolve exact FQNs to managed Parameter objects
+# ------------------------------- UPSTREAM ------------------------------------
+# No upstream counterpart.
+# +++++++++++++++++++++++++++++ MILES ADDITION ++++++++++++++++++++++++++++++++
 def _resolve_param_dtype_map(
     mp_policy: TorchMixedPrecisionPolicy,
     modules: tuple[nn.Module, ...],
@@ -131,6 +136,7 @@ def _resolve_param_dtype_map(
             f"by this fully_shard call: {unknown_fqns}"
         )
     return resolved_map
+# ============================ END MILES PATCH ================================
 
 
 # Copied from PyTorch v2.11.0 at 70d99e998b4955e0049d13a98d77ae1b14db1f45.
@@ -150,24 +156,15 @@ def _patched_init_param_group(
 
     This is shared between fully_shard and replicate.
     """
-    # MILES_PATCH_UPSTREAM_BEGIN: fsdp-param-dtype-map
-    # from ._fsdp_param_group import FSDPParamGroup
-    #
+    # =============================================================================
+    # MILES PATCH: Resolve the public FQN map before constructing the param group
+    # ------------------------------- UPSTREAM ------------------------------------
     # if params:
-    #     state._fsdp_param_group = FSDPParamGroup(
-    #         params,
-    #         modules,
-    #         mesh_info,
-    #         post_forward_mesh_info,
-    #         device,
-    #         shard_placement_fn,
-    #         mp_policy,
-    #         offload_policy,
-    #     )
-    # MILES_PATCH_UPSTREAM_END: fsdp-param-dtype-map
-    # MILES_PATCH_REPLACEMENT_BEGIN: fsdp-param-dtype-map
+    # +++++++++++++++++++++++++++++++++ MILES +++++++++++++++++++++++++++++++++++++++
     if params:
         param_dtype_map = _resolve_param_dtype_map(mp_policy, modules, params)
+    # ============================ END MILES PATCH ================================
+
         state._fsdp_param_group = FSDPParamGroup(
             params,
             modules,
@@ -177,9 +174,14 @@ def _patched_init_param_group(
             shard_placement_fn,
             mp_policy,
             offload_policy,
+            # =============================================================================
+            # MILES PATCH: Pass resolved Parameter-to-dtype overrides to the group
+            # ------------------------------- UPSTREAM ------------------------------------
+            # No argument follows `offload_policy`.
+            # +++++++++++++++++++++++++++++ MILES ADDITION ++++++++++++++++++++++++++++++++
             param_dtype_map,
+            # ============================ END MILES PATCH ================================
         )
-    # MILES_PATCH_REPLACEMENT_END: fsdp-param-dtype-map
 
 
 # Copied from PyTorch v2.11.0 at 70d99e998b4955e0049d13a98d77ae1b14db1f45.
@@ -193,12 +195,34 @@ def _patched_param_group_init(
     shard_placement_fn: Callable[[nn.Parameter], Shard | None] | None,
     mp_policy: TorchMixedPrecisionPolicy,
     offload_policy: OffloadPolicy,
+    # =============================================================================
+    # MILES PATCH: Accept the resolved Parameter-to-dtype map
+    # ------------------------------- UPSTREAM ------------------------------------
+    # No argument follows `offload_policy`.
+    # +++++++++++++++++++++++++++++ MILES ADDITION ++++++++++++++++++++++++++++++++
     param_dtype_map: dict[nn.Parameter, torch.dtype] | None = None,
+    # ============================ END MILES PATCH ================================
 ) -> None:
     self.modules = modules  # permit ref cycle because 1:1 lifetime
     param_module_infos = _get_param_module_infos(params, modules)
 
-    # MILES_PATCH_UPSTREAM_BEGIN: fsdp-param-dtype-map
+    # =============================================================================
+    # MILES PATCH: Validate the effective trainable parameter dtypes
+    # ------------------------------- UPSTREAM ------------------------------------
+    # No validation before constructing `self.fsdp_params`.
+    # +++++++++++++++++++++++++++++++++ MILES +++++++++++++++++++++++++++++++++++++++
+    param_dtype_map = param_dtype_map or {}
+    if param_dtype_map:
+        effective_dtypes = {
+            param_dtype_map.get(param, mp_policy.param_dtype) or param.dtype for param in params if param.requires_grad
+        }
+        if len(effective_dtypes) > 1 and mp_policy.reduce_dtype is None:
+            raise ValueError("Mixed parameter dtypes require an explicit reduce_dtype")
+    # ============================ END MILES PATCH ================================
+
+    # =============================================================================
+    # MILES PATCH: Apply each override without changing FSDPParam.__init__
+    # ------------------------------- UPSTREAM ------------------------------------
     # self.fsdp_params = [
     #     FSDPParam(
     #         param,
@@ -212,16 +236,7 @@ def _patched_param_group_init(
     #     )
     #     for param, module_info in zip(params, param_module_infos)
     # ]
-    # MILES_PATCH_UPSTREAM_END: fsdp-param-dtype-map
-    # MILES_PATCH_REPLACEMENT_BEGIN: fsdp-param-dtype-map
-    param_dtype_map = param_dtype_map or {}
-    if param_dtype_map:
-        effective_dtypes = {
-            param_dtype_map.get(param, mp_policy.param_dtype) or param.dtype for param in params if param.requires_grad
-        }
-        if len(effective_dtypes) > 1 and mp_policy.reduce_dtype is None:
-            raise ValueError("Mixed parameter dtypes require an explicit reduce_dtype")
-
+    # +++++++++++++++++++++++++++++++++ MILES +++++++++++++++++++++++++++++++++++++++
     self.fsdp_params = []
     for param, module_info in zip(params, param_module_infos, strict=True):
         override = param_dtype_map.get(param)
@@ -246,7 +261,7 @@ def _patched_param_group_init(
         )
         fsdp_param._param_dtype_override = override
         self.fsdp_params.append(fsdp_param)
-    # MILES_PATCH_REPLACEMENT_END: fsdp-param-dtype-map
+    # ============================ END MILES PATCH ================================
 
     self.mesh_info = mesh_info
     self.post_forward_mesh_info = post_forward_mesh_info
@@ -328,39 +343,36 @@ def _patched_init_dtype_attrs(
     self: FSDPParam,
     mp_policy: TorchMixedPrecisionPolicy,
 ) -> None:
-    # MILES_PATCH_UPSTREAM_BEGIN: fsdp-param-dtype-map
+    # =============================================================================
+    # MILES PATCH: Select this parameter's effective dtype
+    # ------------------------------- UPSTREAM ------------------------------------
     # param_dtype, reduce_dtype = (mp_policy.param_dtype, mp_policy.reduce_dtype)
-    # self.orig_dtype = self.sharded_param.dtype
-    # # Clamp `reduce_dtype` to `None` if no casting is required: since
-    # # gradients are computed in `param_dtype`, if `reduce_dtype` matches,
-    # # then we do not need extra casting
-    # if reduce_dtype == param_dtype:
-    #     reduce_dtype = None
-    # # Clamp `param_dtype` to `None` if no casting is required
-    # if param_dtype == self.orig_dtype:
-    #     param_dtype = None
-    # self.param_dtype = param_dtype
-    # self.reduce_dtype = reduce_dtype
-    # # None indicates that the mixed precision is not enabled
-    # MILES_PATCH_UPSTREAM_END: fsdp-param-dtype-map
-    # MILES_PATCH_REPLACEMENT_BEGIN: fsdp-param-dtype-map
+    # +++++++++++++++++++++++++++++++++ MILES +++++++++++++++++++++++++++++++++++++++
     has_param_dtype_map = isinstance(mp_policy, ParamDtypeMixedPrecisionPolicy) and bool(mp_policy.param_dtype_map)
     param_dtype = self._param_dtype_override if self._param_dtype_override is not None else mp_policy.param_dtype
     reduce_dtype = mp_policy.reduce_dtype
+    # ============================ END MILES PATCH ================================
+
     self.orig_dtype = self.sharded_param.dtype
     # Clamp `reduce_dtype` to `None` if no casting is required: since
     # gradients are computed in `param_dtype`, if `reduce_dtype` matches,
     # then we do not need extra casting
+    # =============================================================================
+    # MILES PATCH: Keep the common reduce dtype for a per-parameter dtype map
+    # ------------------------------- UPSTREAM ------------------------------------
+    # if reduce_dtype == param_dtype:
+    #     reduce_dtype = None
+    # +++++++++++++++++++++++++++++++++ MILES +++++++++++++++++++++++++++++++++++++++
     # Per-parameter mixed dtypes require one explicit group reduce dtype.
     if not has_param_dtype_map and reduce_dtype == param_dtype:
         reduce_dtype = None
+    # ============================ END MILES PATCH ================================
     # Clamp `param_dtype` to `None` if no casting is required
     if param_dtype == self.orig_dtype:
         param_dtype = None
     self.param_dtype = param_dtype
     self.reduce_dtype = reduce_dtype
     # None indicates that the mixed precision is not enabled
-    # MILES_PATCH_REPLACEMENT_END: fsdp-param-dtype-map
 
 
 # Copied from PyTorch v2.11.0 at 70d99e998b4955e0049d13a98d77ae1b14db1f45.
@@ -381,27 +393,51 @@ def _patched_get_param_all_gather_inputs(
         )
 
     param_all_gather_inputs: list[list[torch.Tensor]] = [[] for _ in fsdp_params]
-    # MILES_PATCH_UPSTREAM_BEGIN: fsdp-param-dtype-map
+    # =============================================================================
+    # MILES PATCH: Bucket foreach-copy metadata by destination dtype
+    # ------------------------------- UPSTREAM ------------------------------------
     # foreach_copy_indices: list[int] = []
     # foreach_copy_inputs: list[torch.Tensor] = []
     # foreach_copy_input_numels: list[int] = []
-    #
-    # # 1st pass: for foreach-copy parameters, get inputs and metadata for the
-    # # foreach copy, and for the others, actually get their all-gather inputs
-    # for i, fsdp_param in enumerate(fsdp_params):
-    #     if use_foreach_copy(fsdp_param):
-    #         foreach_copy_indices.append(i)
-    #         all_gather_input = (
-    #             fsdp_param._sharded_param_data
-    #             if fsdp_param.sharded_state == ShardedState.SHARDED
-    #             else cast(torch.Tensor, fsdp_param._sharded_post_forward_param_data)
-    #         )
-    #         foreach_copy_inputs.append(all_gather_input)
-    #         foreach_copy_input_numels.append(all_gather_input.numel())
-    #     else:
-    #         param_all_gather_inputs[i] = fsdp_param.all_gather_inputs
-    #
-    # # 2nd pass: use foreach copy to compute the remaining all-gather inputs
+    # +++++++++++++++++++++++++++++++++ MILES +++++++++++++++++++++++++++++++++++++++
+    foreach_copy_infos: dict[torch.dtype, tuple[list[int], list[torch.Tensor], list[int]]] = {}
+    # ============================ END MILES PATCH ================================
+
+    # 1st pass: for foreach-copy parameters, get inputs and metadata for the
+    # foreach copy, and for the others, actually get their all-gather inputs
+    for i, fsdp_param in enumerate(fsdp_params):
+        if use_foreach_copy(fsdp_param):
+            # =============================================================================
+            # MILES PATCH: Select the dtype bucket for this parameter
+            # ------------------------------- UPSTREAM ------------------------------------
+            # foreach_copy_indices.append(i)
+            # +++++++++++++++++++++++++++++++++ MILES +++++++++++++++++++++++++++++++++++++++
+            param_dtype = cast(torch.dtype, fsdp_param.param_dtype)
+            indices, inputs, input_numels = foreach_copy_infos.setdefault(param_dtype, ([], [], []))
+            indices.append(i)
+            # ============================ END MILES PATCH ================================
+
+            all_gather_input = (
+                fsdp_param._sharded_param_data
+                if fsdp_param.sharded_state == ShardedState.SHARDED
+                else cast(torch.Tensor, fsdp_param._sharded_post_forward_param_data)
+            )
+            # =============================================================================
+            # MILES PATCH: Record metadata in the selected dtype bucket
+            # ------------------------------- UPSTREAM ------------------------------------
+            # foreach_copy_inputs.append(all_gather_input)
+            # foreach_copy_input_numels.append(all_gather_input.numel())
+            # +++++++++++++++++++++++++++++++++ MILES +++++++++++++++++++++++++++++++++++++++
+            inputs.append(all_gather_input)
+            input_numels.append(all_gather_input.numel())
+            # ============================ END MILES PATCH ================================
+        else:
+            param_all_gather_inputs[i] = fsdp_param.all_gather_inputs
+
+    # =============================================================================
+    # MILES PATCH: Allocate and cast one flat input per destination dtype
+    # ------------------------------- UPSTREAM ------------------------------------
+    # 2nd pass: use foreach copy to compute the remaining all-gather inputs
     # if foreach_copy_inputs:
     #     fsdp_param_0 = fsdp_params[foreach_copy_indices[0]]
     #     param_dtype, device = fsdp_param_0.param_dtype, fsdp_param_0.device
@@ -412,28 +448,9 @@ def _patched_get_param_all_gather_inputs(
     #     torch._foreach_copy_(splits, foreach_copy_inputs)
     #     for i, split in zip(foreach_copy_indices, splits):
     #         param_all_gather_inputs[i] = [split]
-    # MILES_PATCH_UPSTREAM_END: fsdp-param-dtype-map
-    # MILES_PATCH_REPLACEMENT_BEGIN: fsdp-param-dtype-map
-    foreach_copy_infos: dict[torch.dtype, tuple[list[int], list[torch.Tensor], list[int]]] = {}
-
-    # 1st pass: for foreach-copy parameters, get inputs and metadata for the
-    # foreach copy, and for the others, actually get their all-gather inputs
-    for i, fsdp_param in enumerate(fsdp_params):
-        if use_foreach_copy(fsdp_param):
-            param_dtype = cast(torch.dtype, fsdp_param.param_dtype)
-            indices, inputs, input_numels = foreach_copy_infos.setdefault(param_dtype, ([], [], []))
-            indices.append(i)
-            all_gather_input = (
-                fsdp_param._sharded_param_data
-                if fsdp_param.sharded_state == ShardedState.SHARDED
-                else cast(torch.Tensor, fsdp_param._sharded_post_forward_param_data)
-            )
-            inputs.append(all_gather_input)
-            input_numels.append(all_gather_input.numel())
-        else:
-            param_all_gather_inputs[i] = fsdp_param.all_gather_inputs
-
-    # 2nd pass: use foreach copy to compute the remaining all-gather inputs
+    # +++++++++++++++++++++++++++++++++ MILES +++++++++++++++++++++++++++++++++++++++
+    # 2nd pass: use foreach copy to compute the remaining all-gather inputs,
+    # preserving one uniform source dtype per foreach invocation.
     for param_dtype, (indices, inputs, input_numels) in foreach_copy_infos.items():
         device = fsdp_params[indices[0]].device
         flat_foreach_copy_input = torch.empty((sum(input_numels),), device=device, dtype=param_dtype)
@@ -441,7 +458,7 @@ def _patched_get_param_all_gather_inputs(
         torch._foreach_copy_(splits, inputs)
         for i, split in zip(indices, splits, strict=True):
             param_all_gather_inputs[i] = [split]
-    # MILES_PATCH_REPLACEMENT_END: fsdp-param-dtype-map
+    # ============================ END MILES PATCH ================================
 
     return param_all_gather_inputs
 
@@ -476,7 +493,9 @@ def _patched_foreach_reduce(
     autograd, so clearing the list frees the gradients.
     """
 
-    # MILES_PATCH_UPSTREAM_BEGIN: fsdp-param-dtype-map
+    # =============================================================================
+    # MILES PATCH: Permit mixed gradient dtypes when reduce_dtype is explicit
+    # ------------------------------- UPSTREAM ------------------------------------
     # grad_dtypes = {grad.dtype for grad in unsharded_grads}
     # if len(grad_dtypes) != 1:
     #     # Check this at runtime since it could be a real runtime error if e.g.
@@ -486,15 +505,14 @@ def _patched_foreach_reduce(
     #     )
     # grad_dtype = unsharded_grads[0].dtype
     # reduce_dtype = reduce_dtype or grad_dtype
-    # MILES_PATCH_UPSTREAM_END: fsdp-param-dtype-map
-    # MILES_PATCH_REPLACEMENT_BEGIN: fsdp-param-dtype-map
+    # +++++++++++++++++++++++++++++++++ MILES +++++++++++++++++++++++++++++++++++++++
     grad_dtypes = {grad.dtype for grad in unsharded_grads}
     if reduce_dtype is None and len(grad_dtypes) != 1:
         _raise_assert_with_print(
             "FSDP reduce-scatter requires an explicit reduce dtype for mixed " f"gradient dtypes but got {grad_dtypes}"
         )
     reduce_dtype = reduce_dtype or unsharded_grads[0].dtype
-    # MILES_PATCH_REPLACEMENT_END: fsdp-param-dtype-map
+    # ============================ END MILES PATCH ================================
     (predivide_factor, postdivide_factor, reduce_scatter_op, all_reduce_op) = _get_gradient_divide_factors(
         reduce_scatter_group,
         all_reduce_group,
@@ -675,12 +693,13 @@ def _patched_foreach_reduce_scatter_copy_in(
     world_size: int,
 ) -> None:
     reduce_scatter_input = reduce_scatter_input.view(world_size, -1)
-    # MILES_PATCH_UPSTREAM_BEGIN: fsdp-param-dtype-map
+    # =============================================================================
+    # MILES PATCH: Preserve chunk_cat as the uniform-dtype fast path
+    # ------------------------------- UPSTREAM ------------------------------------
     # torch.ops.fsdp.chunk_cat(
     #     unsharded_grads, dim=0, num_chunks=world_size, out=reduce_scatter_input
     # )
-    # MILES_PATCH_UPSTREAM_END: fsdp-param-dtype-map
-    # MILES_PATCH_REPLACEMENT_BEGIN: fsdp-param-dtype-map
+    # +++++++++++++++++++++++++++++++++ MILES +++++++++++++++++++++++++++++++++++++++
     if len({grad.dtype for grad in unsharded_grads}) == 1:
         torch.ops.fsdp.chunk_cat(
             unsharded_grads,
@@ -689,7 +708,13 @@ def _patched_foreach_reduce_scatter_copy_in(
             out=reduce_scatter_input,
         )
         return
+    # ============================ END MILES PATCH ================================
 
+    # =============================================================================
+    # MILES PATCH: Pack mixed dtypes directly into the common reduce buffer
+    # ------------------------------- UPSTREAM ------------------------------------
+    # No mixed-dtype path; the unconditional chunk_cat above required one dtype.
+    # +++++++++++++++++++++++++++++ MILES ADDITION ++++++++++++++++++++++++++++++++
     # Pack each parameter's padded rank chunks directly into the rank-major
     # reduce-scatter input, grouping by source dtype to batch cast-and-copy
     # without an intermediate buffer.
@@ -725,7 +750,7 @@ def _patched_foreach_reduce_scatter_copy_in(
             torch._foreach_copy_(destinations, sources)
     if padding_views:
         torch._foreach_zero_(padding_views)
-    # MILES_PATCH_REPLACEMENT_END: fsdp-param-dtype-map
+    # ============================ END MILES PATCH ================================
 
 
 def apply_param_dtype_map_patch() -> None:
