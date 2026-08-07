@@ -39,6 +39,15 @@ class DtypeProbe(nn.Module):
         return x * self.weight + self.bias.to(x.dtype)
 
 
+class DtypeProbeStack(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layers = nn.ModuleList(DtypeProbe() for _ in range(3))
+
+    def forward(self, x):
+        return sum(layer(x) for layer in self.layers)
+
+
 def _policy(param_dtype_map, reduce_dtype=torch.float32):
     return fsdp_param_dtype_patch.ParamDtypeMixedPrecisionPolicy(
         param_dtype=torch.bfloat16,
@@ -57,9 +66,9 @@ def _assert_value_error(expected, fn):
 
 
 def test_duplicate_multi_module_fqn_broadcasts():
-    modules = [DtypeProbe().cuda() for _ in range(3)]
+    model = DtypeProbeStack().cuda()
     fully_shard(
-        modules,
+        list(model.layers),
         mp_policy=_policy(
             {
                 "weight": torch.float32,
@@ -67,9 +76,10 @@ def test_duplicate_multi_module_fqn_broadcasts():
             }
         ),
     )
-    output = sum(module(torch.randn(2, 8, device="cuda")) for module in modules)
+    fully_shard(model)
+    output = model(torch.randn(2, 8, device="cuda"))
     output.sum().backward()
-    for module in modules:
+    for module in model.layers:
         assert module.seen_param_dtypes == (torch.float32, torch.bfloat16)
 
 
