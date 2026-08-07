@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 from torch import nn
 from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
+from torch.distributed.tensor import DTensor
 
 from miles.backends.fsdp_utils import fsdp_param_dtype_patch
 
@@ -56,6 +57,37 @@ class SharedAliasModel(nn.Module):
         shared_param = nn.Parameter(torch.randn(8, device="cuda"))
         self.first.register_parameter("weight", shared_param)
         self.second.register_parameter("weight", shared_param)
+
+
+class FP32LayerNorm(nn.LayerNorm):
+    def __init__(self, normalized_shape):
+        super().__init__(normalized_shape)
+        self.seen_param_dtypes = None
+
+    def forward(self, x):
+        self.seen_param_dtypes = (self.weight.dtype, self.bias.dtype)
+        return super().forward(x.float()).to(x.dtype)
+
+
+class NestedNormBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.norm = FP32LayerNorm(17)
+        self.proj = nn.Linear(17, 17)
+
+    def forward(self, x):
+        return self.proj(self.norm(x))
+
+
+class TwoBlockNestedNormModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.blocks = nn.ModuleList(NestedNormBlock() for _ in range(2))
+
+    def forward(self, x):
+        for block in self.blocks:
+            x = block(x)
+        return x
 
 
 def _policy(param_dtype_map, reduce_dtype=torch.float32):
@@ -144,6 +176,66 @@ def test_shared_parameter_alias_dtype_conflict():
             ),
         ),
     )
+
+
+def _run_two_block_nested_norm_case(group_norms):
+    torch.manual_seed(1234)
+    model = TwoBlockNestedNormModel().cuda()
+    bf16_policy = MixedPrecisionPolicy(
+        param_dtype=torch.bfloat16,
+        reduce_dtype=torch.float32,
+    )
+    if group_norms:
+        fully_shard(
+            [block.norm for block in model.blocks],
+            mp_policy=fsdp_param_dtype_patch.ParamDtypeMixedPrecisionPolicy(
+                param_dtype=torch.bfloat16,
+                reduce_dtype=torch.float32,
+                cast_forward_inputs=False,
+                param_dtype_map={
+                    "weight": torch.float32,
+                    "bias": torch.float32,
+                },
+            ),
+        )
+    else:
+        fp32_policy = MixedPrecisionPolicy(
+            param_dtype=torch.float32,
+            reduce_dtype=torch.float32,
+            cast_forward_inputs=False,
+        )
+        for block in model.blocks:
+            fully_shard(block.norm, mp_policy=fp32_policy)
+    for block in model.blocks:
+        fully_shard(block, mp_policy=bf16_policy)
+    fully_shard(model, mp_policy=bf16_policy)
+
+    torch.manual_seed(5678)
+    output = model(torch.randn(3, 17, device="cuda"))
+    output.float().square().sum().backward()
+    for block in model.blocks:
+        assert block.norm.seen_param_dtypes == (torch.float32, torch.float32)
+
+    grads = {}
+    for name, param in model.named_parameters():
+        assert param.grad is not None
+        grad = param.grad
+        if isinstance(grad, DTensor):
+            grad = grad.full_tensor()
+        grads[name] = grad.detach().clone()
+    return output.detach().clone(), grads
+
+
+def test_grouped_layer_norm_wrap_matches_separate_fp32_wraps():
+    reference_output, reference_grads = _run_two_block_nested_norm_case(False)
+    grouped_output, grouped_grads = _run_two_block_nested_norm_case(True)
+    assert torch.equal(grouped_output, reference_output)
+    assert grouped_grads.keys() == reference_grads.keys()
+    for name in grouped_grads:
+        assert torch.equal(
+            grouped_grads[name],
+            reference_grads[name],
+        ), f"Gradient mismatch for {name}"
 
 
 def test_unknown_fqn():
@@ -286,6 +378,7 @@ TEST_CASES = {
     "same-fqn-shared-parameter": test_same_fqn_for_shared_parameter,
     "shared-parameter-aliases-same-dtype": test_shared_parameter_aliases_same_dtype,
     "shared-parameter-alias-conflict": test_shared_parameter_alias_dtype_conflict,
+    "grouped-layer-norm-wrap": test_grouped_layer_norm_wrap_matches_separate_fp32_wraps,
     "unknown-fqn": test_unknown_fqn,
     "mixed-requires-reduce-dtype": (test_mixed_trainable_dtypes_require_reduce_dtype),
     "frozen-override-no-reduce-dtype": (test_frozen_override_does_not_require_reduce_dtype),
