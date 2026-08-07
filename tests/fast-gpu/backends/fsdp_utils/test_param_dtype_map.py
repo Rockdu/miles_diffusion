@@ -63,9 +63,10 @@ def test_param_dtype_map_adversarial(case):
 @pytest.mark.parametrize(
     "case",
     [
-        "ambiguous-multi-module-fqn",
+        "duplicate-multi-module-fqn",
         "same-fqn-separate-wraps",
         "same-fqn-shared-parameter",
+        "shared-parameter-alias-conflict",
         "unknown-fqn",
         "mixed-requires-reduce-dtype",
         "frozen-override-no-reduce-dtype",
