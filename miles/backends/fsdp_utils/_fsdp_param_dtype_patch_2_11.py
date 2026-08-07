@@ -259,7 +259,6 @@ def _patched_param_group_init(
             param_mp_policy,
             offload_policy,
         )
-        fsdp_param._param_dtype_override = override
         self.fsdp_params.append(fsdp_param)
     # ============================ END MILES PATCH ================================
 
@@ -349,8 +348,10 @@ def _patched_init_dtype_attrs(
     # param_dtype, reduce_dtype = (mp_policy.param_dtype, mp_policy.reduce_dtype)
     # +++++++++++++++++++++++++++++++++ MILES +++++++++++++++++++++++++++++++++++++++
     has_param_dtype_map = isinstance(mp_policy, ParamDtypeMixedPrecisionPolicy) and bool(mp_policy.param_dtype_map)
-    param_dtype = self._param_dtype_override if self._param_dtype_override is not None else mp_policy.param_dtype
-    reduce_dtype = mp_policy.reduce_dtype
+    param_dtype, reduce_dtype = (
+        self.mp_policy.param_dtype,
+        self.mp_policy.reduce_dtype,
+    )
     # ============================ END MILES PATCH ================================
 
     self.orig_dtype = self.sharded_param.dtype
