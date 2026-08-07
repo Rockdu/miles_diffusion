@@ -658,15 +658,10 @@ def apply_fsdp2(
         param_dtype_patterns or {},
         param_dtype,
     )
-    has_param_dtype_overrides = bool(
-        param_dtype_maps.module_maps or param_dtype_maps.root_map
-    )
+    has_param_dtype_overrides = bool(param_dtype_maps.module_maps or param_dtype_maps.root_map)
     param_dtype_policy_cls = None
     if has_param_dtype_overrides:
-        from .fsdp_param_dtype_patch import (
-            ParamDtypeMixedPrecisionPolicy,
-            apply_param_dtype_map_patch,
-        )
+        from .fsdp_param_dtype_patch import ParamDtypeMixedPrecisionPolicy, apply_param_dtype_map_patch
 
         apply_param_dtype_map_patch()
         param_dtype_policy_cls = ParamDtypeMixedPrecisionPolicy
