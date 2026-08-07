@@ -107,23 +107,30 @@ def _resolve_param_dtype_map(
     if not param_dtype_map:
         return {}
     managed_params = set(params)
-    fqn_to_param: dict[str, nn.Parameter] = {}
+    matched_fqns: set[str] = set()
+    resolved_map: dict[nn.Parameter, torch.dtype] = {}
+    resolved_fqns: dict[nn.Parameter, str] = {}
     for module in modules:
         for fqn, param in module.named_parameters():
-            if param not in managed_params:
+            if param not in managed_params or fqn not in param_dtype_map:
                 continue
-            previous = fqn_to_param.get(fqn)
-            # A managed FQN must not identify different parameter tensors.
-            if previous is not None and previous is not param:
-                raise ValueError("param_dtype_map FQN " f"{fqn!r} is ambiguous across the fully_shard modules")
-            fqn_to_param[fqn] = param
-    unknown_fqns = sorted(set(param_dtype_map).difference(fqn_to_param))
+            matched_fqns.add(fqn)
+            dtype = param_dtype_map[fqn]
+            if param in resolved_map and resolved_map[param] != dtype:
+                previous_fqn = resolved_fqns[param]
+                raise ValueError(
+                    "param_dtype_map assigns conflicting dtypes to shared "
+                    f"parameter aliases {previous_fqn!r} and {fqn!r}"
+                )
+            resolved_map[param] = dtype
+            resolved_fqns.setdefault(param, fqn)
+    unknown_fqns = sorted(set(param_dtype_map).difference(matched_fqns))
     if unknown_fqns:
         raise ValueError(
             "param_dtype_map contains FQNs that do not name a parameter managed "
             f"by this fully_shard call: {unknown_fqns}"
         )
-    return {fqn_to_param[fqn]: dtype for fqn, dtype in param_dtype_map.items()}
+    return resolved_map
 
 
 # Copied from PyTorch v2.11.0 at 70d99e998b4955e0049d13a98d77ae1b14db1f45.
