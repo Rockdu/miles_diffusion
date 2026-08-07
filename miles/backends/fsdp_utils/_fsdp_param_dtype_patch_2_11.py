@@ -111,7 +111,7 @@ def _resolve_param_dtype_map(
     resolved_map: dict[nn.Parameter, torch.dtype] = {}
     resolved_fqns: dict[nn.Parameter, str] = {}
     for module in modules:
-        for fqn, param in module.named_parameters():
+        for fqn, param in module.named_parameters(remove_duplicate=False):
             if param not in managed_params or fqn not in param_dtype_map:
                 continue
             matched_fqns.add(fqn)

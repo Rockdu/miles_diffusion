@@ -66,6 +66,7 @@ def test_param_dtype_map_adversarial(case):
         "duplicate-multi-module-fqn",
         "same-fqn-separate-wraps",
         "same-fqn-shared-parameter",
+        "shared-parameter-aliases-same-dtype",
         "shared-parameter-alias-conflict",
         "unknown-fqn",
         "mixed-requires-reduce-dtype",
