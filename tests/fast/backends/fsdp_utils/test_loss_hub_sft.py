@@ -17,7 +17,6 @@ NUM_GRID = 8
 
 
 class _Config:
-    needs_timestep_scaling = False
 
     def collate_cond_for_sample_batch(self, per_sample_cond_kwargs, device, pad_to_len=None):
         return {"encoder_hidden_states": torch.cat([kw["encoder_hidden_states"] for kw in per_sample_cond_kwargs])}
@@ -82,14 +81,7 @@ class TestPrepareSftBatch:
         assert torch.allclose(prepared.latents, x0 + sigma * prepared.extras["target"], atol=1e-5)
         assert not prepared.use_cfg
         assert prepared.pos_cond["encoder_hidden_states"].shape == (4, 6, 8)
-        assert torch.equal(prepared.timesteps_for_model, prepared.timesteps)
-
-    def test_timestep_scaling(self):
-        torch.manual_seed(0)
-        ctx = _ctx({"transformer": nn.Identity()})
-        ctx.train_pipeline_config.needs_timestep_scaling = True
-        prepared = prepare_sft_batch(ctx, _batch())
-        assert torch.allclose(prepared.timesteps_for_model, prepared.timesteps / NUM_TRAIN_TIMESTEPS)
+        assert torch.allclose(prepared.sigmas, prepared.timesteps / NUM_TRAIN_TIMESTEPS)
 
     def test_single_model_indices_cover_grid_uniformly(self):
         ctx = _ctx({"transformer": nn.Identity()}, config=_SingleConfig())
