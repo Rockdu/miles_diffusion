@@ -10,7 +10,7 @@
 #   SGLANG_BRANCH   sglang branch to check out (default: sglang-diffusion-rollout-test)
 #   SGLANG_COMMIT   sglang commit SHA to pin (default: pinned working SHA below)
 #   CUDA_VER        torch cuda tag (default: 12.9 -> cu129)
-#   TORCH_VER       torch version (default: 2.9.1)
+#   TORCH_VER       torch version (default: 2.11.0)
 #
 # All package versions are pinned. Pins reflect the currently-validated working
 # environment for miles-diffusion + sglang-diffusion + flow_grpo OCR reward.
@@ -27,7 +27,7 @@ set -euo pipefail
 ENV_NAME="${ENV_NAME:-miles-diffusion}"
 PY_VER="${PY_VER:-3.11}"
 CUDA_VER="${CUDA_VER:-12.9}"
-TORCH_VER="${TORCH_VER:-2.9.1}"
+TORCH_VER="${TORCH_VER:-2.11.0}"
 SGLANG_REPO="${SGLANG_REPO:-https://github.com/Rockdu/sglang.git}"
 SGLANG_BRANCH="${SGLANG_BRANCH:-sglang-diffusion-rollout-test}"
 SGLANG_COMMIT="${SGLANG_COMMIT:-0372158dd66bc7cb0740c733bd60047db790ec7d}"
