@@ -75,7 +75,12 @@ class MilesRouter:
     async def _check_worker_health(self, url):
         """Encapsulated health check logic for better maintainability."""
         try:
-            response = await self.client.get(f"{url}/health", timeout=5.0)
+            # A busy engine blocks its event loop for the length of one
+            # denoising call (~18s at --diffusion-microgroup-size 8), so a
+            # hardcoded 5s probe evicts healthy-but-working engines -- and
+            # eviction is permanent (see the model-version TODO below).
+            timeout = getattr(self.args, "rollout_health_check_timeout", 30.0)
+            response = await self.client.get(f"{url}/health", timeout=timeout)
             if response.status_code == 200:
                 return url, True
             logger.debug(f"[miles-router] Worker {url} is unhealthy (Status: {response.status_code})")
