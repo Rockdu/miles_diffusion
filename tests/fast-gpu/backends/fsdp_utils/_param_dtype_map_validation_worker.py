@@ -43,7 +43,7 @@ from torch import nn
 from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 from torch.distributed.tensor import DTensor
 
-from miles.backends.fsdp_utils import fsdp_param_dtype_patch
+from miles.backends.fsdp_utils.monkey_patches import fsdp_param_dtype_patch
 
 
 class MixedParamDtypeModel(nn.Module):
