@@ -139,12 +139,14 @@ class FSDPTrainRayActor(TrainRayActor):
                 raise RuntimeError(f"{component} did not honor meta initialization")
             checkpoint.sync_model_dtypes(model)
             full_state = model.state_dict() if rank == 0 else {}
+            fsdp_parallel_plan = self.model_backend.fsdp_parallel_plan(model)
             model = apply_fsdp2(
                 model,
                 mesh=self.parallel_state.get_mesh("fsdp"),
                 cpu_offload=self.args.fsdp_cpu_offload,
                 args=self.args,
-                no_split_modules=self.model_backend.fsdp_no_split_modules(model),
+                no_split_modules=fsdp_parallel_plan.no_split_modules,
+                param_dtype_patterns=fsdp_parallel_plan.param_dtype_patterns,
             )
             checkpoint.broadcast_full_state_to_fsdp(
                 model,

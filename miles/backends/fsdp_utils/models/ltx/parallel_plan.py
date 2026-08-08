@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import torch
 
+from miles.backends.fsdp_utils.models.parallel_plan import FSDPParallelPlan
 from miles.backends.fsdp_utils.sequence_parallel.plan import SequenceParallelPlan
 
-FSDP_NO_SPLIT_MODULES = ["BasicAVTransformerBlock"]
+FSDP_PARALLEL_PLAN = FSDPParallelPlan(
+    no_split_modules=("BasicAVTransformerBlock",),
+)
 
 
 def sequence_parallel_plan(model: torch.nn.Module) -> SequenceParallelPlan:
