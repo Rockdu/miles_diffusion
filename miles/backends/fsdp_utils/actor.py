@@ -654,11 +654,11 @@ def apply_fsdp2(
 
     param_dtype = _resolve_dtype(args.diffusion_forward_dtype)
     reduce_dtype = _resolve_dtype(args.fsdp_reduce_dtype)
-    # The compiler takes module LISTS because fully_shard can group several modules into one wrap
-    # (one shared all-gather); today every wrap holds a single block, so each list is a singleton.
+    # A wrap entry may also be a module LIST — fully_shard can group several modules into one wrap
+    # (one shared all-gather); today every wrap holds a single block.
     param_dtype_maps = compile_param_dtype_maps(
         model,
-        [[module] for module in modules],
+        modules,
         param_dtype_patterns or {},
         param_dtype,
     )

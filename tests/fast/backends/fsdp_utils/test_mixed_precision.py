@@ -5,10 +5,12 @@
                                       +-----> wrap [block 1]: norm.weight -> FP32
     root_scale -> FP32                +-----> root:          root_scale -> FP32
 
-A wrap is a module LIST (one fully_shard call); within a wrap the runtime map is
-keyed by wrap-local FQN, so member modules sharing a local FQN must agree on its
-dtype — including "no override". Wraps claim parameters in call order,
-first-wrap-wins, mirroring FSDP2's own visited-set rule for nested wraps.
+A wrap is one fully_shard call — a single module or, like fully_shard itself, a
+module list grouped into one wrap; within a wrap the runtime map is keyed by
+wrap-local FQN, so member modules sharing a local FQN must agree on its dtype —
+including "no override". Wraps claim parameters in call order, first-wrap-wins,
+mirroring FSDP2's own visited-set rule for nested wraps. Patterns apply in
+declaration order, later ones override earlier ones.
 """
 
 from tests.ci.ci_register import register_cpu_ci
@@ -40,7 +42,7 @@ def test_compile_root_fqns_to_wrap_local_fqns():
     model = Model()
     compiled = compile_param_dtype_maps(
         model=model,
-        wraps=[[block] for block in model.blocks],
+        wraps=list(model.blocks),  # single-module wraps, no list nesting needed
         root_fqn_patterns={
             "blocks.*.norm.weight": "fp32",
             "root_scale": "fp32",
@@ -96,15 +98,15 @@ def test_multi_module_wrap_rejects_override_next_to_untouched_twin():
 
 
 def test_nested_wraps_claim_first_wrap_wins():
-    """[block 0] wraps before the blocks container, so the container map only holds block 1.
+    """block 0 wraps before the blocks container, so the container map only holds block 1.
 
-    wraps (call order):  [block 0]           -> {norm.weight: fp32}
-                         [blocks container]  -> {1.norm.weight: fp32}   (block 0 already claimed)
+    wraps (call order):  block 0           -> {norm.weight: fp32}
+                         blocks container  -> {1.norm.weight: fp32}   (block 0 already claimed)
     """
     model = Model()
     compiled = compile_param_dtype_maps(
         model,
-        [[model.blocks[0]], [model.blocks]],
+        [model.blocks[0], model.blocks],
         {"blocks.*.norm.weight": "fp32"},
         torch.bfloat16,
     )
@@ -115,26 +117,22 @@ def test_nested_wraps_claim_first_wrap_wins():
     ]
 
 
-def test_same_dtype_pattern_overlap_is_allowed():
+def test_later_pattern_carves_out_of_an_earlier_one():
+    """Declaration order is precedence: the narrow bf16 rule pulls block 0 back to the default.
+
+    "blocks.*.norm.weight" -> fp32     block 0 norm: fp32 -> bf16 (default, no override)
+    "blocks.0.norm.weight" -> bf16     block 1 norm: fp32
+    """
     model = Model()
     compiled = compile_param_dtype_maps(
         model,
-        [[block] for block in model.blocks],
-        {"blocks.*.norm.weight": "fp32", "*.0.norm.weight": "fp32"},
+        list(model.blocks),
+        {"blocks.*.norm.weight": "fp32", "blocks.0.norm.weight": "bf16"},
         torch.bfloat16,
     )
-    assert compiled.override_count == 2
 
-
-def test_conflicting_dtype_patterns_rejected():
-    model = Model()
-    with pytest.raises(ValueError, match="conflicting dtypes"):
-        compile_param_dtype_maps(
-            model,
-            [[block] for block in model.blocks],
-            {"blocks.*.norm.weight": "fp32", "*.0.norm.weight": "fp16"},
-            torch.bfloat16,
-        )
+    assert compiled.wrap_maps == [{}, {"norm.weight": torch.float32}]
+    assert compiled.override_count == 1
 
 
 def test_compile_param_dtype_maps_rejects_unmatched_pattern():
@@ -142,7 +140,7 @@ def test_compile_param_dtype_maps_rejects_unmatched_pattern():
     with pytest.raises(ValueError, match="did not match any parameter"):
         compile_param_dtype_maps(
             model,
-            [[block] for block in model.blocks],
+            list(model.blocks),
             {"blocks.*.missing": "fp32"},
             torch.bfloat16,
         )
@@ -153,7 +151,7 @@ def test_compile_param_dtype_maps_rejects_unsupported_dtype():
     with pytest.raises(ValueError, match="Unsupported dtype 'float8'"):
         compile_param_dtype_maps(
             model,
-            [[block] for block in model.blocks],
+            list(model.blocks),
             {"root_scale": "float8"},
             torch.bfloat16,
         )
@@ -163,7 +161,7 @@ def test_compile_param_dtype_maps_omits_default_dtype():
     model = Model()
     compiled = compile_param_dtype_maps(
         model,
-        [[block] for block in model.blocks],
+        list(model.blocks),
         {"blocks.*.norm.weight": "bf16"},
         torch.bfloat16,
     )

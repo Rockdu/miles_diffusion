@@ -49,14 +49,16 @@ class CompiledParamDtypeMaps:
 
 def compile_param_dtype_maps(
     model: nn.Module,
-    wraps: Sequence[Sequence[nn.Module]],
+    wraps: Sequence[nn.Module | Sequence[nn.Module]],
     root_fqn_patterns: Mapping[str, str],
     default_dtype: torch.dtype,
 ) -> CompiledParamDtypeMaps:
-    """Each entry of ``wraps`` is the module list of one child ``fully_shard`` call, in call order.
+    """Each entry of ``wraps`` is one child ``fully_shard`` call, in call order — a single module or,
+    like ``fully_shard`` itself, a list of modules grouped into one wrap.
 
-    Within one wrap the runtime map is keyed by wrap-local FQN, so two member modules may share a
-    local FQN only when the patterns give it a single dtype.
+    Patterns apply in declaration order and a later pattern overrides an earlier one, so a narrow
+    rule can carve a parameter back out of a broad one. Within one wrap the runtime map is keyed by
+    wrap-local FQN, so two member modules may share a local FQN only when they agree on its dtype.
     """
     decided: dict[nn.Parameter, torch.dtype] = {}
     for pattern, dtype_name in root_fqn_patterns.items():
@@ -66,11 +68,9 @@ def compile_param_dtype_maps(
             raise ValueError(f"Unsupported dtype {dtype_name!r} for pattern {pattern!r}") from error
         matched = False
         for fqn, param in model.named_parameters(remove_duplicate=False):
-            if not fnmatch.fnmatchcase(fqn, pattern):
-                continue
-            matched = True
-            if decided.setdefault(param, dtype) != dtype:
-                raise ValueError(f"parameter {fqn!r} matches patterns with conflicting dtypes")
+            if fnmatch.fnmatchcase(fqn, pattern):
+                matched = True
+                decided[param] = dtype
         if not matched:
             raise ValueError(f"FSDP parameter dtype pattern {pattern!r} did not match any parameter")
     overrides = {param: dtype for param, dtype in decided.items() if dtype != default_dtype}
@@ -81,7 +81,7 @@ def compile_param_dtype_maps(
         # The runtime map is keyed by wrap-local FQN, so "no override" (None) must collide too:
         # a mapped FQN would silently apply to every member module sharing that name.
         seen: dict[str, torch.dtype | None] = {}
-        for module in wrap:
+        for module in (wrap,) if isinstance(wrap, nn.Module) else wrap:
             for local_fqn, param in module.named_parameters():
                 if param in claimed:
                     continue
