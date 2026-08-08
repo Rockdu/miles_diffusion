@@ -32,7 +32,7 @@ import torch
 from torch import nn
 
 
-_DTYPES = {
+_SUPPORTED_DTYPES = {
     "bf16": torch.bfloat16,
     "fp16": torch.float16,
     "fp32": torch.float32,
@@ -41,7 +41,7 @@ _DTYPES = {
 
 def parse_dtype_from_str(dtype_name: str) -> torch.dtype:
     try:
-        return _DTYPES[dtype_name]
+        return _SUPPORTED_DTYPES[dtype_name]
     except KeyError as error:
         raise ValueError(f"Unsupported dtype {dtype_name!r}") from error
 
