@@ -1,3 +1,13 @@
+"""Casting the model-boundary inputs per family policy.
+
+Sigmas ride the "timestep" axis, so a family gets both timestep domains at one dtype.
+
+    policy value      latents   timestep + sigma   cond      int masks
+    "default"         forward   forward            forward   untouched
+    "fp32"            fp32      fp32               fp32      untouched
+    None              as-is     as-is              as-is     untouched
+"""
+
 from tests.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=10, suite="stage-a-cpu", labels=[])
@@ -23,6 +33,7 @@ def _inputs():
 
 
 def test_default_policy_is_passthrough():
+    """The base default pins nothing, so rollout dtypes survive to the model."""
     latents, timesteps, sigmas, pos_cond = _inputs()
     out_latents, out_timesteps, out_sigmas, (out_pos, out_neg, out_joint) = apply_input_dtype_policy(
         DEFAULT_POLICY,
@@ -41,6 +52,7 @@ def test_default_policy_is_passthrough():
 
 
 def test_family_override_timestep_default():
+    """One axis carries both timestep domains: overriding it moves sigma too."""
     latents, timesteps, sigmas, pos_cond = _inputs()
     policy = {**DEFAULT_POLICY, "timestep": "default"}
     _, out_timesteps, out_sigmas, _ = apply_input_dtype_policy(
@@ -56,6 +68,7 @@ def test_family_override_timestep_default():
 
 
 def test_cast_policy_casts_floats_only():
+    """An attention mask is int64; casting it would change the mask semantics."""
     latents, timesteps, sigmas, pos_cond = _inputs()
     out_latents, _, _, (out_pos, _, _) = apply_input_dtype_policy(
         {"latents": "default", "cond": "default", "timestep": "fp32"},
@@ -71,6 +84,7 @@ def test_cast_policy_casts_floats_only():
 
 
 def test_unknown_key_rejected():
+    """A typo'd key would otherwise read as passthrough and silently skip a cast."""
     latents, timesteps, sigmas, pos_cond = _inputs()
     with pytest.raises(ValueError, match="unknown keys"):
         apply_input_dtype_policy(

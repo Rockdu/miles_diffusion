@@ -523,8 +523,6 @@ class FSDPTrainRayActor(TrainRayActor):
         train_pipeline_config = self.train_pipeline_config
         forward_dtype = self._forward_dtype
 
-        # Boundary dtypes are family policy; op interiors stay autocast-managed. Sigmas ride the
-        # timestep axis, so a family that passes it through keeps the rollout sigma verbatim.
         latents_in, timesteps_in, sigmas_in, (pos_cond_in, neg_cond_in, joint_cond_in) = apply_input_dtype_policy(
             train_pipeline_config.input_dtype_policy,
             latents=prepared.latents,

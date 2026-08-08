@@ -81,6 +81,7 @@ class TestPrepareSftBatch:
         assert torch.allclose(prepared.latents, x0 + sigma * prepared.extras["target"], atol=1e-5)
         assert not prepared.use_cfg
         assert prepared.pos_cond["encoder_hidden_states"].shape == (4, 6, 8)
+        # Both timestep domains ship, so a family reads whichever its model takes.
         assert torch.allclose(prepared.sigmas, prepared.timesteps / NUM_TRAIN_TIMESTEPS)
 
     def test_single_model_indices_cover_grid_uniformly(self):

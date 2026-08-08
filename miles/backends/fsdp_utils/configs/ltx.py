@@ -15,11 +15,8 @@ from .train_pipeline_config import TrainPipelineConfig, register_train_pipeline_
 class LTXTrainPipelineConfig(TrainPipelineConfig):
     """LTX-2.3 video GRPO: unguided velocity forward over ltx_core.
 
-    Dtype parity vs sglang-d rollout (dump-verified on paired LTX-2.3 runs): the empty
-    precision_spec matches, and of the boundary axes only latents is load-bearing --
-    forward_velocity anchors the element-wise math on latents.dtype and consumes
-    sigmas_input verbatim in fp32. Known benign delta: norm_out records fp32 under
-    autocast, compute-equivalent.
+    Every tensor of this forward is bit-exact against the sglang-d rollout, verified by
+    paired dumps. The dtypes below are what buys that, so treat them as load-bearing.
     """
 
     supports_cfg_training = False
@@ -30,7 +27,7 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
     model_package = "miles.backends.fsdp_utils.models.ltx"
     # Audio branch has no optimizer state: we only train the video stream.
     optimizer_state_allowed_missing = ["audio"]
-    # forward_velocity anchors element-wise math on latents.dtype; rollout runs it bf16, so cast at the boundary.
+    # forward_velocity derives every element-wise dtype from latents; rollout runs it bf16.
     input_dtype_policy = {"latents": "default", "cond": "default", "timestep": None}
 
     def configure(self, args: Namespace) -> None:
@@ -140,8 +137,7 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
         dtype = latents_input.dtype
         B = latents_input.shape[0]
 
-        # The model consumes the rollout σ verbatim in fp32: bf16-rounding it before
-        # the sinusoid costs ~2e-3 rel per AdaLN block.
+        # Rounding σ to bf16 before the sinusoid costs ~2e-3 rel, re-injected by every AdaLN block.
         sigma_unit = sigmas_input.to(dtype)
         per_token_t = sigma_unit.view(B, 1)
 
