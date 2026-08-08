@@ -39,11 +39,11 @@ _DTYPES = {
 }
 
 
-def parse_dtype_from_str(dtype_name: str, *, context: str) -> torch.dtype:
+def parse_dtype_from_str(dtype_name: str) -> torch.dtype:
     try:
         return _DTYPES[dtype_name]
     except KeyError as error:
-        raise ValueError(f"Unsupported dtype {dtype_name!r} for {context}") from error
+        raise ValueError(f"Unsupported dtype {dtype_name!r}") from error
 
 
 @dataclass(frozen=True)
@@ -69,7 +69,7 @@ def compile_param_dtype_maps(
     """
     decided: dict[nn.Parameter, torch.dtype] = {}
     for pattern, dtype_name in root_fqn_patterns.items():
-        dtype = parse_dtype_from_str(dtype_name, context=f"pattern {pattern!r}")
+        dtype = parse_dtype_from_str(dtype_name)
         matched = False
         for fqn, param in model.named_parameters(remove_duplicate=False):
             if fnmatch.fnmatchcase(fqn, pattern):

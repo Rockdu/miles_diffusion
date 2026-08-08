@@ -39,7 +39,7 @@ from .input_dtype_policy import apply_input_dtype_policy
 from .loss_hub import DiffusionLossContext, flow_grpo_loss_formula, prepare_flow_grpo_batch
 from .lr_scheduler import get_lr_scheduler
 from .metrics import new_metric_buffer
-from .mixed_precision import compile_param_dtype_maps
+from .mixed_precision import compile_param_dtype_maps, parse_dtype_from_str
 from .parallel import create_fsdp_parallel_state
 from .sequence_parallel.plan import apply_sequence_parallel
 
@@ -96,8 +96,8 @@ class FSDPTrainRayActor(TrainRayActor):
 
         self.prof = TrainProfiler(args)
 
-        self._master_dtype = _resolve_dtype(args.fsdp_master_dtype)
-        self._forward_dtype = _resolve_dtype(args.diffusion_forward_dtype)
+        self._master_dtype = parse_dtype_from_str(args.fsdp_master_dtype)
+        self._forward_dtype = parse_dtype_from_str(args.diffusion_forward_dtype)
 
         from miles.utils.misc import load_function
 
@@ -598,10 +598,6 @@ def move_torch_optimizer(optimizer, device):
     torch.cuda.synchronize()
 
 
-def _resolve_dtype(name: str) -> torch.dtype:
-    return {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}[name]
-
-
 def apply_lora(model: torch.nn.Module, args: Namespace, train_pipeline_config) -> torch.nn.Module:
     """Apply PEFT LoRA, leaving non-rank0 adapters uninitialized on meta."""
     from peft import LoraConfig, get_peft_model
@@ -649,8 +645,8 @@ def apply_fsdp2(
 
     modules = [module for name, module in model.named_modules() if module.__class__.__name__ in layer_cls_to_wrap]
 
-    param_dtype = _resolve_dtype(args.diffusion_forward_dtype)
-    reduce_dtype = _resolve_dtype(args.fsdp_reduce_dtype)
+    param_dtype = parse_dtype_from_str(args.diffusion_forward_dtype)
+    reduce_dtype = parse_dtype_from_str(args.fsdp_reduce_dtype)
     # A wrap entry may also be a module LIST — fully_shard can group several modules into one wrap
     # (one shared all-gather); today every wrap holds a single block.
     param_dtype_maps = compile_param_dtype_maps(
