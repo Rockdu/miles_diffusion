@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 
 from miles.backends.fsdp_utils.loss_hub.types import DiffusionLossContext, PreparedBatch
-from miles.backends.fsdp_utils.loss_hub.utils import cast_cond_to_dtype
 from miles.utils.metric_buffer import MetricBuffer
 
 
@@ -90,10 +89,7 @@ def prepare_sft_batch(
         timesteps_for_model = timesteps
 
     cond_list = [{key: value.to(device) for key, value in pair["cond_kwargs"].items()} for pair in batch]
-    pos_cond = cast_cond_to_dtype(
-        config.collate_cond_for_sample_batch(cond_list, device, pad_to_len=pad_to_len),
-        ctx.forward_dtype,
-    )
+    pos_cond = config.collate_cond_for_sample_batch(cond_list, device, pad_to_len=pad_to_len)
 
     return PreparedBatch(
         latents=latents,
