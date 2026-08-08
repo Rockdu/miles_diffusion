@@ -67,17 +67,18 @@ def compile_param_dtype_maps(
     rule can carve a parameter back out of a broad one. Within one wrap the runtime map is keyed by
     wrap-local FQN, so two member modules may share a local FQN only when they agree on its dtype.
     """
-    decided: dict[nn.Parameter, torch.dtype] = {}
+    assigned_dtypes: dict[nn.Parameter, torch.dtype] = {}
     for pattern, dtype_name in root_fqn_patterns.items():
         dtype = parse_dtype_from_str(dtype_name)
         matched = False
         for fqn, param in model.named_parameters(remove_duplicate=False):
             if fnmatch.fnmatchcase(fqn, pattern):
                 matched = True
-                decided[param] = dtype
+                assigned_dtypes[param] = dtype
         if not matched:
             raise ValueError(f"FSDP parameter dtype pattern {pattern!r} did not match any parameter")
-    overrides = {param: dtype for param, dtype in decided.items() if dtype != default_dtype}
+    # An assignment equal to the group default compiles to nothing (this is also what a carve-out is).
+    assigned_dtypes = {param: dtype for param, dtype in assigned_dtypes.items() if dtype != default_dtype}
 
     claimed: set[nn.Parameter] = set()
     wrap_maps: list[dict[str, torch.dtype]] = []
@@ -90,7 +91,7 @@ def compile_param_dtype_maps(
                 if param in claimed:
                     continue
                 claimed.add(param)
-                dtype = overrides.get(param)
+                dtype = assigned_dtypes.get(param)
                 if seen.setdefault(local_fqn, dtype) != dtype:
                     raise ValueError(
                         f"two parameters in one fully_shard group share the local FQN {local_fqn!r} "
@@ -102,12 +103,12 @@ def compile_param_dtype_maps(
     root_fqns: dict[nn.Parameter, str] = {}
     for fqn, param in model.named_parameters(remove_duplicate=False):
         root_fqns.setdefault(param, fqn)
-    root_map = {root_fqns[param]: dtype for param, dtype in overrides.items() if param not in claimed}
+    root_map = {root_fqns[param]: dtype for param, dtype in assigned_dtypes.items() if param not in claimed}
     return CompiledParamDtypeMaps(
         wrap_maps,
         root_map,
-        len(overrides),
-        sum(param.numel() for param in overrides),
+        len(assigned_dtypes),
+        sum(param.numel() for param in assigned_dtypes),
     )
 
 
