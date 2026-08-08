@@ -26,25 +26,29 @@ def apply_input_dtype_policy(
 ) -> tuple[torch.Tensor, torch.Tensor, tuple]:
     """Cast float boundary inputs per family policy ("default"/dtype name/None=passthrough);
     autocast alone would leave element-wise ops running at the raw input dtype."""
+    # A typo'd key would silently mean passthrough.
     unknown = set(policy) - set(INPUT_DTYPE_POLICY_KEYS)
     if unknown:
         raise ValueError(f"input_dtype_policy has unknown keys {sorted(unknown)}; known: {INPUT_DTYPE_POLICY_KEYS}")
 
-    def _axis(key: str) -> torch.dtype | None:
-        axis = policy.get(key)
-        if axis is None:
+    def _dtype(key: str) -> torch.dtype | None:
+        dtype_name = policy.get(key)
+        if dtype_name is None:  # passthrough: keep whatever dtype rollout handed us
             return None
-        if axis != "default" and axis not in _DTYPES:
-            raise ValueError(f"input_dtype_policy[{key!r}] has unknown dtype {axis!r}")
-        return default_dtype if axis == "default" else _DTYPES[axis]
+        if dtype_name == "default":  # the run's forward dtype
+            return default_dtype
+        if dtype_name not in _DTYPES:
+            raise ValueError(f"input_dtype_policy[{key!r}] has unknown dtype {dtype_name!r}")
+        return _DTYPES[dtype_name]
 
     def _cast(value, dtype: torch.dtype | None):
         if dtype is None or not torch.is_tensor(value) or not value.is_floating_point():
-            return value
+            return value  # passthrough inputs, int masks, and non-tensors stay untouched
         return value.to(dtype)
 
-    latents_dtype, timestep_dtype, cond_dtype = _axis("latents"), _axis("timestep"), _axis("cond")
-    out_conds = tuple(
-        None if cond is None else {key: _cast(value, cond_dtype) for key, value in cond.items()} for cond in conds
+    cond_dtype = _dtype("cond")
+    return (
+        _cast(latents, _dtype("latents")),
+        _cast(timesteps, _dtype("timestep")),
+        tuple(cond and {key: _cast(value, cond_dtype) for key, value in cond.items()} for cond in conds),
     )
-    return _cast(latents, latents_dtype), _cast(timesteps, timestep_dtype), out_conds
