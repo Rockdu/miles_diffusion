@@ -67,12 +67,6 @@ class BaseModelBackend(abc.ABC):
     def fsdp_parallel_plan(self, model: torch.nn.Module) -> FSDPParallelPlan:
         raise NotImplementedError
 
-    def fsdp_no_split_modules(self, model: torch.nn.Module) -> list[str]:
-        no_split_modules = self.fsdp_parallel_plan(model).no_split_modules
-        if no_split_modules is None:
-            raise ValueError("FSDP parallel plan declares no no-split modules")
-        return list(no_split_modules)
-
     @abc.abstractmethod
     def set_attention_backend(self, model: torch.nn.Module, backend: str) -> None:
         raise NotImplementedError

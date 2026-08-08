@@ -41,7 +41,6 @@ class TestBackendHierarchy:
         assert model.selected == "flash"
         assert plan.no_split_modules == ("TransformerBlock",)
         assert plan.param_dtype_patterns == {}
-        assert backend.fsdp_no_split_modules(model) == ["TransformerBlock"]
 
     def test_diffusers_model_family_owns_fsdp_precision_plan(self):
         backend = DiffusersModelBackend(Wan2_2TrainPipelineConfig())
