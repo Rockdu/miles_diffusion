@@ -82,13 +82,16 @@ def create_placement_groups(args):
     """Create placement groups for actor and rollout engines.
 
     Two topologies:
-    - Colocate (or --debug-{train,rollout}-only): one combined placement
-      group; both roles see the same bundle list.
-    - Disaggregate (the else branch): two separate placement groups so
-      train and rollout each own a disjoint GPU pool — avoids bundle
-      overlap / scheduling deadlock when running side-by-side.
+    - Colocate: one combined placement group; both roles see the same bundles.
+      Train-only jobs use this by default.
+    - Disaggregate: separate actor and rollout placement groups. A train-only
+      job opts into this by setting --rollout-num-gpus, reserving those GPUs for
+      its rollout-side producer (for example, the SFT encoder pool).
     """
-    if not args.colocate and not args.debug_train_only and not args.debug_rollout_only:
+    disaggregate = (
+        not args.colocate and not args.debug_rollout_only and (not args.train_only or bool(args.rollout_num_gpus))
+    )
+    if disaggregate:
         logger.info("Creating placement groups (separate actor/rollout)...")
         actor_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
         rollout_gpus = args.rollout_num_gpus
@@ -107,14 +110,11 @@ def create_placement_groups(args):
     logger.info(f"Creating placement group with {num_gpus} GPUs...")
     pg, all_reordered_bundle_indices, all_reordered_gpu_ids = _create_placement_group(num_gpus)
 
-    actor_pg_reordered_bundle_indices = all_reordered_bundle_indices
-    actor_pg_reordered_gpu_ids = all_reordered_gpu_ids
-    rollout_pg_reordered_bundle_indices = all_reordered_bundle_indices if not args.debug_train_only else []
-    rollout_pg_reordered_gpu_ids = all_reordered_gpu_ids if not args.debug_train_only else []
-
+    # The rollout view keeps its seats under train_only: engine startup is gated by
+    # args.train_only, and rollout-side actor pools (e.g. the SFT encoder pool) seat here.
     return {
-        "actor": (pg, actor_pg_reordered_bundle_indices, actor_pg_reordered_gpu_ids),
-        "rollout": (pg, rollout_pg_reordered_bundle_indices, rollout_pg_reordered_gpu_ids),
+        "actor": (pg, all_reordered_bundle_indices, all_reordered_gpu_ids),
+        "rollout": (pg, all_reordered_bundle_indices, all_reordered_gpu_ids),
     }
 
 
