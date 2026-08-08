@@ -173,6 +173,7 @@ class FSDPTrainRayActor(TrainRayActor):
             self.model = next(iter(self.models.values()))
         else:
             self.model = torch.nn.ModuleDict(self.models)
+        _dumper_register_train(self.model)
 
         self.sde_backend = load_function(args.sde_step_backend_path)(
             self.scheduler,
@@ -487,6 +488,10 @@ class FSDPTrainRayActor(TrainRayActor):
                 else:
                     self.optimizer.zero_grad(set_to_none=True)
                 self.global_step += 1
+                from sglang.srt.debug_utils.dumper import dumper as _d
+                if _d.may_enable:
+                    _dumper_write_compute_structure()
+                    _d.step()
 
                 reduced = {f"train/{key}": value for key, value in metrics.reduce().items()}
                 self._log_metrics(rollout_id, reduced, step=self.global_step)
@@ -658,7 +663,10 @@ def apply_fsdp2(
     has_param_dtype_overrides = bool(any(param_dtype_maps.wrap_maps) or param_dtype_maps.root_map)
     param_dtype_policy_cls = None
     if has_param_dtype_overrides:
-        from .fsdp_param_dtype_patch import ParamDtypeMixedPrecisionPolicy, apply_param_dtype_map_patch
+        from .monkey_patches.fsdp_param_dtype_patch import (
+            ParamDtypeMixedPrecisionPolicy,
+            apply_param_dtype_map_patch,
+        )
 
         apply_param_dtype_map_patch()
         param_dtype_policy_cls = ParamDtypeMixedPrecisionPolicy
@@ -704,3 +712,96 @@ def apply_fsdp2(
     )
 
     return model
+
+
+_COMPUTE_PARAMS: dict = {}
+_COMPUTE_WRITTEN: list = []
+
+
+def _dumper_register_train(model) -> None:
+    """Non-intrusive dumper + master structure JSON + compute-dtype capture."""
+    import json
+    from pathlib import Path
+
+    from sglang.srt.debug_utils.dumper import dumper
+
+    if not dumper.may_enable or dumper._non_intrusives:
+        return
+    dumper.register_non_intrusive_dumper(model)
+
+    def describe(t):
+        # DTensor .shape is the global shape; recorded at registration time this
+        # is the MASTER (fp32, sharded storage).
+        return {"shape": list(t.shape), "dtype": str(t.dtype), "class": type(t).__name__}
+
+    info = {}
+    for name, module in model.named_modules():
+        info[name or "<root>"] = {
+            "class": type(module).__module__ + "." + type(module).__name__,
+            "params": {pn: describe(p) for pn, p in module.named_parameters(recurse=False)},
+            "buffers": {bn: describe(b) for bn, b in module.named_buffers(recurse=False)},
+            "children": [cn for cn, _ in module.named_children()],
+        }
+    out = Path(dumper._config.dir) / f"train_structure_rank{dist.get_rank()}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(info, indent=1))
+
+    # Compute-dtype capture: inside a forward pre-hook FSDP2 has already swapped
+    # in the all-gathered param_dtype copy (verified: plain Parameter, full
+    # shape, bf16). Record metadata only — no tensor is saved, so this costs
+    # nothing regardless of model size.
+    import time as _time
+
+    _last_write = [0.0]
+
+    def make_hook(path):
+        def hook(module, args):
+            if path in _COMPUTE_PARAMS:
+                return
+            entry = {}
+            for pn, p in module.named_parameters(recurse=False):
+                local = p.to_local() if hasattr(p, "to_local") else p
+                entry[pn] = {
+                    "shape": list(p.shape),
+                    "dtype": str(local.dtype),
+                    "class": type(p).__name__,
+                }
+            _COMPUTE_PARAMS[path] = entry
+            # Throttled incremental write: the capture must survive a crash
+            # later in the step (e.g. the uncond forward OOMing), so don't wait
+            # for the optimizer step to persist it.
+            now = _time.time()
+            if now - _last_write[0] > 5.0:
+                _last_write[0] = now
+                _flush_compute_structure()
+
+        return hook
+
+    n = 0
+    for path, module in model.named_modules():
+        if next(module.named_parameters(recurse=False), None) is None:
+            continue
+        module.register_forward_pre_hook(make_hook(path))
+        n += 1
+    print(f"[dumper-precision] registered on {type(model).__name__}, wrote {out}, "
+          f"compute-dtype hooks on {n} modules", flush=True)
+
+
+def _flush_compute_structure() -> None:
+    import json
+    from pathlib import Path
+
+    from sglang.srt.debug_utils.dumper import dumper
+
+    if not _COMPUTE_PARAMS:
+        return
+    out = Path(dumper._config.dir) / f"compute_structure_rank{dist.get_rank()}.json"
+    out.write_text(json.dumps(_COMPUTE_PARAMS, indent=1))
+
+
+def _dumper_write_compute_structure() -> None:
+    if _COMPUTE_WRITTEN or not _COMPUTE_PARAMS:
+        return
+    _COMPUTE_WRITTEN.append(True)
+    _flush_compute_structure()
+    print(f"[dumper-precision] compute structure finalized ({len(_COMPUTE_PARAMS)} modules)", flush=True)
