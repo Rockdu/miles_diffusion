@@ -139,14 +139,12 @@ class FSDPTrainRayActor(TrainRayActor):
                 raise RuntimeError(f"{component} did not honor meta initialization")
             checkpoint.sync_model_dtypes(model)
             full_state = model.state_dict() if rank == 0 else {}
-            fsdp_parallel_plan = self.model_backend.fsdp_parallel_plan(model)
             model = apply_fsdp2(
                 model,
+                self.model_backend.fsdp_parallel_plan(model),
                 mesh=self.parallel_state.get_mesh("fsdp"),
                 cpu_offload=self.args.fsdp_cpu_offload,
                 args=self.args,
-                no_split_modules=fsdp_parallel_plan.no_split_modules,
-                param_dtype_patterns=fsdp_parallel_plan.param_dtype_patterns,
             )
             checkpoint.broadcast_full_state_to_fsdp(
                 model,
@@ -631,15 +629,14 @@ def apply_lora(model: torch.nn.Module, args: Namespace, train_pipeline_config) -
 
 def apply_fsdp2(
     model,
+    parallel_plan,
     mesh=None,
     cpu_offload=False,
     args=None,
-    no_split_modules=None,
-    param_dtype_patterns=None,
 ):
-    """Apply FSDP2, optionally compiling root-relative parameter dtype rules.
+    """Apply FSDP2 per the model's FSDPParallelPlan.
 
-    ``param_dtype_patterns`` is matched against FQNs from ``model``. Each child
+    ``parallel_plan.param_dtype_patterns`` is matched against FQNs from ``model``. Each child
     ``fully_shard`` call receives exact FQNs relative to that child module, while
     parameters managed by the root call retain their root-relative FQNs.
     """
@@ -647,8 +644,8 @@ def apply_fsdp2(
 
     offload_policy = CPUOffloadPolicy() if cpu_offload else None
 
-    layer_cls_to_wrap = no_split_modules if no_split_modules is not None else model._no_split_modules
-    assert len(layer_cls_to_wrap) > 0 and layer_cls_to_wrap[0] is not None
+    layer_cls_to_wrap = parallel_plan.no_split_modules
+    assert layer_cls_to_wrap is not None and len(layer_cls_to_wrap) > 0 and layer_cls_to_wrap[0] is not None
 
     modules = [module for name, module in model.named_modules() if module.__class__.__name__ in layer_cls_to_wrap]
 
@@ -659,7 +656,7 @@ def apply_fsdp2(
     param_dtype_maps = compile_param_dtype_maps(
         model,
         modules,
-        param_dtype_patterns or {},
+        parallel_plan.param_dtype_patterns,
         param_dtype,
     )
     has_param_dtype_overrides = bool(any(param_dtype_maps.wrap_maps) or param_dtype_maps.root_map)

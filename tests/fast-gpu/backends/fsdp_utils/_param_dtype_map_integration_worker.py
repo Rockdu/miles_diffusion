@@ -38,6 +38,7 @@ import torch.distributed as dist
 from torch import nn
 
 from miles.backends.fsdp_utils.actor import apply_fsdp2
+from miles.backends.fsdp_utils.models.parallel_plan import FSDPParallelPlan
 
 
 PARAM_DTYPE_PATTERNS = {
@@ -89,13 +90,15 @@ def main():
     reference.block.low_precision.to(torch.bfloat16)
     model = apply_fsdp2(
         model,
+        FSDPParallelPlan(
+            no_split_modules=("MixedParamDtypeBlock",),
+            param_dtype_patterns=PARAM_DTYPE_PATTERNS,
+        ),
         args=Namespace(
             diffusion_forward_dtype="bf16",
             fsdp_reduce_dtype="fp32",
             gradient_checkpointing=False,
         ),
-        no_split_modules=["MixedParamDtypeBlock"],
-        param_dtype_patterns=PARAM_DTYPE_PATTERNS,
     )
 
     torch.manual_seed(43)
