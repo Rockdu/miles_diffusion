@@ -39,6 +39,13 @@ _DTYPES = {
 }
 
 
+def parse_dtype_from_str(dtype_name: str, *, context: str) -> torch.dtype:
+    try:
+        return _DTYPES[dtype_name]
+    except KeyError as error:
+        raise ValueError(f"Unsupported dtype {dtype_name!r} for {context}") from error
+
+
 @dataclass(frozen=True)
 class CompiledParamDtypeMaps:
     wrap_maps: list[dict[str, torch.dtype]]  # parallel to the wraps argument
@@ -62,10 +69,7 @@ def compile_param_dtype_maps(
     """
     decided: dict[nn.Parameter, torch.dtype] = {}
     for pattern, dtype_name in root_fqn_patterns.items():
-        try:
-            dtype = _DTYPES[dtype_name]
-        except KeyError as error:
-            raise ValueError(f"Unsupported dtype {dtype_name!r} for pattern {pattern!r}") from error
+        dtype = parse_dtype_from_str(dtype_name, context=f"pattern {pattern!r}")
         matched = False
         for fqn, param in model.named_parameters(remove_duplicate=False):
             if fnmatch.fnmatchcase(fqn, pattern):
@@ -103,4 +107,4 @@ def compile_param_dtype_maps(
     )
 
 
-__all__ = ["CompiledParamDtypeMaps", "compile_param_dtype_maps"]
+__all__ = ["CompiledParamDtypeMaps", "compile_param_dtype_maps", "parse_dtype_from_str"]
