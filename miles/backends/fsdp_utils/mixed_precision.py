@@ -92,7 +92,11 @@ def compile_param_dtype_maps(
                 claimed.add(param)
                 dtype = overrides.get(param)
                 if seen.setdefault(local_fqn, dtype) != dtype:
-                    raise ValueError(f"wrap-local FQN {local_fqn!r} needs two dtypes within one fully_shard call")
+                    raise ValueError(
+                        f"two parameters in one fully_shard group share the local FQN {local_fqn!r} "
+                        f"but want different dtypes ({seen[local_fqn]} vs {dtype}, None = no override); "
+                        "not supported — the dtype map is keyed by local FQN, so they cannot be told apart"
+                    )
         wrap_maps.append({fqn: dtype for fqn, dtype in seen.items() if dtype is not None})
 
     root_fqns: dict[nn.Parameter, str] = {}

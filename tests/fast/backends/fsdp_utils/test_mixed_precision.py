@@ -76,7 +76,7 @@ def test_multi_module_wrap_shares_one_entry():
 def test_multi_module_wrap_rejects_split_dtypes_on_one_local_fqn():
     """block 0 norm fp32 vs block 1 norm fp16 share the local key "norm.weight": unrepresentable."""
     model = Model()
-    with pytest.raises(ValueError, match="needs two dtypes"):
+    with pytest.raises(ValueError, match="share the local FQN"):
         compile_param_dtype_maps(
             model,
             [list(model.blocks)],
@@ -88,7 +88,7 @@ def test_multi_module_wrap_rejects_split_dtypes_on_one_local_fqn():
 def test_multi_module_wrap_rejects_override_next_to_untouched_twin():
     """Pinning only block 0's norm would silently pin block 1's too through the shared map key."""
     model = Model()
-    with pytest.raises(ValueError, match="needs two dtypes"):
+    with pytest.raises(ValueError, match="share the local FQN"):
         compile_param_dtype_maps(
             model,
             [list(model.blocks)],
