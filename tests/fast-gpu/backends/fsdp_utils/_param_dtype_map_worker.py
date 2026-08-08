@@ -47,7 +47,7 @@ from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 from torch.distributed.tensor import DTensor
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from miles.backends.fsdp_utils import fsdp_param_dtype_patch
+from miles.backends.fsdp_utils.monkey_patches import fsdp_param_dtype_patch
 
 MODEL_NAMES = ("wan2_2", "ltx2_3")
 TOPOLOGIES = ("fully_shard_1x4", "hybrid_shard_2x2")

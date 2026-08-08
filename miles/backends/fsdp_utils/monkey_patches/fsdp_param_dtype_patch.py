@@ -15,7 +15,7 @@ class ParamDtypeMixedPrecisionPolicy(MixedPrecisionPolicy):
 def apply_param_dtype_map_patch() -> None:
     torch_version = torch.__version__.partition("+")[0]
     if torch_version == "2.11.0":
-        from miles.backends.fsdp_utils._fsdp_param_dtype_patch_2_11 import (
+        from miles.backends.fsdp_utils.monkey_patches._fsdp_param_dtype_patch_2_11 import (
             apply_param_dtype_map_patch as apply_torch_2_11_patch,
         )
 

@@ -8,11 +8,11 @@ import pytest
 import torch
 from torch import nn
 
-from miles.backends.fsdp_utils import fsdp_param_dtype_patch
+from miles.backends.fsdp_utils.monkey_patches import fsdp_param_dtype_patch
 
 
 def test_patch_rejects_unpinned_torch(monkeypatch):
-    implementation_module = "miles.backends.fsdp_utils._fsdp_param_dtype_patch_2_11"
+    implementation_module = "miles.backends.fsdp_utils.monkey_patches._fsdp_param_dtype_patch_2_11"
     monkeypatch.delitem(sys.modules, implementation_module, raising=False)
     monkeypatch.setattr(torch, "__version__", "2.12.0+cu130")
 
@@ -22,7 +22,7 @@ def test_patch_rejects_unpinned_torch(monkeypatch):
 
 
 def test_patch_rejects_source_drift(monkeypatch):
-    from miles.backends.fsdp_utils import _fsdp_param_dtype_patch_2_11
+    from miles.backends.fsdp_utils.monkey_patches import _fsdp_param_dtype_patch_2_11
 
     monkeypatch.setitem(
         _fsdp_param_dtype_patch_2_11._SOURCE_HASHES,
@@ -54,7 +54,7 @@ def test_param_dtype_policy_keeps_exact_sparse_map():
 
 
 def test_resolve_param_dtype_map_broadcasts_duplicate_fqns():
-    from miles.backends.fsdp_utils import _fsdp_param_dtype_patch_2_11
+    from miles.backends.fsdp_utils.monkey_patches import _fsdp_param_dtype_patch_2_11
 
     modules = tuple(nn.LayerNorm(8) for _ in range(2))
     params = [param for module in modules for param in module.parameters()]

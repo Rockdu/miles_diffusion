@@ -39,7 +39,7 @@ from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
 
-from miles.backends.fsdp_utils import fsdp_param_dtype_patch
+from miles.backends.fsdp_utils.monkey_patches import fsdp_param_dtype_patch
 
 
 @dataclass(frozen=True)

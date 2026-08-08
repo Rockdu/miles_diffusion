@@ -40,7 +40,7 @@ from torch.distributed.fsdp._fully_shard._fsdp_param_group import (
 )
 from torch.distributed.tensor import DTensor, Shard
 
-from miles.backends.fsdp_utils.fsdp_param_dtype_patch import ParamDtypeMixedPrecisionPolicy
+from miles.backends.fsdp_utils.monkey_patches.fsdp_param_dtype_patch import ParamDtypeMixedPrecisionPolicy
 
 if TYPE_CHECKING:
     from torch.distributed.fsdp._fully_shard._fsdp_collectives import (
