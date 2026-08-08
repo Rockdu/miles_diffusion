@@ -1,7 +1,7 @@
 """Compile root-relative precision rules for module-relative FSDP policies.
 
 The public rules always use FQNs from the model root, while each
-``MixedPrecisionPolicy`` resolves its map from the module passed to that
+``MixedPrecisionPolicy`` resolves its map from the modules passed to that
 ``fully_shard`` call:
 
     root rule: "blocks.0.norm.weight"
@@ -15,9 +15,11 @@ The public rules always use FQNs from the model root, while each
     fully_shard(model.blocks[0])                    fully_shard(model)
     {"norm.weight": fp32}                           {"root_scale": fp32}
 
-Patterns are expanded against root FQNs first. The resulting Parameter objects
-are then assigned to their owning child wrap and re-named with that module's
-local FQN; parameters not owned by a child wrap remain root-relative.
+Two passes. Pass 1 expands the patterns against root FQNs into one dtype per
+matched parameter. Pass 2 walks the wraps in fully_shard call order, claiming
+parameters first-wrap-wins — the same visited-set rule FSDP2 itself applies —
+and re-keys each override to the FQN local to its owning wrap; parameters no
+wrap claims land in ``root_map`` under their root FQN.
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ _DTYPES = {
 
 @dataclass(frozen=True)
 class CompiledParamDtypeMaps:
-    module_maps: dict[nn.Module, dict[str, torch.dtype]]
+    wrap_maps: list[dict[str, torch.dtype]]  # parallel to the wraps argument
     root_map: dict[str, torch.dtype]
     override_count: int
     override_numel: int
@@ -47,64 +49,54 @@ class CompiledParamDtypeMaps:
 
 def compile_param_dtype_maps(
     model: nn.Module,
-    modules: Sequence[nn.Module],
+    wraps: Sequence[Sequence[nn.Module]],
     root_fqn_patterns: Mapping[str, str],
     default_dtype: torch.dtype,
 ) -> CompiledParamDtypeMaps:
-    if not root_fqn_patterns:
-        return CompiledParamDtypeMaps({}, {}, 0, 0)
+    """Each entry of ``wraps`` is the module list of one child ``fully_shard`` call, in call order.
 
-    named_params = list(model.named_parameters(remove_duplicate=False))
-    param_to_fqn: dict[nn.Parameter, str] = {}
-    for fqn, param in named_params:
-        param_to_fqn.setdefault(param, fqn)
-    overrides: dict[nn.Parameter, torch.dtype] = {}
-    matched_by: dict[nn.Parameter, str] = {}
+    Within one wrap the runtime map is keyed by wrap-local FQN, so two member modules may share a
+    local FQN only when the patterns give it a single dtype.
+    """
+    decided: dict[nn.Parameter, torch.dtype] = {}
     for pattern, dtype_name in root_fqn_patterns.items():
         try:
             dtype = _DTYPES[dtype_name]
         except KeyError as error:
             raise ValueError(f"Unsupported dtype {dtype_name!r} for pattern {pattern!r}") from error
-        matches: list[nn.Parameter] = []
-        matched_params: set[nn.Parameter] = set()
-        for fqn, param in named_params:
-            if fnmatch.fnmatchcase(fqn, pattern) and param not in matched_params:
-                matches.append(param)
-                matched_params.add(param)
-        if not matches:
+        matched = False
+        for fqn, param in model.named_parameters(remove_duplicate=False):
+            if not fnmatch.fnmatchcase(fqn, pattern):
+                continue
+            matched = True
+            if decided.setdefault(param, dtype) != dtype:
+                raise ValueError(f"parameter {fqn!r} matches patterns with conflicting dtypes")
+        if not matched:
             raise ValueError(f"FSDP parameter dtype pattern {pattern!r} did not match any parameter")
-        for param in matches:
-            if (previous := matched_by.get(param)) and previous != pattern:
-                raise ValueError(f"Parameter {param_to_fqn[param]!r} matches both {previous!r} and {pattern!r}")
-            matched_by[param] = pattern
-            if dtype != default_dtype:
-                overrides[param] = dtype
+    overrides = {param: dtype for param, dtype in decided.items() if dtype != default_dtype}
 
-    model_modules = set(model.modules())
-    module_maps: dict[nn.Module, dict[str, torch.dtype]] = {}
-    managed_params: set[nn.Parameter] = set()
-    for module in modules:
-        if module not in model_modules:
-            raise ValueError("FSDP wrap module is not contained in the model")
-        local_map: dict[str, torch.dtype] = {}
-        for local_fqn, param in module.named_parameters():
-            if param in managed_params:
-                raise ValueError("FSDP wrap modules overlap at parameter " f"{param_to_fqn.get(param, local_fqn)!r}")
-            managed_params.add(param)
-            dtype = overrides.get(param)
-            if dtype is not None:
-                local_map[local_fqn] = dtype
-        if local_map:
-            module_maps[module] = local_map
+    claimed: set[nn.Parameter] = set()
+    wrap_maps: list[dict[str, torch.dtype]] = []
+    for wrap in wraps:
+        # The runtime map is keyed by wrap-local FQN, so "no override" (None) must collide too:
+        # a mapped FQN would silently apply to every member module sharing that name.
+        seen: dict[str, torch.dtype | None] = {}
+        for module in wrap:
+            for local_fqn, param in module.named_parameters():
+                if param in claimed:
+                    continue
+                claimed.add(param)
+                dtype = overrides.get(param)
+                if seen.setdefault(local_fqn, dtype) != dtype:
+                    raise ValueError(f"wrap-local FQN {local_fqn!r} needs two dtypes within one fully_shard call")
+        wrap_maps.append({fqn: dtype for fqn, dtype in seen.items() if dtype is not None})
 
-    root_map = {
-        fqn: dtype
-        for param, dtype in overrides.items()
-        if param not in managed_params
-        for fqn in [param_to_fqn[param]]
-    }
+    root_fqns: dict[nn.Parameter, str] = {}
+    for fqn, param in model.named_parameters(remove_duplicate=False):
+        root_fqns.setdefault(param, fqn)
+    root_map = {root_fqns[param]: dtype for param, dtype in overrides.items() if param not in claimed}
     return CompiledParamDtypeMaps(
-        module_maps,
+        wrap_maps,
         root_map,
         len(overrides),
         sum(param.numel() for param in overrides),

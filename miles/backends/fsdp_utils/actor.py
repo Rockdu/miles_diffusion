@@ -654,13 +654,15 @@ def apply_fsdp2(
 
     param_dtype = _resolve_dtype(args.diffusion_forward_dtype)
     reduce_dtype = _resolve_dtype(args.fsdp_reduce_dtype)
+    # The compiler takes module LISTS because fully_shard can group several modules into one wrap
+    # (one shared all-gather); today every wrap holds a single block, so each list is a singleton.
     param_dtype_maps = compile_param_dtype_maps(
         model,
-        modules,
+        [[module] for module in modules],
         param_dtype_patterns or {},
         param_dtype,
     )
-    has_param_dtype_overrides = bool(param_dtype_maps.module_maps or param_dtype_maps.root_map)
+    has_param_dtype_overrides = bool(any(param_dtype_maps.wrap_maps) or param_dtype_maps.root_map)
     param_dtype_policy_cls = None
     if has_param_dtype_overrides:
         from .fsdp_param_dtype_patch import ParamDtypeMixedPrecisionPolicy, apply_param_dtype_map_patch
@@ -695,10 +697,10 @@ def apply_fsdp2(
             cast_forward_inputs=False,
         )
 
-    for module in modules:
+    for module, wrap_map in zip(modules, param_dtype_maps.wrap_maps, strict=True):
         fully_shard(
             module,
-            mp_policy=make_mp_policy(param_dtype_maps.module_maps.get(module)),
+            mp_policy=make_mp_policy(wrap_map),
             **fsdp_kwargs,
         )
 
