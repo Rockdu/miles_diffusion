@@ -172,14 +172,15 @@ class SGLangDiffusionEngine(RayActor):
     def _pin_to_assigned_gpu(self):
         if self.base_gpu_id is None:
             return
+        span = self.args.rollout_num_gpus_per_engine
         cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         if not cvd:
-            # No ambient device list (full-node multi-node ray start): pin to the physical GPU.
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(self.base_gpu_id)
+            # No ambient device list (full-node multi-node ray start): pin to the physical GPUs.
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(self.base_gpu_id + i) for i in range(span))
             return
         visible = [x.strip() for x in cvd.split(",") if x.strip()]
         local_idx = _to_local_gpu_id(self.base_gpu_id)
-        pinned = visible[local_idx]
+        pinned = ",".join(visible[local_idx : local_idx + span])
         os.environ["CUDA_VISIBLE_DEVICES"] = pinned
         logger.info(
             f"Engine rank={self.rank}: pinned CUDA_VISIBLE_DEVICES={pinned} "
@@ -233,6 +234,7 @@ class SGLangDiffusionEngine(RayActor):
     def update_weights_from_tensor(
         self,
         serialized_named_tensors: list[str],
+        payload_gpu_uuids: list[str],
         load_format: str | None = None,
         target_modules: list[str] | None = None,
         weight_version: str | None = None,
@@ -248,6 +250,7 @@ class SGLangDiffusionEngine(RayActor):
         """
         payload = {
             "serialized_named_tensors": serialized_named_tensors,
+            "payload_gpu_uuids": payload_gpu_uuids,
             "load_format": load_format,
         }
         if target_modules is not None:
@@ -319,8 +322,9 @@ def _compute_server_args(args, host, port, nccl_port):
         "nccl_port": nccl_port,
         # Distinct per engine so concurrent settle_port() probes don't race on the default.
         "master_port": nccl_port + 10000 if nccl_port is not None else None,
-        # Must match rollout allocation, not user CLI.
-        "tp_size": args.rollout_num_gpus_per_engine,
+        # SGL-D runs one worker per num_gpus; tp_size * sp_degree splits that span.
+        "num_gpus": args.rollout_num_gpus_per_engine,
+        "tp_size": args.sglang_tp_size,
         "sp_degree": args.sglang_sp_degree,
         "enable_cfg_parallel": args.sglang_enable_cfg_parallel,
         # Skip warmup to avoid timeout during RL rollouts.
