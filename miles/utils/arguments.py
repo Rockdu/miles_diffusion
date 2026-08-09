@@ -1543,7 +1543,7 @@ def miles_validate_args(args):
             if getattr(args, name) is None:
                 raise ValueError(
                     f"--loss-type sft_loss requires --{name.replace('_', '-')}; "
-                    "see scripts/run-diffusion-sft-wan22.sh"
+                    "see scripts/run_diffusion_sft_wan22.py"
                 )
         if args.prompt_data is None:
             raise ValueError("--loss-type sft_loss requires --prompt-data (jsonl with prompt + metadata.video)")
