@@ -82,19 +82,13 @@ def prepare_sft_batch(
     sigma_exp = sigmas.view(bsz, *([1] * (x0.ndim - 1)))
     latents = (1.0 - sigma_exp) * x0 + sigma_exp * noise
 
-    num_train_timesteps = int(ctx.scheduler.config.num_train_timesteps)
-    if config.needs_timestep_scaling:
-        timesteps_for_model = timesteps / float(num_train_timesteps)
-    else:
-        timesteps_for_model = timesteps
-
     cond_list = [{key: value.to(device) for key, value in pair["cond_kwargs"].items()} for pair in batch]
     pos_cond = config.collate_cond_for_sample_batch(cond_list, device, pad_to_len=pad_to_len)
 
     return PreparedBatch(
         latents=latents,
         timesteps=timesteps,
-        timesteps_for_model=timesteps_for_model,
+        timesteps_for_model=config.process_timestep_as_input(timesteps),
         model=model,
         component_name=component_name,
         guidance_scale=0.0,

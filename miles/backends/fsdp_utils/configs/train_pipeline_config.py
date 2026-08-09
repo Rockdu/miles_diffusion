@@ -78,7 +78,6 @@ class TrainPipelineConfig(abc.ABC):
 
     model_family: str | None = None
     lora_target_modules: list[str] = ["to_q", "to_k", "to_v", "to_out.0"]
-    needs_timestep_scaling: bool = True
     optimizer_state_allowed_missing: list[str] = []
     # Case-insensitive substrings matched against the checkpoint name (--diffusion-model).
     hf_ckpt_name_patterns: tuple[str, ...] = ()
@@ -98,6 +97,11 @@ class TrainPipelineConfig(abc.ABC):
 
     def configure(self, args) -> None:  # noqa: B027  optional no-op hook, not abstract
         """Bind the request constants a family needs at train time; default binds none."""
+
+    def process_timestep_as_input(self, timesteps: torch.Tensor) -> torch.Tensor:
+        """The trajectory timestep as this family's DiT takes it, rescaled the way its own
+        sglang-d DiT rescales it -- the arithmetic has to match, not just the value."""
+        return timesteps
 
     def compute_noise_pred(
         self,
