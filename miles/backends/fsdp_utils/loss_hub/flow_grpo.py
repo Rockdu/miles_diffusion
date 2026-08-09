@@ -62,10 +62,7 @@ def prepare_flow_grpo_batch(
             args.diffusion_guidance_scale_2,
         )
 
-    if config.needs_timestep_scaling:
-        timesteps_for_model = timesteps / float(num_train_timesteps)
-    else:
-        timesteps_for_model = timesteps
+    timesteps_for_model = config.process_timestep_as_input(timesteps)
 
     pos_list = [config.prepare_cond_kwargs(batch[i]["denoising_env"].pos_cond_kwargs, device) for i in range(bsz)]
     neg_list = (

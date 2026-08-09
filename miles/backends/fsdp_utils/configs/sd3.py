@@ -26,7 +26,6 @@ class SD3TrainPipelineConfig(TrainPipelineConfig):
         "attn.add_v_proj",
         "attn.to_add_out",
     ]
-    needs_timestep_scaling = False
 
     def prepare_cond_kwargs(self, cond: CondKwargs | None, device: torch.device) -> dict:
         if cond is None:

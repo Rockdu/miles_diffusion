@@ -40,16 +40,12 @@ def prepare_nft_batch(
     pos_cond = config.collate_cond_for_sample_batch(pos_list, device, pad_to_len=pad_to_len)
 
     num_train_timesteps = ctx.scheduler.config.num_train_timesteps
-    if config.needs_timestep_scaling:
-        timesteps_for_model = t.to(dtype=torch.float32)
-    else:
-        timesteps_for_model = t * float(num_train_timesteps)
 
     xt = corrupt(x0, t, sample_noise(x0))
     return PreparedBatch(
         latents=xt,
         timesteps=t,
-        timesteps_for_model=timesteps_for_model,
+        timesteps_for_model=config.process_timestep_as_input(t * float(num_train_timesteps)),
         model=model,
         component_name=component_name,
         guidance_scale=0.0,

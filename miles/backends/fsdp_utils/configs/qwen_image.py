@@ -59,6 +59,9 @@ class QwenImageTrainPipelineConfig(TrainPipelineConfig):
     hf_ckpt_name_patterns = ("qwen-image",)
     cfg_batching = False
 
+    def process_timestep_as_input(self, timesteps):
+        return timesteps / 1000.0
+
     lora_target_modules = [
         "to_q",
         "to_k",
