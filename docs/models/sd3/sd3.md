@@ -1,0 +1,257 @@
+---
+title: Stable Diffusion 3 / 3.5
+description: SD3 family config, LoRA targets, and launch recipes for Flow-GRPO and DiffusionNFT.
+---
+## 1. Model introduction
+
+[Stable Diffusion 3.5 Medium](https://huggingface.co/stabilityai/stable-diffusion-3.5-medium)
+is the primary SD3 checkpoint used in miles-diffusion recipes. SD3 uses a
+DiT transformer with dual text-encoder conditioning (`encoder_hidden_states` +
+`pooled_projections`).
+
+**Key highlights for RL training:**
+
+- Single DiT component — weight sync targets `--update-weight-target-module transformer` (default).
+- LoRA on all attention projections (self-attn + cross-attn add projections).
+- Supports **Flow-GRPO** (OCR) and **DiffusionNFT** (PickScore) objectives.
+- Gated Hugging Face model — requires `HF_TOKEN`.
+
+## 2. Supported variants
+
+| Model | HF ID | Notes |
+|---|---|---|
+| SD3.5 Medium | [stabilityai/stable-diffusion-3.5-medium](https://huggingface.co/stabilityai/stable-diffusion-3.5-medium) | Default in all SD3 scripts |
+| SD3 (other sizes) | Any checkpoint whose name contains `stable-diffusion-3` or `sd3` | Auto-detected by family resolver |
+
+Override family detection:
+
+```bash
+export MILES_DIFFUSION_MODEL_FAMILY=sd3
+```
+
+## 3. Environment setup
+
+SD3.5 is gated — export your Hugging Face token:
+
+```bash
+export HF_TOKEN=<your_hf_token>
+```
+
+Optional prefetch:
+
+```bash
+hf download stabilityai/stable-diffusion-3.5-medium \
+  --local-dir /root/models/stable-diffusion-3.5-medium
+```
+
+Prompt datasets live under
+[`rockdu/miles-diffusion-datasets`](https://huggingface.co/datasets/rockdu/miles-diffusion-datasets):
+
+| Recipe | Subset | Train path |
+|---|---|---|
+| GRPO + OCR | `flowgrpo_ocr` | `.../flowgrpo_ocr/train.jsonl` |
+| NFT + PickScore | `flowgrpo_pickscore` | `.../flowgrpo_pickscore/train.jsonl` |
+
+Launch scripts download the matching subset automatically if missing. Set
+`DATASETS_DIR` to override the default `/root/datasets/miles-diffusion-datasets`.
+
+## 4. Family config
+
+Registered in `miles/backends/fsdp_utils/configs/sd3.py`:
+
+```python
+@register_train_pipeline_config("sd3")
+class SD3TrainPipelineConfig(TrainPipelineConfig):
+    hf_ckpt_name_patterns = ("stable-diffusion-3", "sd3")
+    needs_timestep_scaling = False
+    lora_target_modules = [
+        "attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out.0",
+        "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", "attn.to_add_out",
+    ]
+```
+
+Family resolution (`resolve_diffusion_model_family`) matches checkpoint names
+against `hf_ckpt_name_patterns`. Set `--diffusion-model` to the Hugging Face
+model ID used by both FSDP training and sglang-diffusion rollout.
+
+### SD3-specific training behavior
+
+| Property | SD3 | Notes |
+|---|---|---|
+| Timestep scaling | Off (`needs_timestep_scaling=False`) | Qwen/Wan families scale timesteps |
+| Condition inputs | `encoder_hidden_states` + `pooled_projections` | Concatenated from rollout trajectory |
+| CFG combine | `neg + scale * (pos - neg)` | Standard classifier-free guidance |
+| Weight sync target | `transformer` (single component) | Multi-component models use comma-separated names |
+| Rollout patch group | None | No extra sglang monkey patches |
+
+Rollout responses serialize SD3 conditions as **single tensors** (not lists),
+unlike some multi-encoder families.
+
+## 5. Launch
+
+### 5.1 Flow-GRPO + OCR (2 GPU colocate)
+
+Canonical script: `scripts/run-diffusion-grpo-sd3-ocr-sglang.sh`
+
+```bash
+export HF_TOKEN=...
+export CUDA_VISIBLE_DEVICES=6,7
+bash scripts/run-diffusion-grpo-sd3-ocr-sglang.sh
+```
+
+Walkthrough: [Quick Start](/getting-started/quick-start).
+
+This script prepends `master_sglang` to `PYTHONPATH` for native SD3
+`/rollout/generate` support. See script header for details.
+
+E2E test: `tests/e2e/short/test_sd3_ocr_grpo_2xGPU.py`.
+
+### 5.2 DiffusionNFT + PickScore (3 GPU)
+
+Script: `scripts/run-diffusion-nft-sd3-pickscore.sh`
+
+```bash
+export HF_TOKEN=...
+export CUDA_VISIBLE_DEVICES=4,5,2
+bash scripts/run-diffusion-nft-sd3-pickscore.sh
+```
+
+E2E test: `tests/e2e/short/test_sd3_pickscore_nft_2xGPU.py` (pending merge on main).
+
+### Recipe comparison
+
+| | GRPO + OCR | NFT + PickScore |
+|---|---|---|
+| Script | `run-diffusion-grpo-sd3-ocr-sglang.sh` | `run-diffusion-nft-sd3-pickscore.sh` |
+| `--loss-type` | `policy_loss` | `nft` |
+| SDE | SDE window, noise=0.7, CFG=4.5 | ODE, noise=0 |
+| Reference | LoRA base KL | EMA |
+| Reward GPU | None (CPU OCR) | Dedicated (3 GPU total) |
+| Deterministic e2e | `test_sd3_ocr_grpo_2xGPU` | `test_sd3_pickscore_nft_2xGPU` (pending) |
+
+## 6. Recipe configuration
+
+### GPU layout
+
+**GRPO + OCR (default script):** 2 GPUs colocated (`--colocate`); OCR on CPU Ray actors.
+
+**NFT + PickScore:**
+
+| GPU role | Count | Flags |
+|---|---|---|
+| FSDP train + sglang rollout (colocate) | 2 | `--actor-num-gpus-per-node 2`, `--rollout-num-gpus 2`, `--colocate` |
+| PickScore reward | 1 | `--pickscore-num-workers 1`, `--pickscore-num-gpus-per-worker 1.0` |
+| **Total** | **3** | `--num-gpus-per-node 3` |
+
+PickScore runs as a Ray actor pool on a dedicated GPU. With `--colocate-reward`
+(not used in the default script), reward workers share rollout GPUs at 0.05 GPU
+per worker — useful only when GPU count is tight.
+
+### Batch sizing
+
+**GRPO + OCR:**
+
+| Flag | Value |
+|---|---|
+| `--rollout-batch-size` | 8 |
+| `--n-samples-per-prompt` | 16 |
+| `--num-rollout` | 600 (default) |
+
+**NFT + PickScore (100-rollout default):**
+
+| Flag | Value |
+|---|---|
+| `--rollout-batch-size` | 8 |
+| `--n-samples-per-prompt` | 8 |
+| `--micro-batch-size` | 4 |
+| `--num-rollout` | 100 |
+| `--eval-interval` | 30 |
+
+### Algorithm flags
+
+**Flow-GRPO + OCR:**
+
+| Setting | Value |
+|---|---|
+| Algorithm | `--loss-type policy_loss` (default) |
+| Reference | `--diffusion-kl-beta 0.04` |
+| Reward | `--rm-type ocr` |
+| SDE | SDE window, noise 0.7, CFG 4.5 |
+| Step strategy | `miles.rollout.step_strategy_hub.sde_window` |
+| Determinism | `--deterministic-mode` |
+
+**DiffusionNFT + PickScore:**
+
+| Setting | Value |
+|---|---|
+| Algorithm | `--loss-type nft` |
+| Reference | `--ref-mode ema --ema-shadow` |
+| Reward | `--rm-type pickscore` |
+| SDE | `--diffusion-sde-type ode --diffusion-noise-level 0.0` |
+| LoRA | rank 32, alpha 64, IPC sync |
+| Precision | `--diffusion-forward-dtype fp16` |
+
+## 7. LoRA and weight sync
+
+Both SD3 recipes use LoRA with IPC weight sync:
+
+```bash
+--use-lora \
+--lora-ipc-weight-sync \
+--lora-rank 32 \
+--lora-alpha 64 \
+--diffusion-init-lora-weight gaussian \
+--update-weight-buffer-size 2147483648
+```
+
+See [LoRA weight sync](/advanced/lora) for the three updater paths and IPC
+merge internals.
+
+## 8. Precision notes
+
+Both SD3 launch scripts on **current main** use fp16 DiT forward:
+
+```bash
+--diffusion-forward-dtype fp16 \
+--sglang-dit-precision fp16
+```
+
+SD3.5 fp16 policy gradients are small enough to underflow without scaling. When
+`--diffusion-forward-dtype fp16`, the FSDP actor automatically enables
+**`ShardedGradScaler`** around backward / optimizer step (no extra flag — see
+`miles/backends/fsdp_utils/actor.py`). bf16/fp32 forward disables the scaler.
+
+Flow-GRPO recipes also set **`--diffusion-clip-range`** (e.g. `1e-4` in the OCR
+script) to clip importance ratios during the policy update.
+
+Train/rollout dtype alignment for Flow-GRPO is covered in
+[SDE step backend](/advanced/sde-backend) § Train / rollout alignment.
+
+## 9. Reference results
+
+### Flow-GRPO + OCR
+
+`rollout/reward/raw_mean` from `scripts/run-diffusion-grpo-sd3-ocr-sglang.sh` (default
+batch, 600 rollouts):
+
+![Flow-GRPO OCR raw reward](/assets/images/sd3/grpo-ocr-raw-reward.png)
+
+Online runs: wandb project **`miles-diffusion-grpo`**.
+
+### DiffusionNFT + PickScore
+
+`rollout/reward/raw_mean` from `scripts/run-diffusion-nft-sd3-pickscore.sh` (100
+rollouts):
+
+![DiffusionNFT PickScore raw reward](/assets/images/sd3/nft-pickscore-raw-reward.png)
+
+Online runs: wandb project **`miles-diffusion-nft`**. Held-out
+**`eval/pickscore_test` ≈ 0.78** on the default eval config (`--eval-interval 30`,
+50 denoise steps at eval time).
+
+## 10. Pairs well with
+
+- [Quick Start](/getting-started/quick-start) — SD3.5 Flow-GRPO OCR walkthrough.
+- [Rewards](/user-guide/rewards) — OCR and PickScore scoring.
+- [SDE step backend](/advanced/sde-backend) — SDE window (GRPO) vs ODE (NFT).
+- [LoRA weight sync](/advanced/lora) — IPC merge used by both recipes.
