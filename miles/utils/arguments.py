@@ -784,6 +784,19 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--diffusion-train-dp-split",
+                type=str,
+                default="contiguous",
+                choices=["contiguous", "baseline_stride"],
+                help=(
+                    "How rollout train pairs are dealt to DP ranks. contiguous keeps each rank's "
+                    "samples adjacent, so a micro-batch can reproduce a rollout microgroup exactly. "
+                    "baseline_stride deals samples round-robin, reproducing the miles-core dispatch "
+                    "that strides for sequence-length balance -- diffusion samples are equal-sized, "
+                    "so it is only useful for the legacy parity check."
+                ),
+            )
+            parser.add_argument(
                 "--diffusion-train-iter-order",
                 type=str,
                 default="sample_major",
