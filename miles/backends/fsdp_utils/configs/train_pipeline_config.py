@@ -98,13 +98,27 @@ class TrainPipelineConfig(abc.ABC):
     def configure(self, args) -> None:  # noqa: B027  optional no-op hook, not abstract
         """Bind the request constants a family needs at train time; default binds none."""
 
+    def process_timestep_as_input(
+        self,
+        timesteps: torch.Tensor,
+        *,
+        sigmas: torch.Tensor,
+        num_train_timesteps: int,
+    ) -> torch.Tensor:
+        """The timestep tensor this family's DiT consumes.
+
+        ``timesteps`` and ``sigmas`` are the rollout's own values for the same step. A family
+        returns whichever domain its DiT was fed there, rescaled the way the rollout rescales
+        it -- the arithmetic has to match, not just the value.
+        """
+        return timesteps
+
     def compute_noise_pred(
         self,
         *,
         model: torch.nn.Module,
         latents_input: torch.Tensor,
         timesteps_input: torch.Tensor,
-        sigmas_input: torch.Tensor,
         pos_cond: dict | None,
         neg_cond: dict | None,
         joint_cond: dict | None,
@@ -113,8 +127,7 @@ class TrainPipelineConfig(abc.ABC):
         guidance_scale: float,
         true_cfg_scale: float | None,
     ) -> torch.Tensor:
-        """Default diffusers forward with CFG; families whose model consumes sigma
-        (or with a different forward entirely) override."""
+        """Default diffusers forward with CFG; families with a different forward override."""
 
         def _forward(cond: dict) -> torch.Tensor:
             return model(

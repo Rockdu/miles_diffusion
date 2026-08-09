@@ -64,7 +64,6 @@ class TestComputeNoisePred:
             model=_CondBiasDiT(),
             latents_input=self.h,
             timesteps_input=torch.tensor([3.0, 5.0]),
-            sigmas_input=torch.tensor([0.003, 0.005]),
             pos_cond=self.pos,
             neg_cond=self.neg,
             joint_cond=None,

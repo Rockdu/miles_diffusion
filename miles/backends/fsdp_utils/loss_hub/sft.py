@@ -88,7 +88,9 @@ def prepare_sft_batch(
     return PreparedBatch(
         latents=latents,
         timesteps=timesteps,
-        sigmas=sigmas,
+        timesteps_for_model=config.process_timestep_as_input(
+            timesteps, sigmas=sigmas, num_train_timesteps=int(ctx.scheduler.config.num_train_timesteps)
+        ),
         model=model,
         component_name=component_name,
         guidance_scale=0.0,

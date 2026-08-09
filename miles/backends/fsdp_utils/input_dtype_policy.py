@@ -2,7 +2,7 @@
 
 The trainer does not hard-cast its forward inputs; each family declares, per input, a dtype name
 ("fp32"/"bf16"/"fp16"), "default" for the run's forward dtype, or None to pass the rollout dtype
-through; the timestep axis covers both the trajectory timestep and its sigma. The boundary dtype is what element-wise ops see before any weight is involved, so it must
+through. The boundary dtype is what element-wise ops see before any weight is involved, so it must
 match what the family's sglang-d pipeline feeds the DiT for log-prob alignment; compute inside the
 model is owned by the trainer's autocast (see actor.apply_fsdp2).
 """
@@ -21,10 +21,9 @@ def apply_input_dtype_policy(
     *,
     latents: torch.Tensor,
     timesteps: torch.Tensor,
-    sigmas: torch.Tensor,
     conds: tuple,
     default_dtype: torch.dtype,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple]:
+) -> tuple[torch.Tensor, torch.Tensor, tuple]:
     """Cast float boundary inputs per family policy ("default"/dtype name/None=passthrough);
     autocast alone would leave element-wise ops running at the raw input dtype."""
     # A typo'd key would silently mean passthrough.
@@ -48,10 +47,8 @@ def apply_input_dtype_policy(
         return value.to(dtype)
 
     cond_dtype = _dtype("cond")
-    timestep_dtype = _dtype("timestep")
     return (
         _cast(latents, _dtype("latents")),
-        _cast(timesteps, timestep_dtype),
-        _cast(sigmas, timestep_dtype),
+        _cast(timesteps, _dtype("timestep")),
         tuple(cond and {key: _cast(value, cond_dtype) for key, value in cond.items()} for cond in conds),
     )

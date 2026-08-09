@@ -71,7 +71,11 @@ def prepare_flow_grpo_batch(
             args.diffusion_guidance_scale_2,
         )
 
-    sigmas = _sigmas_for_timesteps(ctx.scheduler, timesteps)
+    timesteps_for_model = config.process_timestep_as_input(
+        timesteps,
+        sigmas=_sigmas_for_timesteps(ctx.scheduler, timesteps),
+        num_train_timesteps=num_train_timesteps,
+    )
 
     pos_list = [config.prepare_cond_kwargs(batch[i]["denoising_env"].pos_cond_kwargs, device) for i in range(bsz)]
     neg_list = (
@@ -91,7 +95,7 @@ def prepare_flow_grpo_batch(
     return PreparedBatch(
         latents=latents,
         timesteps=timesteps,
-        sigmas=sigmas,
+        timesteps_for_model=timesteps_for_model,
         model=model,
         component_name=component_name,
         guidance_scale=guidance_scale,

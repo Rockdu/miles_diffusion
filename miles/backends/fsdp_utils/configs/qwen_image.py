@@ -58,9 +58,10 @@ def _rebuild_pos_embed_freqs_on_cuda(model) -> None:
 class QwenImageTrainPipelineConfig(TrainPipelineConfig):
     hf_ckpt_name_patterns = ("qwen-image",)
 
-    def compute_noise_pred(self, *, timesteps_input, sigmas_input, **kwargs):
-        # The QwenImage DiT consumes sigma as its timestep input.
-        return super().compute_noise_pred(timesteps_input=sigmas_input, sigmas_input=sigmas_input, **kwargs)
+    def process_timestep_as_input(self, timesteps, *, sigmas, num_train_timesteps):
+        # sglang-d's DiT divides the trajectory timestep before its sinusoid rescales it back;
+        # reproduce that route rather than substituting the rollout sigma.
+        return timesteps / float(num_train_timesteps)
 
     lora_target_modules = [
         "to_q",

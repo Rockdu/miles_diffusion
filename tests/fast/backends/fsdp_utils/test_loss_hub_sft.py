@@ -17,6 +17,8 @@ NUM_GRID = 8
 
 
 class _Config:
+    # The SD3 default: the DiT takes the trajectory timestep unchanged.
+    process_timestep_as_input = staticmethod(lambda timesteps, *, sigmas, num_train_timesteps: timesteps)
 
     def collate_cond_for_sample_batch(self, per_sample_cond_kwargs, device, pad_to_len=None):
         return {"encoder_hidden_states": torch.cat([kw["encoder_hidden_states"] for kw in per_sample_cond_kwargs])}
@@ -81,8 +83,8 @@ class TestPrepareSftBatch:
         assert torch.allclose(prepared.latents, x0 + sigma * prepared.extras["target"], atol=1e-5)
         assert not prepared.use_cfg
         assert prepared.pos_cond["encoder_hidden_states"].shape == (4, 6, 8)
-        # Both timestep domains ship, so a family reads whichever its model takes.
-        assert torch.allclose(prepared.sigmas, prepared.timesteps / NUM_TRAIN_TIMESTEPS)
+        # SD3's DiT takes the raw trajectory timestep, so the hook is the identity here.
+        assert torch.equal(prepared.timesteps_for_model, prepared.timesteps)
 
     def test_single_model_indices_cover_grid_uniformly(self):
         ctx = _ctx({"transformer": nn.Identity()}, config=_SingleConfig())

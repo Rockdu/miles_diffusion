@@ -44,8 +44,10 @@ def prepare_nft_batch(
     xt = corrupt(x0, t, sample_noise(x0))
     return PreparedBatch(
         latents=xt,
-        timesteps=t * float(num_train_timesteps),
-        sigmas=t,
+        timesteps=t,
+        timesteps_for_model=config.process_timestep_as_input(
+            t * float(num_train_timesteps), sigmas=t, num_train_timesteps=num_train_timesteps
+        ),
         model=model,
         component_name=component_name,
         guidance_scale=0.0,
@@ -120,7 +122,7 @@ def nft_loss_formula(
     use_adaptive = args.diffusion_nft_adaptive_weight
 
     x0 = prepared.extras["x0"]
-    t = prepared.sigmas
+    t = prepared.timesteps
     t_exp = t.view(len(batch), *([1] * (x0.ndim - 1)))
     r = nft_r_from_advantages(prepared.advantage, adv_clip_max=adv_clip_max)
     pos_loss, neg_loss = nft_branch_losses(

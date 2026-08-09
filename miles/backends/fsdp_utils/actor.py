@@ -523,11 +523,10 @@ class FSDPTrainRayActor(TrainRayActor):
         train_pipeline_config = self.train_pipeline_config
         forward_dtype = self._forward_dtype
 
-        latents_in, timesteps_in, sigmas_in, (pos_cond_in, neg_cond_in, joint_cond_in) = apply_input_dtype_policy(
+        latents_in, timesteps_in, (pos_cond_in, neg_cond_in, joint_cond_in) = apply_input_dtype_policy(
             train_pipeline_config.input_dtype_policy,
             latents=prepared.latents,
-            timesteps=prepared.timesteps,
-            sigmas=prepared.sigmas,
+            timesteps=prepared.timesteps_for_model,
             conds=(prepared.pos_cond, prepared.neg_cond, prepared.joint_cond),
             default_dtype=forward_dtype,
         )
@@ -538,7 +537,6 @@ class FSDPTrainRayActor(TrainRayActor):
                     model=prepared.model,
                     latents_input=latents_in,
                     timesteps_input=timesteps_in,
-                    sigmas_input=sigmas_in,
                     pos_cond=pos_cond_in,
                     neg_cond=neg_cond_in,
                     joint_cond=joint_cond_in,

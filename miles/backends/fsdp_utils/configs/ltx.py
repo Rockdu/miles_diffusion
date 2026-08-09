@@ -30,6 +30,10 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
     # forward_velocity derives every element-wise dtype from latents; rollout runs it bf16.
     input_dtype_policy = {"latents": "default", "cond": "default", "timestep": None}
 
+    def process_timestep_as_input(self, timesteps, *, sigmas, num_train_timesteps):
+        # ltx_core consumes sigma; the rollout snapshot is exact where t/divisor drifts ULPs.
+        return sigmas
+
     def configure(self, args: Namespace) -> None:
         self._height = args.diffusion_height
         self._width = args.diffusion_width
@@ -95,7 +99,6 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
         model: torch.nn.Module,
         latents_input: torch.Tensor,
         timesteps_input: torch.Tensor,
-        sigmas_input: torch.Tensor,
         pos_cond: dict | None,
         neg_cond: dict | None,
         joint_cond: dict | None,
@@ -122,7 +125,7 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
                 device=latents_input.device,
                 dtype=latents_input.dtype,
             )
-        return self.forward_velocity(model, latents_input, sigmas_input, cond)
+        return self.forward_velocity(model, latents_input, timesteps_input, cond)
 
     def forward_velocity(
         self,

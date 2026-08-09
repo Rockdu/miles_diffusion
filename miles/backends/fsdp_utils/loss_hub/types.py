@@ -32,7 +32,7 @@ class PreparedBatch:
 
     latents: torch.Tensor
     timesteps: torch.Tensor
-    sigmas: torch.Tensor
+    timesteps_for_model: torch.Tensor
     model: nn.Module
     component_name: str
     guidance_scale: float
