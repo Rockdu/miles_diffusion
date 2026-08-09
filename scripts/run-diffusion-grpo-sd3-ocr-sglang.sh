@@ -73,6 +73,7 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --n-samples-per-prompt 16 \
   --num-rollout "${NUM_ROLLOUT}" \
   --deterministic-mode \
+  --diffusion-train-dp-split baseline_stride \
   --micro-batch-size-sample 16 \
   --micro-batch-size-tstep 5 \
   --diffusion-microgroup-size 8 \

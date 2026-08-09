@@ -78,6 +78,26 @@ def test_l1_contiguous_differs_from_stride():
     assert _rank_sample_order(cont[0]) != _rank_sample_order(strd[0])
 
 
+def test_l1_only_contiguous_keeps_rollout_microgroups_whole():
+    """A micro-batch can only reproduce a rollout forward if its samples reached one rank.
+
+    8 samples generated as 4 microgroups of 2, split over 2 DP ranks:
+
+        microgroups   [0 1] [2 3] [4 5] [6 7]
+        contiguous    rank0 = 0 1 2 3   -> microgroups {0,1} intact
+        stride        rank0 = 0 2 4 6   -> one sample from every microgroup
+    """
+    splitter = TrainDataDPSplitter()
+    data = _make_flat_pairs(num_samples=8, pairs_per_sample=1)
+    microgroups = [{0, 1}, {2, 3}, {4, 5}, {6, 7}]
+
+    contiguous = set(_rank_sample_order(splitter.split_by_dp(data, 2, mode="contiguous")[0]))
+    stride = set(_rank_sample_order(splitter.split_by_dp(data, 2, mode="baseline_stride")[0]))
+
+    assert sum(group <= contiguous for group in microgroups) == 2
+    assert sum(group <= stride for group in microgroups) == 0
+
+
 # --------------------------------------------------------------------------------------
 # L2 — Converter: flat train-pairs == direct sde-indexed trajectory data
 # --------------------------------------------------------------------------------------
