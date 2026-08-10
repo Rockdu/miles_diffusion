@@ -87,9 +87,6 @@ class SingletonMeta(type):
             cls._instances[cls] = instance
         return cls._instances[cls]
 
-    def clear_instances(cls):
-        cls._instances = {}
-
 
 def get_current_node_ip():
     address = ray._private.services.get_node_ip_address()

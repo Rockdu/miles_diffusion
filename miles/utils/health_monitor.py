@@ -99,10 +99,6 @@ class RolloutHealthMonitor:
         self._pause_event.clear()
         self._is_checking_enabled = True
 
-    def is_checking_enabled(self) -> bool:
-        """Return whether health checking is currently enabled (not paused)."""
-        return self._is_checking_enabled
-
     def _health_monitor_loop(self) -> None:
         assert self._stop_event is not None
         assert self._pause_event is not None

@@ -280,11 +280,6 @@ async def generate_and_rm_group(
     return group
 
 
-async def abort(args: Namespace, rollout_id: int) -> list[list[Sample]]:
-    # SGL-D TODO: support oversampling+filter & abort
-    raise NotImplementedError("SGLang-Diffusion doesn't support abort")
-
-
 async def generate_rollout_async(
     args: Namespace, rollout_id: int, data_source: Callable[[int], list[list[Sample]]]
 ) -> RolloutFnTrainOutput:

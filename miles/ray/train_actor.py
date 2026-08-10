@@ -17,14 +17,6 @@ from miles.utils.memory_utils import clear_memory, print_memory
 logger = logging.getLogger(__name__)
 
 
-def get_local_gpu_id():
-    cvd = os.environ.get("CUDA_VISIBLE_DEVICES", None)
-    if cvd is None:
-        return ray.get_gpu_ids()[0]
-    else:
-        return cvd.split(",").index(str(ray.get_gpu_ids()[0]))
-
-
 class TrainRayActor(RayActor):
     def __init__(self, world_size, rank, master_addr, master_port):
         configure_logger()
@@ -131,10 +123,6 @@ class TrainRayActor(RayActor):
 
     @abc.abstractmethod
     def update_weights(self):
-        raise NotImplementedError
-
-    @abc.abstractmethod
-    def _get_parallel_config(self):
         raise NotImplementedError
 
     def set_rollout_manager(self, rollout_manager):

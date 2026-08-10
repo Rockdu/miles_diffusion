@@ -248,23 +248,6 @@ class RolloutManager:
     def onload_weights(self):
         self.onload(tags=[GPU_MEMORY_TYPE_WEIGHTS])
 
-    def recover_rollout_engines(self):
-        """Restart any dead rollout engines and update num_new_engines for update_weights detection."""
-        self.health_monitoring_pause()
-        if self.rollout_id == -1:
-            return self.rollout_engines, self.rollout_engine_lock, self.num_new_engines
-
-        dead_indices = [i for i, engine in enumerate(self.all_rollout_engines) if engine is None]
-        self.num_new_engines = init_rollout_engines(self.args, self.pg, self.all_rollout_engines)
-        logger.info(f"Recovered {self.num_new_engines} dead rollout engines")
-        assert self.num_new_engines == len(dead_indices), "num_new_engines does not match dead_indices length"
-        if self.args.offload_rollout and dead_indices:
-            new_engines = [self.all_rollout_engines[i] for i in dead_indices]
-            ray.get([engine.release_memory_occupation.remote() for engine in new_engines])
-            ray.get([engine.resume_memory_occupation.remote(tags=[GPU_MEMORY_TYPE_WEIGHTS]) for engine in new_engines])
-
-        return self.rollout_engines, self.rollout_engine_lock, self.num_new_engines
-
     def clear_num_new_engines(self):
         # when fault tolerance is not enabled, we need to manually clear num_new_engines after update_weights
         self.num_new_engines = 0
@@ -276,9 +259,6 @@ class RolloutManager:
     def health_monitoring_resume(self) -> None:
         if self._health_monitor is not None:
             self._health_monitor.resume()
-
-    def check_weights(self, action: str):
-        return ray.get([engine.check_weights.remote(action=action) for engine in self.rollout_engines])
 
     def _get_rollout_data(self, rollout_id):
         if self.args.load_debug_rollout_data:

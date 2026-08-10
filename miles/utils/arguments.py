@@ -1739,33 +1739,3 @@ def miles_validate_args(args):
             if hasattr(args, k):
                 logger.info(f"Warning: Argument {k} is already set to {getattr(args, k)}, will override with {v}.")
             setattr(args, k, v)
-
-
-def hf_validate_args(args, hf_config):
-    def equal(x, y):
-        return x == y
-
-    errors = []
-
-    # multimodal models have different config structure
-    if hasattr(hf_config, "text_config"):
-        hf_config = hf_config.text_config
-
-    for hf_config_name, megatron_config_name, compare_fn in [
-        ("hidden_size", "hidden_size", equal),
-        ("num_attention_heads", "num_attention_heads", equal),
-        ("num_hidden_layers", "num_layers", equal),
-        ("intermediate_size", "ffn_hidden_size", equal),
-        ("tie_word_embeddings", "untie_embeddings_and_output_weights", lambda x, y: not x == y),
-        ("rms_norm_eps", "norm_epsilon", equal),
-        ("rope_theta", "rotary_base", equal),
-    ]:
-        if hasattr(hf_config, hf_config_name):
-            if not compare_fn(getattr(hf_config, hf_config_name), getattr(args, megatron_config_name)):
-                errors.append(
-                    f"{hf_config_name} in hf config {getattr(hf_config, hf_config_name)} is not equal to "
-                    f"{megatron_config_name} {getattr(args, megatron_config_name)}, please check the config."
-                )
-
-    if len(errors) > 0:
-        raise AssertionError("hf_validate_args failed: " + "; ".join(errors))
