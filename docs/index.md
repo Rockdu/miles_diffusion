@@ -14,60 +14,59 @@ reproducible.
 
 ## Core features
 
-- **Flow-GRPO, DiffusionNFT, and SFT under one trainer.** Objectives are
-  plugins selected by `--loss-type` (`policy_loss`, `nft`, `sft_loss`); the
-  rollout / reward / weight-sync loop stays identical. See
-  [Core Concepts](/user-guide/concepts).
-- **sglang-diffusion rollout with trajectory capture.** The rollout engine
-  returns per-step latents and SDE log-probs
-  ([sglang#21204](https://github.com/sgl-project/sglang/pull/21204),
-  [sglang#23151](https://github.com/sgl-project/sglang/pull/23151)), supports
-  per-request scheduler switching for RL
-  ([sglang#30036](https://github.com/sgl-project/sglang/pull/30036)), and
-  sleep/wake for colocation
-  ([sglang#22659](https://github.com/sgl-project/sglang/pull/22659)).
-- **Single-prompt multi-generation.** One request produces N outputs for one
-  prompt — conditioning is encoded once and expanded engine-side
-  ([sglang#31233](https://github.com/sgl-project/sglang/pull/31233)). See
-  [Single-Prompt Multi-Generation](/advanced/single-prompt-multi-gen).
-- **LoRA training with CUDA-IPC weight sync.** Only `lora_A`/`lora_B` pairs
-  cross the process boundary; the rollout engine merges locally
-  ([sglang#31029](https://github.com/sgl-project/sglang/pull/31029)). See
+- **Fast and stable support for the latest diffusion models.** Launch-ready
+  recipes for Wan2.2-T2V-A14B (dual-expert MoE video), Qwen-Image, LTX-2.3
+  (audio-video), Cosmos3-Nano (16 B MoT omni), and SD3.5. A per-family
+  `TrainPipelineConfig` isolates model quirks — timestep scaling, CFG combine,
+  conditioning collation, LoRA targets — so new architectures plug in without
+  touching the trainer.
+- **LoRA training with zero-copy weight sync.** PEFT LoRA on the FSDP2 actor;
+  each iteration ships only `lora_A`/`lora_B` pairs to the rollout engines
+  over CUDA IPC and merges them engine-side — no full-weight transfer, no
+  separate merge or conversion step. See
   [LoRA Training and Weight Sync](/advanced/lora).
-- **Streaming rollout transfer and async rewards.** msgpack raw-bytes
-  transport, a Ray parser-actor pool, and per-microgroup reward scoring keep
-  deserialization and reward off the rollout critical path
-  ([#44](https://github.com/radixark/miles_diffusion/pull/44)). See
+- **Deterministic mode.** Seeded, collision-free rollout combined with
+  batch-invariant train-side attention gives bitwise reproducible runs —
+  repeatable experiments you can audit and resume. See
+  [Deterministic Training](/advanced/deterministic).
+- **SFT, DiffusionNFT, and Flow-GRPO under one trainer.** Objectives are
+  `--loss-type` plugins (`sft_loss`, `nft`, `policy_loss`) sharing the same
+  rollout / reward / weight-sync loop, so switching algorithms never means
+  switching systems. See [Core Concepts](/user-guide/concepts).
+- **sglang native.** Rollout runs on the sglang-diffusion serving engine
+  itself, not a forked inference stack. RL support lives engine-side —
+  trajectory capture with SDE/CPS log-probs, per-request scheduler switching,
+  [single-prompt multi-generation](/advanced/single-prompt-multi-gen),
+  sleep/wake for colocation, CUDA-IPC weight updates, and msgpack tensor
+  transport — while a small set of monkey patches (RMSNorm, QK-norm + RoPE,
+  LayerNorm scale-shift, fused mul-add) keeps engine kernels numerically
+  aligned with the training-side diffusers forward.
+- **Streaming rollout pipeline.** Every microgroup is generated, deserialized
+  in a Ray parser-actor pool, and reward-scored as an independent async task,
+  so scoring and tensor decoding overlap with generation still in flight. See
   [Streaming Reward and Deserialization](/advanced/streaming-reward).
 - **USP sequence parallelism (Ulysses × Ring).** Shard long video sequences
-  across GPUs via each family's diffusers `_cp_plan`
-  ([#21](https://github.com/radixark/miles_diffusion/pull/21)).
-- **Deterministic training.** Batch-invariant attention and seeded rollout for
-  bitwise reproducible runs
-  ([#14](https://github.com/radixark/miles_diffusion/pull/14)). See
-  [Deterministic Training](/advanced/deterministic).
-- **Per-family `TrainPipelineConfig`.** New model families plug in timestep
-  scaling, CFG combine, conditioning collation, and LoRA targets without
-  touching the trainer — see the model pages below.
+  across GPUs through each family's diffusers `_cp_plan` — no model rewrite
+  required.
 
 ## Supported models
 
 Each model name links to its recipe page.
 
-| Model | Task | Canonical recipes | Enabling PR |
-|---|---|---|---|
-| [Stable Diffusion 3.5](/models/sd3/sd3) | T2I | Flow-GRPO + OCR, DiffusionNFT + PickScore | [#4](https://github.com/radixark/miles_diffusion/pull/4) |
-| [Qwen-Image](/models/qwen-image/qwen-image) | T2I | Flow-GRPO + PickScore (flow_grpo-aligned) | initial release; attention backend fix in [#48](https://github.com/radixark/miles_diffusion/pull/48) |
-| [Wan2.2-T2V-A14B](/models/wan/wan2-2) | T2V | Flow-GRPO + PickScore, LoRA SFT | [#8](https://github.com/radixark/miles_diffusion/pull/8) |
-| [LTX-2.3](/models/ltx/ltx2) | T2V (AV) | Flow-GRPO + PickScore | [#38](https://github.com/radixark/miles_diffusion/pull/38) |
-| [Cosmos3-Nano](/models/cosmos/cosmos3) | T2I / T2V | Flow-GRPO + PickScore / VideoAlign | [#25](https://github.com/radixark/miles_diffusion/pull/25) *(in review)* |
+| Model | Task | Canonical recipes |
+|---|---|---|
+| [Stable Diffusion 3.5](/models/sd3/sd3) | T2I | Flow-GRPO + OCR, DiffusionNFT + PickScore |
+| [Qwen-Image](/models/qwen-image/qwen-image) | T2I | Flow-GRPO + PickScore (flow_grpo-aligned) |
+| [Wan2.2-T2V-A14B](/models/wan/wan2-2) | T2V | Flow-GRPO + PickScore, LoRA SFT |
+| [LTX-2.3](/models/ltx/ltx2) | T2V (AV) | Flow-GRPO + PickScore |
+| [Cosmos3-Nano](/models/cosmos/cosmos3) | T2I / T2V | Flow-GRPO + PickScore / VideoAlign |
 
 ## Feature support matrix
 
 Objectives are model-agnostic plugins; ✓ marks combinations exercised by a
-canonical recipe on `main` (see `scripts/`).
+canonical recipe (see `scripts/`).
 
-| | SD3.5 | Qwen-Image | Wan2.2 | LTX-2.3 | Cosmos3* |
+| | SD3.5 | Qwen-Image | Wan2.2 | LTX-2.3 | Cosmos3 |
 |---|---|---|---|---|---|
 | Flow-GRPO (`policy_loss`) | ✓ | ✓ | ✓ | ✓ | ✓ |
 | DiffusionNFT (`nft`) | ✓ | — | — | — | — |
@@ -77,9 +76,6 @@ canonical recipe on `main` (see `scripts/`).
 | USP sequence parallelism | via `_cp_plan` | via `_cp_plan` | ✓ | via `_cp_plan` | — |
 | Deterministic mode | ✓ | ✓ | — | — | — |
 
-*\*Cosmos3 support is pending merge of
-[#25](https://github.com/radixark/miles_diffusion/pull/25).*
-
 ## Start here
 
 1. **[Installation](/getting-started/installation)** — Docker image, pinned
@@ -88,13 +84,12 @@ canonical recipe on `main` (see `scripts/`).
    on SD3.5 with 2 GPUs.
 3. **[Core Concepts](/user-guide/concepts)** — the five objects in every
    miles-diffusion job and the loop that connects them.
-4. **[Training Script Walkthrough](/user-guide/training-script-walkthrough)** —
-   every argument group in a launch script, annotated.
-5. **[CLI Reference](/user-guide/cli-reference)** — every flag, grouped and
-   fully cataloged.
+4. **[Rewards](/user-guide/rewards)** — built-in reward models and custom
+   reward hooks.
+5. **Model guides** — per-model config and recipes, starting from the
+   [supported models](#supported-models) table above.
 
 ## Contribute
 
 - GitHub: [github.com/radixark/miles_diffusion](https://github.com/radixark/miles_diffusion)
-- Contributing: [developer guide](/developer/contributor-guide)
 - Miles (LLM RL): [github.com/radixark/miles](https://github.com/radixark/miles)
