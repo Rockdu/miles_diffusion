@@ -11,6 +11,8 @@ import torch.distributed as dist
 from ray.actor import ActorHandle
 from torch.distributed.tensor import DTensor, Replicate
 
+from .mixed_precision import parse_dtype_from_str
+
 try:
     from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions  # type: ignore[import]
 except ImportError:
@@ -461,7 +463,13 @@ class DiffusionUpdateWeightFromTensorLoRAIPC(DiffusionUpdateWeightFromTensor):
                 placements=[Replicate()] * param.device_mesh.ndim,
                 async_op=True,
             ).to_local()
-        return param
+        # Push what the trainer computes with, not the fp32 master. Autocast runs
+        # PEFT LoRA at forward dtype, while the engine's dynamic LoRA path casts x
+        # to the adapter dtype and rounds delta to the base dtype before adding.
+        # Matching dtypes makes both casts no-ops and the two forwards agree
+        # bitwise; pushing the master leaves the engine computing at a precision
+        # the trainer never used.
+        return param.to(parse_dtype_from_str(self.args.diffusion_forward_dtype))
 
     def update_weights(self) -> None:
         self.weight_version += 1

@@ -46,9 +46,10 @@ class TestBackendHierarchy:
         backend = DiffusersModelBackend(Wan2_2TrainPipelineConfig())
         plan = backend.fsdp_parallel_plan(_RecordingModel())
 
+        # Only norm2. scale_shift_table and time_embedder are deliberately left
+        # at forward dtype: sglang-d loads them in bf16, so an fp32-resident
+        # trainer would modulate with values the rollout never saw.
         assert plan.param_dtype_patterns == {
-            "*scale_shift_table": "fp32",
-            "*time_embedder*": "fp32",
             "*.norm2.*": "fp32",
         }
 
