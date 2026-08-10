@@ -10,7 +10,7 @@ Matrix, all under one torchrun invocation per topology:
 
     DTYPE x reduce_dtype        topology (dp_replicate x dp_shard)
     bf16 / fp16 / fp32     x    1x4   2x2   4x1
-    reduce in fp32 / None       (4x1 exercises the pure all-reduce path)
+    reduce in fp32 / bf16 / None   (4x1 exercises the pure all-reduce path)
 
 The model is small but covers the common module types: Embedding (root wrap), Linear,
 LayerNorm, Conv2d, a bare nn.Parameter scale (the scale_shift_table shape), and one frozen
@@ -153,7 +153,7 @@ def main():
 
     rank = dist.get_rank()
     for dtype in DTYPES:
-        for reduce_dtype in (torch.float32, None):
+        for reduce_dtype in (torch.float32, torch.bfloat16, None):
             _trial(topology, dtype, reduce_dtype, rank)
     if rank == 0:
         print("OK", flush=True)
