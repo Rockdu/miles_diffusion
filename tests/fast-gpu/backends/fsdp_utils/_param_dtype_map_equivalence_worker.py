@@ -227,7 +227,10 @@ def _scaler_trial(topology, rank):
 
 
 _FP32_PIN_SUFFIXES = ("norm.weight", "norm.bias", "scale")
-_GRAD_RTOL, _GRAD_ATOL = 5e-2, 1e-5
+# Element-wise rtol/atol both degenerate here: near-cancelled elements break rtol and the
+# magnitude spread breaks any single atol. Relative L2 is self-normalizing — measured bf16
+# noise sits near 1%, while a wrong gradient divide factor lands at ~100%.
+_GRAD_REL_L2 = 5e-2
 
 
 def _mixed_pin_trial(topology, rank):
@@ -277,13 +280,9 @@ def _mixed_pin_trial(topology, rank):
         ref_grad = ref_param.grad.detach().clone()
         dist.all_reduce(ref_grad)
         ref_grad /= world_size
-        torch.testing.assert_close(
-            param.grad.full_tensor(),
-            ref_grad,
-            rtol=_GRAD_RTOL,
-            atol=_GRAD_ATOL,
-            msg=lambda base, name=name: f"{topology} mixed-pin grad {name}: {base}",
-        )
+        grad = param.grad.full_tensor()
+        error = (grad.float() - ref_grad).norm() / ref_grad.norm().clamp_min(1e-8)
+        assert error < _GRAD_REL_L2, f"{topology} mixed-pin grad {name}: relative L2 error {error:.4f}"
 
 
 def main():
