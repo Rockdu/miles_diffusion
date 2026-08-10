@@ -38,9 +38,10 @@ cd /root/miles_diffusion && git pull && pip install -e . --no-deps
 Steps 2–4 below run inside the container (or on any machine with the same deps).
 
 <Note>
-The launch script sets `PYTHONPATH` for SD3 `/rollout/generate` support — run it
-as-is. On bare metal, ensure the sglang-diffusion install matches
-`docker/README.md` or the script header comments.
+Launch recipes live under `scripts/` as **Python modules** (not bash). Each
+script sets recipe-specific env vars (e.g. `PYTHONPATH` for SD3
+`/rollout/generate`) and submits `train_diffusion.py` through Ray via
+`miles.utils.external_utils.command_utils`.
 </Note>
 
 ## 2. Download model and data
@@ -84,14 +85,14 @@ See [Rewards](/user-guide/rewards) for OCR scoring and prompt format.
 
 ```bash
 export HF_TOKEN=<your_hf_token>
-export CUDA_VISIBLE_DEVICES=6,7   # 2-GPU colocate
-bash scripts/run-diffusion-grpo-sd3-ocr-sglang.sh
+python3 scripts/run_diffusion_grpo_sd3_ocr_sglang.py \
+  --cuda-visible-devices 6,7
 ```
 
 The script starts Ray, launches sglang-diffusion rollout engines, loads the
-FSDP actor with LoRA, syncs weights via CUDA IPC, and runs the Flow-GRPO
-rollout / train loop. With `WANDB_API_KEY` set, images and metrics are logged
-to project `miles-diffusion-grpo`.
+FSDP actor with LoRA, syncs weights via CUDA IPC (`--lora-ipc-weight-sync`),
+and runs the Flow-GRPO rollout / train loop. With `WANDB_API_KEY` set, images
+and metrics are logged to project `miles-diffusion-grpo`.
 
 After a minute or two you should see iteration logs along these lines:
 
@@ -105,11 +106,25 @@ GPU layout, batch sizing, SDE flags, and reference training curves are in the
 [SD3 model guide](/models/sd3/sd3) (§6 recipe configuration, §9 reference
 results) — not repeated here.
 
-To finish faster while debugging, override rollout count on the **same script**
-(default is 600):
+To finish faster while debugging, override rollout count (default **600**):
 
 ```bash
-NUM_ROLLOUT=2 CUDA_VISIBLE_DEVICES=6,7 bash scripts/run-diffusion-grpo-sd3-ocr-sglang.sh
+python3 scripts/run_diffusion_grpo_sd3_ocr_sglang.py \
+  --cuda-visible-devices 6,7 \
+  --num-rollout 2
+```
+
+Equivalent env vars (any `ScriptArgs` field accepts `MILES_SCRIPT_<FIELD>`):
+
+```bash
+MILES_SCRIPT_NUM_ROLLOUT=2 MILES_SCRIPT_CUDA_VISIBLE_DEVICES=6,7 \
+  python3 scripts/run_diffusion_grpo_sd3_ocr_sglang.py
+```
+
+For train/rollout alignment debugging:
+
+```bash
+MILES_SCRIPT_DEBUG_ALIGNMENT=1 python3 scripts/run_diffusion_grpo_sd3_ocr_sglang.py
 ```
 
 ## 4. What's happening
@@ -132,13 +147,15 @@ flowchart LR
 4. Push updated LoRA weights to rollout engines via `--lora-ipc-weight-sync`.
 
 This recipe uses **Flow-GRPO** (`--loss-type policy_loss`, the default) with
-LoRA-base KL (`--diffusion-kl-beta 0.04`), SDE window scoring
-(`--diffusion-step-strategy-path miles.rollout.step_strategy_hub.sde_window`),
-noise level 0.7, and CFG 4.5. Train-side dynamics go through the
+LoRA-base KL (`--diffusion-kl-beta 0.04`), full-window SDE scoring
+(`--diffusion-step-strategy-path miles.rollout.step_strategy_hub.sde_window`,
+`--diffusion-num-sde-steps 10`, `--diffusion-sde-window-range 0,10`), noise
+level 0.7, and CFG 4.5. `--deterministic-mode` and `--global-batch-size 64`
+match the CI e2e recipe. Train-side dynamics go through the
 [SDE step backend](/advanced/sde-backend).
 
 **DiffusionNFT + PickScore** (3 GPUs, ODE, EMA reference) is a separate recipe —
-see [SD3 model guide](/models/sd3/sd3) §5.2.
+see [SD3 model guide](/models/sd3/sd3) §5.3.
 
 ## Inspecting a run
 

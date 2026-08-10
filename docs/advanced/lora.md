@@ -14,14 +14,14 @@ Representative **LoRA + IPC merge** recipes (not an exhaustive list — search
 
 | Script | Model | LoRA mode |
 |---|---|---|
-| `scripts/run-diffusion-grpo-sd3-ocr-sglang.sh` | SD3.5 | IPC merge |
-| `scripts/run-diffusion-grpo-pickscore-5gpu-flowgrpo-aligned.sh` | Qwen-Image | IPC merge |
-| `scripts/run-diffusion-grpo-wan22-pickscore-5gpu.sh` | Wan 2.2 | IPC merge |
+| `scripts/run_diffusion_grpo_sd3_ocr_sglang.py` | SD3.5 | IPC merge |
+| `scripts/run_diffusion_grpo_pickscore_5gpu_flowgrpo_aligned.py` | Qwen-Image | IPC merge |
+| `scripts/run_diffusion_grpo_wan22_pickscore_5gpu.py` | Wan 2.2 | IPC merge |
+| `scripts/run_diffusion_nft_sd3_pickscore.py` | SD3.5 | IPC merge |
 
-Other diffusion scripts use **`--use-lora`** with a different weight-sync path
-(for example `scripts/run-diffusion-grpo-ltx23-sglang.sh` — LoRA without
-`--lora-ipc-weight-sync`, train-side merge). Any new recipe that passes both
-`--use-lora` and `--colocate` can opt into IPC merge with
+Other diffusion scripts use **`--use-lora`** with train-side merge
+(for example `scripts/run_diffusion_grpo_ltx23_sglang.py`). Any new recipe
+that passes both `--use-lora` and `--colocate` can opt into IPC merge with
 `--lora-ipc-weight-sync`.
 
 All IPC recipes above share:
@@ -43,7 +43,7 @@ All IPC recipes above share:
 | `--lora-rank` | LoRA rank (recipes use 32) |
 | `--lora-alpha` | LoRA alpha (recipes use 64, i.e. 2× rank) |
 | `--lora-target-modules` | Override family defaults (optional) |
-| `--diffusion-init-lora-weight` | Init scheme, e.g. `gaussian` |
+| `--lora-init-weights` | Init scheme, e.g. `gaussian` |
 | `--update-weight-buffer-size` | IPC bucket size in bytes (recipes use 2 GB) |
 | `--update-weight-target-module` | Component to sync (SD3 default: `transformer`) |
 | `--colocate` | **Required** — train and rollout share GPU visibility |

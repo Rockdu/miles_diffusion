@@ -55,7 +55,7 @@ batching. For video outputs, frames are uniformly sampled
 | `--pickscore-num-frames` | None | Video frame sampling count |
 | `--colocate-reward` | False | Share rollout GPUs (0.05 GPU/worker) |
 
-Example from `scripts/run-diffusion-nft-sd3-pickscore.sh`:
+Example from `scripts/run_diffusion_nft_sd3_pickscore.py`:
 
 ```bash
 --rm-type pickscore \
@@ -80,7 +80,7 @@ reward = 1 - levenshtein_distance(recognized, target) / len(target)
 ```
 
 OCR runs on **CPU** Ray actors (`--ocr-num-workers`, default 4). Used by the
-SD3 Flow-GRPO recipe (`scripts/run-diffusion-grpo-sd3-ocr-sglang.sh`).
+SD3 Flow-GRPO recipe (`scripts/run_diffusion_grpo_sd3_ocr_sglang.py`).
 
 ### Remote RM (`--rm-type remote_rm`)
 
@@ -123,20 +123,9 @@ Example registration:
 --custom-rm-path my_project.rewards.aesthetic_rm
 ```
 
-Debug tool: replay rewards on saved rollout data. Note that this helper calls
-your function **per sample** `(args, sample)`, not batched — wrap a batched
-implementation if needed:
-
-```python
-async def my_rm_for_replay(args, sample, **kwargs) -> float:
-    return (await my_batched_rm(args, [sample]))[0]
-```
-
-```bash
-python -m miles.utils.debug_utils.replay_reward_fn \
-  --rollout-data-path /path/to/rollout.pt \
-  --custom-rm-path my_project.rewards.my_rm_for_replay
-```
+To debug a custom RM, load saved rollout tensors and call your function directly
+in a small script — the previous `replay_reward_fn` helper was removed in the
+args refactor.
 
 ### API reward service
 

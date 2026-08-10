@@ -22,7 +22,7 @@ rollout-side values.
 | Flow-GRPO | `--loss-type policy_loss` | **Yes** | [Flow-GRPO](https://arxiv.org/abs/2505.05470) |
 | DiffusionNFT | `--loss-type nft` | **No** | [DiffusionNFT](https://arxiv.org/abs/2509.16117) |
 
-Canonical Flow-GRPO recipe: `scripts/run-diffusion-grpo-sd3-ocr-sglang.sh` — see
+Canonical Flow-GRPO recipe: `scripts/run_diffusion_grpo_sd3_ocr_sglang.py` — see
 [SD3 model guide](/models/sd3/sd3) and [Quick Start](/getting-started/quick-start)
 for full training setup.
 
