@@ -9,18 +9,18 @@ has an obvious home.
 ## The five objects
 
 ```mermaid
-flowchart LR
-    subgraph Rollout
-      P[Prompt dataset] --> R[sglang-diffusion engines]
+flowchart TB
+    subgraph rollout [Rollout]
+        direction LR
+        P[Prompt dataset] --> R[sglang-diffusion engines]
+        R -- trajectories --> RM[Reward workers]
     end
-    subgraph Scoring
-      R --> RM[Reward workers]
+    subgraph training [Training]
+        direction LR
+        A[Actor — FSDP2 DiT] -. KL / anchor .-> RF[(Reference — LoRA base / EMA)]
     end
-    subgraph Training
-      RM --> A[Actor — FSDP2 DiT]
-      A -. KL / anchor .-> RF[(Reference)]
-    end
-    A == weight sync ==> R
+    RM -- scored samples --> A
+    A == CUDA-IPC weight sync ==> R
 ```
 
 | Object | Role | Lives in |
@@ -29,7 +29,14 @@ flowchart LR
 | **Rollout (sglang-diffusion engines)** | Denoises prompts into images/videos and records the trajectory | One engine per `--rollout-num-gpus-per-engine` GPUs, behind the miles router (`--use-miles-router`) |
 | **Reward workers** | Map `(prompt, generated output) → score` | Built-in `rm_hub` (`--rm-type ocr / pickscore`) or custom (`--custom-rm-path`) — Ray actor pools |
 | **Actor (FSDP2 + diffusers)** | The DiT being trained, usually via LoRA | HF checkpoint (`--hf-checkpoint`), family resolved by `TrainPipelineConfig` |
-| **Reference** | Frozen anchor for KL / NFT | `--ref-mode lora_base` (the un-adapted base) or `--ref-mode ema` — no second copy of the weights needed with LoRA |
+| **Reference** *(optional)* | Anchor for the no-grad DiT forward that KL and NFT compare against | `--ref-mode lora_base` (PEFT `disable_adapter()`) or `--ref-mode ema` (EMA shadow swap-in) — a weight *view* of the actor, never a second loaded copy |
+
+Unlike LLM Miles there is no `--ref-load`: the reference is realized by
+re-running the actor with adapters disabled or EMA weights swapped in
+(`miles/backends/fsdp_utils/actor.py`). When unset, `--ref-mode` is
+auto-inferred — `lora_base` when `--diffusion-kl-beta > 0`, `ema` for
+`--loss-type nft` — and resolves to `none` when neither needs it (e.g. the
+Wan2.2 recipe runs KL beta 0 and does no reference forward at all).
 
 Two differences from the LLM Miles loop are worth calling out:
 
