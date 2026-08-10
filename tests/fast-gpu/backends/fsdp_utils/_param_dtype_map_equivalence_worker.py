@@ -44,8 +44,11 @@ class CommonBlock(nn.Module):
         self.scale = nn.Parameter(torch.randn(16))
 
     def forward(self, x, image):
-        x = self.norm(self.linear(x)) * self.scale
-        return x, self.conv(image)
+        # Inputs are cast at each consumer (production runs cast_forward_inputs=False + autocast;
+        # here explicit casts keep both models on identical, policy-independent input dtypes).
+        x = self.linear(x.to(self.linear.weight.dtype))
+        x = self.norm(x.to(self.norm.weight.dtype)) * self.scale
+        return x, self.conv(image.to(self.conv.weight.dtype))
 
 
 class CommonModuleModel(nn.Module):
@@ -108,7 +111,7 @@ def _trial(topology, dtype, reduce_dtype, rank):
     mesh = init_device_mesh("cuda", (replicate, shard), mesh_dim_names=("dp_replicate", "dp_shard"))
 
     def stock_policy(_local_names):
-        return MixedPrecisionPolicy(param_dtype=dtype, reduce_dtype=reduce_dtype)
+        return MixedPrecisionPolicy(param_dtype=dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=False)
 
     decoy = torch.float16 if dtype != torch.float16 else torch.bfloat16
 
@@ -117,6 +120,7 @@ def _trial(topology, dtype, reduce_dtype, rank):
             param_dtype=decoy,
             reduce_dtype=reduce_dtype,
             param_dtype_map={name: dtype for name in local_names},
+            cast_forward_inputs=False,
         )
 
     _wrap(stock, mesh, stock_policy)
