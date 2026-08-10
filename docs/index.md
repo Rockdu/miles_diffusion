@@ -16,7 +16,7 @@ reproducible.
 
 - **Fast and stable support for the latest diffusion models.** Launch-ready
   recipes for Wan2.2-T2V-A14B (dual-expert MoE video), Qwen-Image, LTX-2.3
-  (audio-video), Cosmos3-Nano (16 B MoT omni), and SD3.5. A per-family
+  (audio-video), the Cosmos3 MoT omni family, and SD3.5. A per-family
   `TrainPipelineConfig` isolates model quirks — timestep scaling, CFG combine,
   conditioning collation, LoRA targets — so new architectures plug in without
   touching the trainer.
@@ -59,7 +59,7 @@ Each model name links to its recipe page.
 | [Qwen-Image](/models/qwen-image/qwen-image) | T2I | Flow-GRPO + PickScore (flow_grpo-aligned) |
 | [Wan2.2-T2V-A14B](/models/wan/wan2-2) | T2V | Flow-GRPO + PickScore, LoRA SFT |
 | [LTX-2.3](/models/ltx/ltx2) | T2V (AV) | Flow-GRPO + PickScore |
-| [Cosmos3-Nano](/models/cosmos/cosmos3) | T2I / T2V | Flow-GRPO + PickScore / VideoAlign |
+| [Cosmos3 (Edge / Nano / Super)](/models/cosmos/cosmos3) | T2I / T2V | Flow-GRPO + PickScore / VideoAlign (validated on Nano) |
 
 ## Feature support matrix
 

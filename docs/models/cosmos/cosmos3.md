@@ -36,12 +36,27 @@ sequence. It reuses the Wan2.2 VAE (4× temporal compression).
 
 ## 2. Supported variants
 
-| Model | Composition | HF ID |
-|---|---|---|
-| Cosmos3-Nano | 8 B UND + 8 B GEN (MoT) | [nvidia/Cosmos3-Nano](https://huggingface.co/nvidia/Cosmos3-Nano) |
+All Cosmos3 sizes share the dual-tower MoT architecture (they differ only in
+layer count and hidden dim), so they all resolve to the same family config —
+detection matches any checkpoint name containing `cosmos3` / `cosmos-3`.
 
-Family detection matches `("cosmos3", "cosmos-3")`. Cosmos3 requires
-`--update-weight-target-module transformer` (validated at startup).
+| Model | Composition | HF ID | Status |
+|---|---|---|---|
+| Cosmos3-Nano | 16 B (8 B UND + 8 B GEN) | [nvidia/Cosmos3-Nano](https://huggingface.co/nvidia/Cosmos3-Nano) | **Validated** — canonical recipes |
+| Cosmos3-Edge | 4 B (2 B + 2 B) | [nvidia/Cosmos3-Edge](https://huggingface.co/nvidia/Cosmos3-Edge) | Same config; untested |
+| Cosmos3-Super | 64 B (32 B + 32 B) | [nvidia/Cosmos3-Super](https://huggingface.co/nvidia/Cosmos3-Super) | Same config; untested, needs larger GPU layout |
+
+Specialized checkpoints (e.g. `Cosmos3-Super-Text2Image`,
+`Cosmos3-Super-Image2Video`) resolve to the same family as well.
+
+<Note>
+Moving off Nano: re-derive `--diffusion-sde-candidate-steps` from the new
+checkpoint's sigma grid (see §5.2 — step numbers are not transferable), and
+confirm sglang-diffusion serves that checkpoint for rollout.
+</Note>
+
+Cosmos3 requires `--update-weight-target-module transformer` (validated at
+startup).
 
 ## 3. Family config
 
