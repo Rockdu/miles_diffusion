@@ -24,7 +24,7 @@ _VALID_KWARGS = frozenset({"est_time", "suite", "labels", "nightly", "disabled"}
 _REGISTER_NAMES = frozenset({"register_cpu_ci", "register_cuda_ci", "register_e2e_ci"})
 
 # Runtime-only kwargs of register_e2e_ci, consumed when the test file executes.
-_E2E_RUNTIME_KWARGS = frozenset({"script", "metrics", "env", "tolerances"})
+_E2E_RUNTIME_KWARGS = frozenset({"script", "metrics", "args", "env", "tolerances"})
 
 _UNSET = object()
 

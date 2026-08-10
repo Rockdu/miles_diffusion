@@ -1,9 +1,9 @@
 """E2E metrics registry: per-step metric regression against a committed standard.
 
 A test is one register_e2e_ci(...) call: suite placement is parsed via AST by
-ci_register.py; executing the file runs `script` and checks `metrics` against
-tests/ci/fixtures/e2e_standards/<test_stem>.json. Standards are updated by the
-PR author, never by CI:
+ci_register.py; executing the file runs the Python recipe named by `script` and
+checks `metrics` against tests/ci/fixtures/e2e_standards/<test_stem>.json.
+Standards are updated by the PR author, never by CI:
 
     python tests/ci/e2e_metrics_registry.py record --test <test-file>
     python tests/ci/e2e_metrics_registry.py register --test <test-file> [--metrics <jsonl>]
@@ -39,6 +39,7 @@ def register_e2e_ci(
     *,
     script: str,
     metrics: list[str],
+    args: list[str] | None = None,
     env: dict[str, str] | None = None,
     tolerances: dict[str, dict] | None = None,
     labels: list[str] | None = None,
@@ -46,7 +47,10 @@ def register_e2e_ci(
     disabled: str | None = None,
 ) -> None:
     """Dual-role marker: AST-parsed for suite scheduling (est_time/suite/...)
-    AND executed when the test file runs (script/metrics/env/tolerances)."""
+    AND executed when the test file runs (script/metrics/args/env/tolerances).
+
+    `script` is a Python recipe under scripts/, run with this interpreter; the
+    recipes take their knobs as typer flags, so CI passes them in `args`."""
     del est_time, suite, labels, nightly, disabled
     caller = sys._getframe(1).f_globals
     if caller.get("__name__") != "__main__":
@@ -57,7 +61,9 @@ def register_e2e_ci(
     recording.parent.mkdir(parents=True, exist_ok=True)
     recording.unlink(missing_ok=True)
     run_env = dict(os.environ) | (env or {}) | {"MILES_METRICS_JSONL": str(recording)}
-    subprocess.run(["bash", str(REPO_ROOT / script)], check=True, cwd=REPO_ROOT, env=run_env)
+    cmd = [sys.executable, "-u", str(REPO_ROOT / script), *(args or [])]
+    print(f"[e2e-metrics] running {' '.join(cmd)}", flush=True)
+    subprocess.run(cmd, check=True, cwd=REPO_ROOT, env=run_env)
     check_or_update(test_file, recording, metrics, tolerances)
 
 

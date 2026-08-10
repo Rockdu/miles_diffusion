@@ -55,6 +55,7 @@ def execute(args: ScriptArgs, data_dir: str) -> None:
         "--diffusion-microgroup-size 1 "
         "--micro-batch-size-sample 1 "
         "--micro-batch-size-tstep 1 "
+        "--train-dp-split-mode stride "
         "--diffusion-train-iter-order sample_major "
     )
 
