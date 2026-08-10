@@ -15,8 +15,8 @@ reproducible.
 ## Core features
 
 - **Fast and stable support for the latest diffusion models.** Launch-ready
-  recipes for Wan2.2-T2V-A14B (dual-expert MoE video), Qwen-Image, LTX-2.3
-  (audio-video), the Cosmos3 MoT omni family, and SD3.5. A per-family
+  recipes for Wan2.2-T2V-A14B (dual-expert MoE video), Qwen-Image, LTX-2.3,
+  the Cosmos3 MoT omni family, and SD3.5. A per-family
   `TrainPipelineConfig` isolates model quirks — timestep scaling, CFG combine,
   conditioning collation, LoRA targets — so new architectures plug in without
   touching the trainer.
@@ -41,10 +41,7 @@ reproducible.
   transport — while a small set of monkey patches (RMSNorm, QK-norm + RoPE,
   LayerNorm scale-shift, fused mul-add) keeps engine kernels numerically
   aligned with the training-side diffusers forward.
-- **Streaming rollout pipeline.** Every microgroup is generated, deserialized
-  in a Ray parser-actor pool, and reward-scored as an independent async task,
-  so scoring and tensor decoding overlap with generation still in flight. See
-  [Streaming Reward and Deserialization](/advanced/streaming-reward).
+
 - **USP sequence parallelism (Ulysses × Ring).** Shard long video sequences
   across GPUs through each family's diffusers `_cp_plan` — no model rewrite
   required.
@@ -58,7 +55,7 @@ Each model name links to its recipe page.
 | [Stable Diffusion 3.5](/models/sd3/sd3) | T2I | Flow-GRPO + OCR, DiffusionNFT + PickScore |
 | [Qwen-Image](/models/qwen-image/qwen-image) | T2I | Flow-GRPO + PickScore (flow_grpo-aligned) |
 | [Wan2.2-T2V-A14B](/models/wan/wan2-2) | T2V | Flow-GRPO + PickScore, LoRA SFT |
-| [LTX-2.3](/models/ltx/ltx2) | T2V (AV) | Flow-GRPO + PickScore |
+| [LTX-2.3](/models/ltx/ltx2) | T2V | Flow-GRPO + PickScore |
 | [Cosmos3 (Edge / Nano / Super)](/models/cosmos/cosmos3) | T2I / T2V | Flow-GRPO + PickScore / VideoAlign (validated on Nano) |
 
 ## Feature support matrix
