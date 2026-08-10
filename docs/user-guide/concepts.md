@@ -13,12 +13,15 @@ flowchart TB
     subgraph rollout [Rollout]
         direction LR
         P[Prompt dataset] --> R[sglang-diffusion engines]
-        R -- trajectories --> RM[Reward workers]
+    end
+    subgraph scoring [Scoring]
+        RM[Reward workers]
     end
     subgraph training [Training]
         direction LR
         A[Actor — FSDP2 DiT] -. KL / anchor .-> RF[(Reference — LoRA base / EMA)]
     end
+    R -- trajectories --> RM
     RM -- scored samples --> A
     A == CUDA-IPC weight sync ==> R
 ```
