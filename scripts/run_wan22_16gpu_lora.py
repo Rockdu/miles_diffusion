@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Wan2.2-T2V-A14B 16-GPU (2x8) GRPO LoRA — miles-LLM-style one-command multi-pod launcher.
+Wan2.2-T2V-A14B 16-GPU (2x8) GRPO LoRA -- miles-LLM-style one-command multi-pod launcher.
 
 Same ergonomics as miles core's run_*.py (subcommands + a config dataclass + a single
 command that stands the whole multi-node run up). Stdlib-only (argparse). The multi-node
@@ -10,16 +10,13 @@ launches train_diffusion.py on the head. --nodes are ssh targets (raw IPs, or Ho
 from ~/.ssh/config); nodes[0] is the Ray head.
 
 On RadixArk rx the pod containers run no sshd (a raw-IP ssh hits the node host, not the
-container), so run `rx devbox ssh-config <node>` once per pod — it installs an ssh alias
-(ProxyCommand tunnels through `rx devbox run`) — then pass those alias names as --nodes.
+container), so run `rx devbox ssh-config <node>` once per pod -- it installs an ssh alias
+(ProxyCommand tunnels through `rx devbox run`) -- then pass those alias names as --nodes.
 
 Layout: 16 train GPU across 2 IB pods colocate FSDP train + sglang rollout; PickScore
 reward on its own 1-GPU pod (reward_node, non-colocate). Parallelism: train
 dp_replicate=2 x sequence_parallel=8 (ulysses=8), rollout TP=4; recompute_logprob on.
 Reproduces wandb run wan22_16gpu_bs24_ns1 (bs24, num-steps-per-rollout=1, peak <=40GB).
-
-Config is built as concern-grouped arg blocks (ckpt/rollout/eval/grpo/optimizer/lora/
-reward/wandb/sglang/train_backend/perf/misc), mirroring miles' recipe scripts.
 
 Usage (from the control host):
   python3 run_wan22_16gpu_lora.py prepare  --hf-token ...       # model+dataset, per pod
@@ -40,7 +37,6 @@ DATA_ROOT = "/root/datasets/miles-diffusion-datasets"
 DS = f"{DATA_ROOT}/{DATASET_SUBSET}"
 WANDB_PROJECT = "miles-diffusion-grpo"
 
-# Wan2.2 DiT LoRA targets: self-attn (attn1), cross-attn (attn2), and FFN.
 LORA_TARGET_MODULES = (
     "attn1.to_q attn1.to_k attn1.to_v attn1.to_out.0 "
     "attn2.to_q attn2.to_k attn2.to_v attn2.to_out.0 "
@@ -51,21 +47,19 @@ LORA_TARGET_MODULES = (
 @dataclass
 class Cfg:
     nodes: tuple = ("kangrui-h200-new", "kangrui-h200-ltx")  # nodes[0] = Ray head
-    reward_node: str = "kangrui-h200-reward"  # dedicated 1-GPU pod for the pickscore reward
+    reward_node: str = "kangrui-h200-reward"
     gpus_per_node: int = 8
     ray_port: int = 6379
-    # train parallelism
     dp_replicate: int = 2
     sp: int = 8
     ulysses: int = 8
-    # rollout
     rollout_tp: int = 4
-    # batch / schedule
     rollout_batch_size: int = 24
     n_samples_per_prompt: int = 8
-    num_steps_per_rollout: int = 1  # 1 optim step/rollout: fully on-policy. =2 collapses reward (off-policy 2nd step under 1e-4 clip)
-    microgroup_size: int = 2        # tuned down (with gradient ckpt) for <=40GB train peak
-    micro_batch_size: int = 1       # tuned down from 2 for <=40GB
+    # =2 collapses reward: the off-policy 2nd step under a 1e-4 clip biases the gradient
+    num_steps_per_rollout: int = 1
+    microgroup_size: int = 2  # microgroup/micro_batch tuned down for <=40GB train peak
+    micro_batch_size: int = 1
     num_rollout: int = 10000
     lora_rank: int = 64
     lora_alpha: int = 128
@@ -85,7 +79,7 @@ def run_on(node, cmd, timeout=600):
     remote = "bash -lc " + shlex.quote(cmd)
     full = f"ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new {tgt} {shlex.quote(remote)}"
     p = subprocess.run(full, shell=True, capture_output=True, text=True, timeout=timeout)
-    return (p.stdout or "") + (p.stderr or "")
+    return p.stdout + p.stderr
 
 
 def node_ip(node):
@@ -125,22 +119,16 @@ def ray_up(c: Cfg):
 
 
 def train_args(c: Cfg, wandb_key: str) -> str:
-    # Flags grouped by concern (miles' vocabulary, per #141), not by name prefix.
-    # ckpt on shared cluster-storage (/personal survives devbox release), NOT node-local /root
+    # /personal is shared cluster-storage that survives a devbox release; /root is node-local
     save = f"/personal/wan22_{c.world}gpu_lora/ckpt"
 
-    # --hf-checkpoint feeds both the train loader and the sglang-d engine (#142 folded the
-    # former --diffusion-model into it).
     ckpt_args = f"--hf-checkpoint {MODEL} --save {save} --save-interval 10 "
 
-    # rollout = engine + batch shape + every sampler knob (steps/guidance/noise/SDE schedule/
-    # resolution/frames/flow-shift); the old --diffusion-* block folds in here.
     rollout_args = (
         "--rollout-function-path miles.rollout.sglang_diffusion_rollout.generate_rollout "
         f"--prompt-data {DS}/train.jsonl --input-key input "
         f"--rollout-batch-size {c.rollout_batch_size} --n-samples-per-prompt {c.n_samples_per_prompt} "
         f"--num-rollout {c.num_rollout} "
-        # 1 optim step/rollout = fully on-policy; =2 collapses reward (off-policy 2nd step under 1e-4 clip)
         f"--num-steps-per-rollout {c.num_steps_per_rollout} "
         f"--rollout-microgroup-size {c.microgroup_size} "
         "--diffusion-num-steps 10 --diffusion-output-num-frames 21 "
@@ -240,23 +228,24 @@ def cmd_down(c: Cfg):
 
 
 def main():
+    d = Cfg()
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     for name in ("prepare", "train", "status", "down"):
         sp = sub.add_parser(name)
-        sp.add_argument("--nodes", default="kangrui-h200-new,kangrui-h200-ltx")
+        sp.add_argument("--nodes", default=",".join(d.nodes))
         sp.add_argument("--ssh-user", default="root", help="ssh login user; empty -> use --nodes verbatim (ssh config)")
         if name in ("prepare", "train"):
             sp.add_argument("--hf-token", default="")
         if name == "train":
             sp.add_argument("--wandb-key", default="")
-            sp.add_argument("--dp-replicate", type=int, default=2)
-            sp.add_argument("--sp", type=int, default=8)
-            sp.add_argument("--ulysses", type=int, default=8)
-            sp.add_argument("--rollout-tp", type=int, default=4)
-            sp.add_argument("--micro-batch-size", type=int, default=1)
-            sp.add_argument("--microgroup-size", type=int, default=4)
-            sp.add_argument("--rollout-batch-size", type=int, default=48)
+            sp.add_argument("--dp-replicate", type=int, default=d.dp_replicate)
+            sp.add_argument("--sp", type=int, default=d.sp)
+            sp.add_argument("--ulysses", type=int, default=d.ulysses)
+            sp.add_argument("--rollout-tp", type=int, default=d.rollout_tp)
+            sp.add_argument("--micro-batch-size", type=int, default=d.micro_batch_size)
+            sp.add_argument("--microgroup-size", type=int, default=d.microgroup_size)
+            sp.add_argument("--rollout-batch-size", type=int, default=d.rollout_batch_size)
     args = p.parse_args()
     global SSH_USER
     SSH_USER = args.ssh_user
