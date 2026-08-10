@@ -15,7 +15,9 @@ Matrix, all under one torchrun invocation per topology:
 The model is small but covers the common module types: Embedding (root wrap), Linear,
 LayerNorm, Conv2d, a bare nn.Parameter scale (the scale_shift_table shape), and one frozen
 bias. Three backwards accumulate without zero_grad, matching the trainer's
-one-reduce-per-microbatch pattern.
+one-reduce-per-microbatch pattern. A ShardedGradScaler trial replays the trainer's fp16
+loop with one deliberate overflow step: unscaled grads, the found_inf skip, the scale
+schedule, and the updated params must all stay bitwise-equal between stock and map.
 """
 
 import copy
@@ -142,6 +144,74 @@ def _trial(topology, dtype, reduce_dtype, rank):
         assert torch.equal(lhs, rhs), f"{context} grad {name}: values diverge"
 
 
+def _run_scaled(model, rank):
+    """The trainer's fp16 pattern: scale -> backward -> unscale_ -> step -> update, one overflow step."""
+    from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
+
+    optimizer = torch.optim.SGD([param for param in model.parameters() if param.requires_grad], lr=0.1)
+    scaler = ShardedGradScaler(init_scale=2.0**10, growth_interval=2)
+    history = []
+    for step in range(4):
+        torch.manual_seed(2000 * (rank + 1) + step)
+        tokens = torch.randint(0, 32, (2, 5), device="cuda")
+        image = torch.randn(2, 4, 8, 8, device="cuda")
+        if step == 2:
+            image = image * 60000.0  # overflow the fp16 conv so found_inf must trip identically
+        scaler.scale(model(tokens, image)).backward()
+        scaler.unscale_(optimizer)
+        grads = {
+            name: param.grad.full_tensor().detach().clone()
+            for name, param in model.named_parameters()
+            if param.grad is not None
+        }
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad()
+        history.append((grads, float(scaler.get_scale())))
+    params = {name: param.data.full_tensor().detach().clone() for name, param in model.named_parameters()}
+    return history, params
+
+
+def _bitwise_equal(lhs, rhs):
+    """torch.equal is False for NaN==NaN; the overflow step needs bit-level comparison."""
+    return torch.equal(lhs.view(torch.int32), rhs.view(torch.int32))
+
+
+def _scaler_trial(topology, rank):
+    torch.manual_seed(7)
+    base = CommonModuleModel().cuda()
+    stock, mapped = base, copy.deepcopy(base)
+    replicate, shard = TOPOLOGIES[topology]
+    mesh = init_device_mesh("cuda", (replicate, shard), mesh_dim_names=("dp_replicate", "dp_shard"))
+
+    def stock_policy(_local_names):
+        return MixedPrecisionPolicy(param_dtype=torch.float16, reduce_dtype=torch.float32, cast_forward_inputs=False)
+
+    def map_policy(local_names):
+        return fsdp_param_dtype_patch.ParamDtypeMixedPrecisionPolicy(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            param_dtype_map={name: torch.float16 for name in local_names},
+            cast_forward_inputs=False,
+        )
+
+    _wrap(stock, mesh, stock_policy)
+    _wrap(mapped, mesh, map_policy, expect_dtype=torch.float16)
+
+    stock_history, stock_params = _run_scaled(stock, rank)
+    mapped_history, mapped_params = _run_scaled(mapped, rank)
+
+    for step, ((lhs_grads, lhs_scale), (rhs_grads, rhs_scale)) in enumerate(
+        zip(stock_history, mapped_history, strict=True)
+    ):
+        assert lhs_scale == rhs_scale, f"{topology} step {step}: scale {lhs_scale} != {rhs_scale}"
+        assert lhs_grads.keys() == rhs_grads.keys()
+        for name in lhs_grads:
+            assert _bitwise_equal(lhs_grads[name], rhs_grads[name]), f"{topology} step {step} grad {name}"
+    for name in stock_params:
+        assert _bitwise_equal(stock_params[name], mapped_params[name]), f"{topology} param {name}"
+
+
 def main():
     topology = sys.argv[1]
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -155,6 +225,7 @@ def main():
     for dtype in DTYPES:
         for reduce_dtype in (torch.float32, torch.bfloat16, None):
             _trial(topology, dtype, reduce_dtype, rank)
+    _scaler_trial(topology, rank)
     if rank == 0:
         print("OK", flush=True)
     dist.destroy_process_group()
