@@ -77,8 +77,7 @@ def compile_param_dtype_maps(
                 assigned_dtypes[param] = dtype
         if not matched:
             raise ValueError(f"FSDP parameter dtype pattern {pattern!r} did not match any parameter")
-    # An assignment equal to the group default compiles to nothing (this is also what a carve-out is).
-    assigned_dtypes = {param: dtype for param, dtype in assigned_dtypes.items() if dtype != default_dtype}
+    # EXPERIMENT: keep default-equal assignments so a {"*": forward_dtype} plan engages the patch.
 
     claimed: set[nn.Parameter] = set()
     wrap_maps: list[dict[str, torch.dtype]] = []

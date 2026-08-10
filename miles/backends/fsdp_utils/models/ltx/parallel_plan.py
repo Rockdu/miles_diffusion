@@ -13,6 +13,8 @@ from miles.backends.fsdp_utils.sequence_parallel.plan import SequenceParallelPla
 
 FSDP_PARALLEL_PLAN = FSDPParallelPlan(
     no_split_modules=("BasicAVTransformerBlock",),
+    # EXPERIMENT: pin every parameter to the run's forward dtype through the map machinery.
+    param_dtype_patterns={"*": "bf16"},
 )
 
 
