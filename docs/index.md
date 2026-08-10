@@ -56,12 +56,13 @@ Each model name links to its recipe page.
 | [Qwen-Image](/models/qwen-image/qwen-image) | T2I | Flow-GRPO + PickScore (flow_grpo-aligned) |
 | [Wan2.2-T2V-A14B](/models/wan/wan2-2) | T2V | Flow-GRPO + PickScore, LoRA SFT |
 | [LTX-2.3](/models/ltx/ltx2) | T2V | Flow-GRPO + PickScore |
-| [Cosmos3 (Edge / Nano / Super)](/models/cosmos/cosmos3) | T2I / T2V | Flow-GRPO + PickScore / VideoAlign (validated on Nano) |
+| [Cosmos3 (Edge / Nano / Super)](/models/cosmos/cosmos3) | T2I / T2V | Flow-GRPO + PickScore |
 
 ## Feature support matrix
 
 Objectives are model-agnostic plugins; ✓ marks combinations exercised by a
-canonical recipe (see `scripts/`).
+canonical recipe in `scripts/`, except the USP row, which reflects what the
+family's code path and tests enable (no shipped recipe turns it on yet).
 
 | | SD3.5 | Qwen-Image | Wan2.2 | LTX-2.3 | Cosmos3 |
 |---|---|---|---|---|---|
@@ -71,7 +72,7 @@ canonical recipe (see `scripts/`).
 | LoRA + IPC weight sync | ✓ | ✓ | ✓ | train-side merge | ✓ |
 | Single-prompt multi-gen (microgroup > 1) | ✓ | ✓ | ✓ | — | — (packed forward) |
 | USP sequence parallelism | via `_cp_plan` | via `_cp_plan` | ✓ | via `_cp_plan` | — |
-| Deterministic mode | ✓ | ✓ | — | — | — |
+| Deterministic mode | ✓ | ✓ | — | ✓ | — |
 
 ## Start here
 
