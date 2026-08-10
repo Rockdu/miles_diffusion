@@ -226,6 +226,66 @@ def _scaler_trial(topology, rank):
         assert _bitwise_equal(stock_params[name], mapped_params[name]), f"{topology} param {name}"
 
 
+_FP32_PIN_SUFFIXES = ("norm.weight", "norm.bias", "scale")
+_GRAD_RTOL, _GRAD_ATOL = 5e-2, 1e-5
+
+
+def _mixed_pin_trial(topology, rank):
+    """Production-shaped mixed pins vs an unsharded fp32 reference, within a gradient threshold.
+
+        map: {norm.weight, norm.bias, scale} -> fp32, everything else bf16 (the Wan norm-pin shape)
+
+        sharded mixed model                unsharded fp32 twin
+        loss.backward()                    loss.backward(); grads all-reduce averaged
+                 |                                  |
+                 +---- assert_close(rtol=5e-2) -----+
+
+    Bitwise is impossible here by construction (bf16 compute); the threshold guards against
+    scaling mistakes (a wrong divide factor shifts grads ~4x, far beyond 5e-2).
+    """
+    torch.manual_seed(7)
+    reference = CommonModuleModel().cuda()
+    model = copy.deepcopy(reference)
+    replicate, shard = TOPOLOGIES[topology]
+    mesh = init_device_mesh("cuda", (replicate, shard), mesh_dim_names=("dp_replicate", "dp_shard"))
+
+    def policy(local_names):
+        pins = {name: torch.float32 for name in local_names if name.endswith(_FP32_PIN_SUFFIXES)}
+        return fsdp_param_dtype_patch.ParamDtypeMixedPrecisionPolicy(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            param_dtype_map=pins,
+            cast_forward_inputs=False,
+        )
+
+    _wrap(model, mesh, policy)
+
+    torch.manual_seed(3000 * (rank + 1))
+    tokens = torch.randint(0, 32, (2, 5), device="cuda")
+    image = torch.randn(2, 4, 8, 8, device="cuda")
+    model(tokens, image).backward()
+    reference(tokens, image).backward()
+
+    world_size = dist.get_world_size()
+    for (name, param), (ref_name, ref_param) in zip(
+        model.named_parameters(), reference.named_parameters(), strict=True
+    ):
+        assert name == ref_name
+        if ref_param.grad is None:
+            assert param.grad is None
+            continue
+        ref_grad = ref_param.grad.detach().clone()
+        dist.all_reduce(ref_grad)
+        ref_grad /= world_size
+        torch.testing.assert_close(
+            param.grad.full_tensor(),
+            ref_grad,
+            rtol=_GRAD_RTOL,
+            atol=_GRAD_ATOL,
+            msg=lambda base, name=name: f"{topology} mixed-pin grad {name}: {base}",
+        )
+
+
 def main():
     topology = sys.argv[1]
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -240,6 +300,7 @@ def main():
         for reduce_dtype in (torch.float32, torch.bfloat16, None):
             _trial(topology, dtype, reduce_dtype, rank)
     _scaler_trial(topology, rank)
+    _mixed_pin_trial(topology, rank)
     if rank == 0:
         print("OK", flush=True)
     dist.destroy_process_group()
