@@ -1,143 +1,80 @@
 ---
-title: Cosmos3-Nano
-description: 16B MoT (8B UND + 8B GEN) omni model — token-level conditioning, packed single-sample forward, VideoAlign reward.
+title: Cosmos3
+description: The Cosmos3 MoT omni family (UND + GEN towers) — token-level conditioning, packed single-sample forward, Flow-GRPO + PickScore recipe.
 ---
+
 ## 1. Model introduction
 
-[Cosmos3-Nano](https://huggingface.co/nvidia/Cosmos3-Nano) is a 16 B
-Mixture-of-Transformers (MoT) omni model: an 8 B **UND** (understanding) tower
-and an 8 B **GEN** (generation) tower over a joint text+vision packed
-sequence. It reuses the Wan2.2 VAE (4× temporal compression).
+[Cosmos3](https://huggingface.co/collections/nvidia/cosmos3) is NVIDIA's Mixture-of-Transformers (MoT) omni family: an
+**UND** (understanding) tower and a **GEN** (generation) tower over a joint text+vision packed sequence, with the Wan2.2
+VAE (4× temporal compression). All sizes share this architecture and differ only in layer count and hidden dim, so
+everything below applies family-wide; the canonical recipes are validated on **Cosmos3-Nano**.
 
 **Key highlights for RL training:**
 
-- **No separate text encoder.** Conditioning is token-level: `CondKwargs`
-  carries `text_ids` / `text_mask` / `fps` verbatim, which eliminates the
-  text-replay-consistency failure class other families guard against.
-- **UND tower frozen inside the training graph.** The UND tower participates
-  in the packed forward, so it is frozen by parameter-name fragments rather
-  than dropped; LoRA targets are GEN attention only
-  (`add_q_proj`, `add_k_proj`, `add_v_proj`, `to_add_out`).
-- **Packed single-sample forward.** The transformer consumes one packed
-  text+vision sequence per forward — one request cannot batch multiple
-  outputs, so recipes run `--diffusion-microgroup-size 1` and CFG batching is
-  disabled by construction.
-- **Karras flow-sigma grid.** The checkpoint ships a non-uniform sigma grid;
-  SDE candidate steps must be derived from it (see §5.2).
+- **No separate text encoder.** Conditioning is token-level: `CondKwargs` carries `text_ids` / `text_mask` / `fps`
+  verbatim, which eliminates the text-replay-consistency failure class other families guard against.
+- **UND tower frozen inside the training graph.** The UND tower participates in the packed forward, so it is frozen by
+  parameter-name fragments rather than dropped; LoRA targets are GEN attention only (`add_q_proj`, `add_k_proj`,
+  `add_v_proj`, `to_add_out`).
+- **Packed single-sample forward.** The transformer consumes one packed text+vision sequence per forward — one request
+  cannot batch multiple outputs, so recipes run `--diffusion-microgroup-size 1` and CFG batching is disabled by
+  construction.
+- **Karras flow-sigma grid.** Checkpoints ship a non-uniform sigma grid; SDE candidate steps must be derived from it.
+
+
 
 ## 2. Supported variants
 
-All Cosmos3 sizes share the dual-tower MoT architecture (they differ only in
-layer count and hidden dim), so they all resolve to the same family config —
-detection matches any checkpoint name containing `cosmos3` / `cosmos-3`.
+All sizes resolve to the same family config — detection matches any checkpoint name containing `cosmos3` / `cosmos-3`.
 
-| Model | Composition | HF ID | Status |
-|---|---|---|---|
-| Cosmos3-Nano | 16 B (8 B UND + 8 B GEN) | [nvidia/Cosmos3-Nano](https://huggingface.co/nvidia/Cosmos3-Nano) | **Validated** — canonical recipes |
-| Cosmos3-Edge | 4 B (2 B + 2 B) | [nvidia/Cosmos3-Edge](https://huggingface.co/nvidia/Cosmos3-Edge) | Same config; untested |
-| Cosmos3-Super | 64 B (32 B + 32 B) | [nvidia/Cosmos3-Super](https://huggingface.co/nvidia/Cosmos3-Super) | Same config; untested, needs larger GPU layout |
 
-Specialized checkpoints (e.g. `Cosmos3-Super-Text2Image`,
-`Cosmos3-Super-Image2Video`) resolve to the same family as well.
+| Size  | Composition              | HF checkpoints                                                                                                                                                                                                                         | Status                              |
+| ----- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| Nano  | 16 B (8 B UND + 8 B GEN) | [Cosmos3-Nano](https://huggingface.co/nvidia/Cosmos3-Nano), [Cosmos3-Nano-Policy-DROID](https://huggingface.co/nvidia/Cosmos3-Nano-Policy-DROID)                                                                                       | **Validated** — canonical recipes   |
+| Edge  | 4 B (2 B + 2 B)          | [Cosmos3-Edge](https://huggingface.co/nvidia/Cosmos3-Edge), [Cosmos3-Edge-Policy-DROID](https://huggingface.co/nvidia/Cosmos3-Edge-Policy-DROID)                                                                                       | Untested                            |
+| Super | 64 B (32 B + 32 B)       | [Cosmos3-Super](https://huggingface.co/nvidia/Cosmos3-Super), [Cosmos3-Super-Text2Image](https://huggingface.co/nvidia/Cosmos3-Super-Text2Image), [Cosmos3-Super-Image2Video](https://huggingface.co/nvidia/Cosmos3-Super-Image2Video) | Untested; needs a larger GPU layout |
 
-<Note>
-Moving off Nano: re-derive `--diffusion-sde-candidate-steps` from the new
-checkpoint's sigma grid (see §5.2 — step numbers are not transferable), and
-confirm sglang-diffusion serves that checkpoint for rollout.
-</Note>
 
-Cosmos3 requires `--update-weight-target-module transformer` (validated at
-startup).
 
 ## 3. Family config
 
 From `miles/backends/fsdp_utils/configs/cosmos3.py`:
 
-| Property | Value | Why |
-|---|---|---|
-| Timestep dtype | fp32, no scaling | The Karras grid is non-integer and sgl-d conditions on exact fp32 values — bf16 rounds 993.25 → 992 |
-| Cond dtype | pass-through | mRoPE position ids sit at ~15000 where bf16 spacing is 128; a boundary cast scrambles rotary phases |
-| CFG batching | Off (asserted) | Packed forward is single-sample |
-| LoRA targets | GEN attention (`add_*_proj`, `to_add_out`) | UND tower and unused sound/action heads stay frozen |
-| Frozen params | Name-fragment allowlist (`_GEN_PARAM_FRAGMENTS`) | UND sits inside the graph and cannot be detached |
+
+| Property       | Value                                            | Why                                                                                                 |
+| -------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| Timestep dtype | fp32, no scaling                                 | The Karras grid is non-integer and sgl-d conditions on exact fp32 values — bf16 rounds 993.25 → 992 |
+| Cond dtype     | pass-through                                     | mRoPE position ids sit at ~15000 where bf16 spacing is 128; a boundary cast scrambles rotary phases |
+| CFG batching   | Off (asserted)                                   | Packed forward is single-sample                                                                     |
+| LoRA targets   | GEN attention (`add_*_proj`, `to_add_out`)       | UND tower and unused sound/action heads stay frozen                                                 |
+| Frozen params  | Name-fragment allowlist (`_GEN_PARAM_FRAGMENTS`) | UND sits inside the graph and cannot be detached                                                    |
+
+
+
 
 ## 4. Launch
 
-Recipes:
-
-| Recipe | Layout | Reward |
-|---|---|---|
-| `scripts/run-diffusion-grpo-cosmos3-pickscore-t2i-5gpu.sh` | 4 colocate + 1 reward GPU, T2I (832×480, 1 frame) | PickScore |
-| `run-diffusion-grpo-cosmos3-videoalign-4gpu.sh` | 3 colocate + 1 reward GPU, T2V (17 frames, 832×480) | VideoAlign |
+Canonical recipe: `scripts/run-diffusion-grpo-cosmos3-pickscore-t2i-5gpu.sh` — 4 colocate + 1 reward GPU, T2I (832×480,
+1 frame), PickScore reward.
 
 ```bash
 export SGLANG_DISABLE_COSMOS3_GUARDRAILS=1   # RL scores raw samples; skip serving-side guardrail models
 bash scripts/run-diffusion-grpo-cosmos3-pickscore-t2i-5gpu.sh
 ```
 
-## 5. Recipe configuration (T2I PickScore)
 
-### 5.1 Batch and algorithm
 
-| Setting | Value |
-|---|---|
-| Batch | 48 prompts × 16 samples, `num_steps_per_rollout=2` → 96 items/rank on 4 GPUs |
-| Microgroup | `--diffusion-microgroup-size 1` (packed forward, see §1) |
-| Guidance | `1.0` — CFG-free training; merged LoRA sampled at g=4 still beats base at g=4 |
-| SDE | Flow-SDE, `--diffusion-noise-level 0.7`, 16 steps (eval 35) |
-| KL | `--diffusion-kl-beta 1e-3`, global reward std, per-prompt mean |
-| LoRA | r=64, alpha=128, init gaussian |
-| Optimizer | lr 3e-4, `--adam-beta2 0.95`, weight decay 1e-4, `--clip-grad 2e-3` |
-| Clipping | `--diffusion-clip-range 1e-3` |
+## 5. Recipe Note
+`epoch_global_window` draws a 2-step window per rollout from `--diffusion-sde-candidate-steps 4-15`.
 
-### 5.2 SDE schedule on a Karras grid
-
-`epoch_global_window` draws a 2-step window per rollout from
-`--diffusion-sde-candidate-steps 4-15`.
-
-<Warning>
-The Cosmos3 checkpoint's Karras flow-sigma grid puts head steps 1–3 at
-`sigma > 0.96` with `|dt| < 0.02` — they train nothing. Step numbers are
-**not transferable across sigma-grid families**: re-derive candidates from
+The Cosmos3 checkpoint's Karras flow-sigma grid puts head steps 1–3 at `sigma > 0.96` with `|dt| < 0.02` — they
+basically train nothing. Step numbers are **not transferable across sigma-grid families**: re-derive candidates from
 `|dt|` when changing model or grid.
-</Warning>
 
-### 5.3 Ratio stability
 
-Two choices specific to this recipe:
+## 6. Pairs well with
 
-- **`--diffusion-recompute-old-log-prob`** — the trainer recomputes old
-  log-probs at rollout ingestion so the PPO ratio is
-  implementation-self-consistent (rollout FA kernels vs train SDPA would
-  otherwise leak into the ratio).
-- **`--adam-beta2 0.95` + `--clip-grad 2e-3`** — absorb Adam-preconditioner
-  spikes after quiet stretches (single-step policy jumps the PPO loss clip
-  cannot stop).
-
-## 6. VideoAlign reward (T2V)
-
-The T2V recipe scores with **VideoAlign**
-([KlingTeam/VideoReward](https://huggingface.co/KlingTeam/VideoReward)): the
-z-scored sum of Visual Quality (VQ), Motion Quality (MQ), and Text Alignment
-(TA). Because it needs transformers 4.45.x, the worker runs in a **pinned
-interpreter** via Ray `runtime_env.py_executable`.
-
-Per-dimension scores are logged on a rolling basis: **TA collapse is the
-canonical reward-hacking mode** and is invisible in the summed Overall score.
-
-## 7. Validation status
-
-- T2I pipeline smoke (3 rollouts): `ratio_abs_minus_1` stable at 1–2.5e-5
-  (10× below clip range); cross-engine weight-sync checksums equal.
-- T2V e2e on wandb (`miles-diffusion-grpo/diffusion_grpo_cosmos3_videoalign_*`):
-  768×17f rollout in ~15 min on 3 engines; long-run reward trend still being
-  monitored.
-- Batched multi-sample generation per request is deliberately deferred.
-
-## 8. Pairs well with
-
-- [SDE Step Backend](/advanced/sde-backend) — the SCORE-mode step Cosmos3
-  feeds with fp32 timesteps.
 - [LoRA Training and Weight Sync](/advanced/lora) — GEN-tower LoRA sync.
-- [Rewards](/user-guide/rewards) — custom reward workers; VideoAlign follows
-  the same actor-pool pattern as PickScore.
+- [Rewards](/user-guide/rewards) — PickScore worker pool configuration.
+
