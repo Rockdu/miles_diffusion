@@ -90,6 +90,7 @@ WAN_LORA_TARGET_MODULES=(
   --gradient-checkpointing \
   --use-lora \
   --lora-ipc-weight-sync \
+  --sglang-lora-merge-mode dynamic \
   --lora-rank 64 \
   --lora-alpha 128 \
   --lora-target-modules "${WAN_LORA_TARGET_MODULES[@]}" \
