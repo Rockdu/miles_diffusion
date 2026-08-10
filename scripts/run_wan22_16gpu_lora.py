@@ -13,14 +13,13 @@ On RadixArk rx the pod containers run no sshd (a raw-IP ssh hits the node host, 
 container), so run `rx devbox ssh-config <node>` once per pod — it installs an ssh alias
 (ProxyCommand tunnels through `rx devbox run`) — then pass those alias names as --nodes.
 
-Layout "16-GPU colocate": 16 GPU across 2 IB pods, all colocate FSDP train + sglang
-rollout; PickScore reward colocated (no separate reward pod). Parallelism: train
+Layout: 16 train GPU across 2 IB pods colocate FSDP train + sglang rollout; PickScore
+reward on its own 1-GPU pod (reward_node, non-colocate). Parallelism: train
 dp_replicate=2 x sequence_parallel=8 (ulysses=8), rollout TP=4; recompute_logprob on.
+Reproduces wandb run wan22_16gpu_bs24_ns1 (bs24, num-steps-per-rollout=1, peak <=40GB).
 
-NOTE: rollout TP>1 needs the two-line SGL-D fix in
-miles/backends/sglang_diffusion_utils/sglang_diffusion_engine.py (set server_args
-num_gpus=rollout_num_gpus_per_engine + pin all tp GPUs in _pin_to_assigned_gpu),
-tracked as a separate framework PR. With rollout_tp=1 the launcher needs no patch.
+Config is built as concern-grouped arg blocks (ckpt/rollout/eval/grpo/optimizer/lora/
+reward/wandb/sglang/train_backend/perf/misc), mirroring miles' recipe scripts.
 
 Usage (from the control host):
   python3 run_wan22_16gpu_lora.py prepare  --hf-token ...       # model+dataset, per pod
@@ -31,15 +30,22 @@ Usage (from the control host):
 import argparse
 import shlex
 import subprocess
-import sys
 from dataclasses import dataclass
 
-WAN = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
 REPO = "/root/miles_diffusion"
-DS = "/root/datasets/miles-diffusion-datasets/flowgrpo_pickscore"
-ENGINE = f"{REPO}/miles/backends/sglang_diffusion_utils/sglang_diffusion_engine.py"
-LORA_TARGETS = ("attn1.to_q attn1.to_k attn1.to_v attn1.to_out.0 "
-                "attn2.to_q attn2.to_k attn2.to_v attn2.to_out.0 ffn.net.0.proj ffn.net.2")
+MODEL = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+DATASET = "rockdu/miles-diffusion-datasets"
+DATASET_SUBSET = "flowgrpo_pickscore"
+DATA_ROOT = "/root/datasets/miles-diffusion-datasets"
+DS = f"{DATA_ROOT}/{DATASET_SUBSET}"
+WANDB_PROJECT = "miles-diffusion-grpo"
+
+# Wan2.2 DiT LoRA targets: self-attn (attn1), cross-attn (attn2), and FFN.
+LORA_TARGET_MODULES = (
+    "attn1.to_q attn1.to_k attn1.to_v attn1.to_out.0 "
+    "attn2.to_q attn2.to_k attn2.to_v attn2.to_out.0 "
+    "ffn.net.0.proj ffn.net.2"
+)
 
 
 @dataclass
@@ -90,9 +96,9 @@ def cmd_prepare(c: Cfg, hf_token: str):
     for n in c.nodes:
         print(f"[prepare] {n}")
         print(run_on(n, f"export HF_TOKEN={shlex.quote(hf_token)} HF_HUB_ENABLE_HF_TRANSFER=1; "
-                   f"hf download {WAN} >/dev/null 2>&1 || true; "
-                   f"test -f {DS}/train.jsonl || hf download --repo-type dataset rockdu/miles-diffusion-datasets "
-                   f"--include 'flowgrpo_pickscore/**' --local-dir {'/'.join(DS.split('/')[:-1])} >/dev/null 2>&1; "
+                   f"hf download {MODEL} >/dev/null 2>&1 || true; "
+                   f"test -f {DS}/train.jsonl || hf download --repo-type dataset {DATASET} "
+                   f"--include '{DATASET_SUBSET}/**' --local-dir {DATA_ROOT} >/dev/null 2>&1; "
                    f"echo prepared", timeout=3600).strip()[-120:])
 
 
@@ -119,55 +125,94 @@ def ray_up(c: Cfg):
 
 
 def train_args(c: Cfg, wandb_key: str) -> str:
+    # Flags grouped by concern (miles' vocabulary, per #141), not by name prefix.
     # ckpt on shared cluster-storage (/personal survives devbox release), NOT node-local /root
     save = f"/personal/wan22_{c.world}gpu_lora/ckpt"
-    a = [
-        "--train-backend fsdp",
-        "--rollout-function-path miles.rollout.sglang_diffusion_rollout.generate_rollout",
-        f"--hf-checkpoint {WAN} --diffusion-model {WAN}",
-        f"--prompt-data {DS}/train.jsonl --input-key input",
-        f"--rollout-batch-size {c.rollout_batch_size} --n-samples-per-prompt {c.n_samples_per_prompt}",
-        f"--num-rollout {c.num_rollout} --num-steps-per-rollout {c.num_steps_per_rollout}",
-        f"--rollout-microgroup-size {c.microgroup_size} --micro-batch-size {c.micro_batch_size}",
-        f"--actor-num-nodes {len(c.nodes)} --actor-num-gpus-per-node {c.gpus_per_node}",
-        f"--num-gpus-per-node {c.gpus_per_node} --rollout-num-gpus {c.world}",
-        f"--rollout-num-gpus-per-engine {c.rollout_tp} --colocate",
-        f"--dp-replicate-size {c.dp_replicate} --sequence-parallel-size {c.sp} --ulysses-degree {c.ulysses}",
-        # colocate memory: free VAE + text-encoder off the shared GPU during denoise
-        "--sglang-vae-cpu-offload --sglang-text-encoder-cpu-offload",
-        # explicit DiT layerwise offload (was implicitly on via performance_mode=auto for
-        # wan2.2-a14b); pin it so the rollout-phase <=40GB does not depend on the auto heuristic
-        "--sglang-dit-layerwise-offload --sglang-dit-offload-prefetch-size 2",
-        f"--use-lora --lora-rank {c.lora_rank} --lora-alpha {c.lora_alpha}",
-        f"--lora-target-modules {LORA_TARGETS} --lora-init-weights gaussian",
-        "--lr 1e-4 --adam-beta2 0.999 --diffusion-clip-range 1e-4 --weight-decay 1e-4",
-        "--diffusion-recompute-old-log-prob",
-        # gradient checkpointing: caps the train-phase activation spike to keep peak <=40GB
-        "--gradient-checkpointing",
-        # LoRA IPC weight sync: only lora_A/B go to the engine via CUDA IPC (no full 2x14B gather)
-        "--lora-ipc-weight-sync",
-        # raise router health-check threshold: a busy engine (heavy eval) else misses /health -> false DEAD
-        "--use-miles-router --miles-router-health-check-failure-threshold 30 --sglang-server-concurrency 8 --update-weight-buffer-size 536870912",
-        "--update-weight-target-module transformer,transformer_2",
-        "--advantage-estimator grpo --rm-type pickscore",
-        # reward on its own GPU (reward_node): non-colocate, 1 worker * full GPU -> lands on the 1-GPU pod
-        "--pickscore-num-workers 1 --pickscore-num-gpus-per-worker 1 --pickscore-batch-size 8",
-        "--pickscore-processor-path laion/CLIP-ViT-H-14-laion2B-s32B-b79K --pickscore-model-path yuvalkirstain/PickScore_v1",
-        "--fsdp-master-dtype fp32 --fsdp-reduce-dtype fp32 --diffusion-forward-dtype bf16",
-        "--diffusion-num-steps 10 --diffusion-eval-num-steps 28 --diffusion-output-num-frames 21",
-        "--diffusion-guidance-scale 4.0 --diffusion-guidance-scale-2 3.0 --diffusion-noise-level 0.9",
-        "--diffusion-height 480 --diffusion-width 480 --diffusion-flow-shift 3.0",
-        "--diffusion-step-strategy-path miles.rollout.step_strategy_hub.epoch_global_random_choice",
-        "--diffusion-num-sde-steps 1 --diffusion-sde-candidate-steps 1,2,3 --diffusion-debug-mode",
-        f"--save {save} --save-interval 10",
-        f"--eval-prompt-data pickscore_test {DS}/test.jsonl --eval-interval 100 --skip-eval-before-train",
-        f"--use-miles-dashboard --miles-dashboard-workspace {REPO}/miles_dashboard",
-    ]
+
+    # --hf-checkpoint feeds both the train loader and the sglang-d engine (#142 folded the
+    # former --diffusion-model into it).
+    ckpt_args = f"--hf-checkpoint {MODEL} --save {save} --save-interval 10 "
+
+    # rollout = engine + batch shape + every sampler knob (steps/guidance/noise/SDE schedule/
+    # resolution/frames/flow-shift); the old --diffusion-* block folds in here.
+    rollout_args = (
+        "--rollout-function-path miles.rollout.sglang_diffusion_rollout.generate_rollout "
+        f"--prompt-data {DS}/train.jsonl --input-key input "
+        f"--rollout-batch-size {c.rollout_batch_size} --n-samples-per-prompt {c.n_samples_per_prompt} "
+        f"--num-rollout {c.num_rollout} "
+        # 1 optim step/rollout = fully on-policy; =2 collapses reward (off-policy 2nd step under 1e-4 clip)
+        f"--num-steps-per-rollout {c.num_steps_per_rollout} "
+        f"--rollout-microgroup-size {c.microgroup_size} "
+        "--diffusion-num-steps 10 --diffusion-output-num-frames 21 "
+        "--diffusion-guidance-scale 4.0 --diffusion-guidance-scale-2 3.0 --diffusion-noise-level 0.9 "
+        "--diffusion-height 480 --diffusion-width 480 --diffusion-flow-shift 3.0 "
+        "--diffusion-step-strategy-path miles.rollout.step_strategy_hub.epoch_global_random_choice "
+        "--diffusion-num-sde-steps 1 --diffusion-sde-candidate-steps 1,2,3 "
+    )
+
+    eval_args = (
+        f"--eval-prompt-data pickscore_test {DS}/test.jsonl "
+        "--eval-interval 100 --diffusion-eval-num-steps 28 --skip-eval-before-train "
+    )
+
+    grpo_args = "--advantage-estimator grpo --diffusion-clip-range 1e-4 --diffusion-recompute-old-log-prob "
+
+    optimizer_args = "--lr 1e-4 --adam-beta2 0.999 --weight-decay 1e-4 "
+
+    lora_args = (
+        # lora-ipc-weight-sync: only lora_A/B sync to the engine via CUDA IPC (no full 2x14B gather)
+        "--use-lora --lora-ipc-weight-sync "
+        f"--lora-rank {c.lora_rank} --lora-alpha {c.lora_alpha} "
+        f"--lora-target-modules {LORA_TARGET_MODULES} --lora-init-weights gaussian "
+    )
+
+    # reward on its own GPU (reward_node): non-colocate, 1 worker x full GPU -> lands on the 1-GPU pod
+    reward_args = (
+        "--rm-type pickscore "
+        "--pickscore-num-workers 1 --pickscore-num-gpus-per-worker 1 --pickscore-batch-size 8 "
+        "--pickscore-processor-path laion/CLIP-ViT-H-14-laion2B-s32B-b79K "
+        "--pickscore-model-path yuvalkirstain/PickScore_v1 "
+    )
+
+    wandb_args = ""
     if wandb_key:
-        a.append("--use-wandb --wandb-project miles-diffusion-grpo --wandb-group wan22_16gpu_lora "
-                 "--disable-wandb-random-suffix --wandb-log-num-images 8 --wandb-log-image-interval 10 "
-                 f"--wandb-key {wandb_key}")
-    return " ".join(a)
+        wandb_args = (
+            f"--use-wandb --wandb-project {WANDB_PROJECT} --wandb-group wan22_16gpu_lora "
+            "--disable-wandb-random-suffix --wandb-log-num-images 8 --wandb-log-image-interval 10 "
+            f"--wandb-key {wandb_key} "
+        )
+    wandb_args += f"--use-miles-dashboard --miles-dashboard-workspace {REPO}/miles_dashboard "
+
+    # sglang engine: router (raise health-check threshold so a busy eval isn't false-marked DEAD) +
+    # colocate memory offload (VAE + text-encoder + layerwise DiT keep the rollout phase <=40GB).
+    sglang_args = (
+        "--use-miles-router --miles-router-health-check-failure-threshold 30 "
+        "--sglang-server-concurrency 8 --update-weight-buffer-size 536870912 "
+        "--sglang-vae-cpu-offload --sglang-text-encoder-cpu-offload "
+        "--sglang-dit-layerwise-offload --sglang-dit-offload-prefetch-size 2 "
+    )
+
+    train_backend_args = (
+        "--train-backend fsdp --fsdp-master-dtype fp32 --fsdp-reduce-dtype fp32 --diffusion-forward-dtype bf16 "
+        "--update-weight-target-module transformer,transformer_2 "
+    )
+
+    # perf/memory: gradient-checkpointing caps the train-phase activation spike for peak <=40GB
+    perf_args = f"--micro-batch-size {c.micro_batch_size} --gradient-checkpointing "
+
+    misc_args = (
+        f"--actor-num-nodes {len(c.nodes)} --actor-num-gpus-per-node {c.gpus_per_node} "
+        f"--num-gpus-per-node {c.gpus_per_node} "
+        f"--rollout-num-gpus {c.world} --rollout-num-gpus-per-engine {c.rollout_tp} "
+        f"--dp-replicate-size {c.dp_replicate} --sequence-parallel-size {c.sp} --ulysses-degree {c.ulysses} "
+        "--colocate --diffusion-debug-mode "
+    )
+
+    return (
+        f"{ckpt_args}{rollout_args}{eval_args}{grpo_args}{optimizer_args}"
+        f"{lora_args}{reward_args}{wandb_args}{sglang_args}{train_backend_args}{perf_args}"
+        f"{misc_args}"
+    )
 
 
 def cmd_train(c: Cfg, wandb_key: str, hf_token: str):
