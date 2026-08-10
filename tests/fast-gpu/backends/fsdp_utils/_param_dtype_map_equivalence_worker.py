@@ -2,22 +2,36 @@
 must be bitwise-indistinguishable from the stock group-level ``param_dtype`` — outputs and
 accumulated gradients alike, or the map machinery (copy-in bucketing, gather, reduce) leaks.
 
+Model (common module types) and its three fully_shard wraps:
+
+    CommonModuleModel
+    ├── embedding   Embedding(32, 16)      ── owned by the ROOT wrap
+    └── blocks
+        ├── 0       CommonBlock  [fully_shard]     ├── linear  Linear(16, 16)
+        └── 1       CommonBlock  [fully_shard]     ├── norm    LayerNorm(16)
+                    (1.linear.bias frozen)          ├── conv    Conv2d(4, 4, 3)
+                                                    └── scale   bare nn.Parameter(16)
+
+Two identically-initialized copies, two policies, everything downstream compared bitwise:
+
     stock:  MixedPrecisionPolicy(param_dtype=DTYPE)
-    map:    ParamDtypeMixedPrecisionPolicy(param_dtype=OTHER, param_dtype_map={every param: DTYPE})
-                                                        ^^^^^ decoy: results differ unless the map wins
+    map:    ParamDtypeMixedPrecisionPolicy(param_dtype=DECOY, param_dtype_map={every param: DTYPE})
+                |                                     ^^^^^ results differ unless the map wins
+                +---------------- bitwise equal? ----------------+
+                outputs per step | grads after 3 accumulating backwards (no zero_grad,
+                the trainer's one-reduce-per-microbatch pattern) | scaler schedule | params
 
 Matrix, all under one torchrun invocation per topology:
 
-    DTYPE x reduce_dtype        topology (dp_replicate x dp_shard)
-    bf16 / fp16 / fp32     x    1x4   2x2   4x1
-    reduce in fp32 / bf16 / None   (4x1 exercises the pure all-reduce path)
+    DTYPE ∈ {bf16, fp16, fp32}   x   reduce_dtype ∈ {fp32, bf16, None}   x   topology:
 
-The model is small but covers the common module types: Embedding (root wrap), Linear,
-LayerNorm, Conv2d, a bare nn.Parameter scale (the scale_shift_table shape), and one frozen
-bias. Three backwards accumulate without zero_grad, matching the trainer's
-one-reduce-per-microbatch pattern. A ShardedGradScaler trial replays the trainer's fp16
-loop with one deliberate overflow step: unscaled grads, the found_inf skip, the scale
-schedule, and the updated params must all stay bitwise-equal between stock and map.
+    dp_replicate x dp_shard:   1x4 (pure reduce-scatter)   2x2 (both)   4x1 (pure all-reduce)
+
+The bf16-reduce column pits stock's ``reduce_dtype == param_dtype -> None`` clamp against the
+map policy's disabled clamp — different code paths, same bits required. A ShardedGradScaler
+trial then replays the trainer's fp16 loop (scale -> backward -> unscale_ -> step -> update,
+4 SGD steps) with one deliberate overflow step: unscaled grads (NaN/inf compared through an
+int32 bit view), the found_inf skip, the scale schedule, and the stepped params must match.
 """
 
 import copy
