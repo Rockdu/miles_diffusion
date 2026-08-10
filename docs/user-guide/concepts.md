@@ -34,25 +34,6 @@ flowchart TB
 | **Actor (FSDP2 + diffusers)** | The DiT being trained, usually via LoRA | HF checkpoint (`--hf-checkpoint`), family resolved by `TrainPipelineConfig` |
 | **Reference** *(optional)* | Anchor for the no-grad DiT forward that KL and NFT compare against | `--ref-mode lora_base` (PEFT `disable_adapter()`) or `--ref-mode ema` (EMA shadow swap-in) — a weight *view* of the actor, never a second loaded copy |
 
-Unlike LLM Miles there is no `--ref-load`: the reference is realized by
-re-running the actor with adapters disabled or EMA weights swapped in
-(`miles/backends/fsdp_utils/actor.py`). When unset, `--ref-mode` is
-auto-inferred — `lora_base` when `--diffusion-kl-beta > 0`, `ema` for
-`--loss-type nft` — and resolves to `none` when neither needs it (e.g. the
-Wan2.2 recipe runs KL beta 0 and does no reference forward at all).
-
-Two differences from the LLM Miles loop are worth calling out:
-
-- **A sample is a trajectory, not a token sequence.** Each rollout sample
-  carries the full denoising trajectory: per-step latents, timesteps, sigmas,
-  SDE log-probs, and the conditioning tensors needed to replay any step
-  (`DiTTrajectory`, `DenoisingEnv` in `miles/utils/types.py`).
-- **The model forwards one action, not one sample.** An LLM scores a whole
-  trajectory in one forward; a DiT forward covers a single denoising step, so
-  the trainer expands samples into `(x_t → x_{t+1})` train pairs before
-  batching — see
-  `miles/ray/data_conversion_hub/flow_grpo.expand_samples_to_train_pairs`.
-
 ## The training loop
 
 The whole of `train_diffusion.py`:
@@ -109,22 +90,34 @@ And one knob controls which denoising steps are trained at all:
 
 ## Where every flag goes
 
-The Python launchers in `scripts/` assemble their command line from named
-groups. Use this map when reading any of them:
+Every argument serves one of the four loop steps. The Python launchers in
+`scripts/` assemble their command line from named groups; this map places each
+group on its step:
 
-| Argument group | Concerns |
-|---|---|
-| `ckpt_args` | `--hf-checkpoint`, `--save`, `--save-interval`, `--load` |
-| `rollout_args` | Prompt dataset, the four batch knobs, `--rollout-function-path` |
-| `diffusion_args` | Resolution, frames, steps, guidance, SDE noise level, flow shift, step strategy |
-| `eval_args` | Eval dataset, cadence, `--diffusion-eval-num-steps` |
-| `grpo_args` | `--advantage-estimator`, clip range, KL beta, `--loss-type` |
-| `optimizer_args` | LR, Adam betas, weight decay |
-| `lora_args` | Rank, alpha, targets, `--lora-ipc-weight-sync` |
-| `reward_args` | `--rm-type` and per-reward worker/GPU knobs |
-| `sglang_args` | Router, server concurrency, weight-sync buffer and target modules |
-| `train_backend_args` | `--train-backend fsdp`, master/reduce/forward dtypes |
-| `misc_args` | GPU layout: actor/rollout GPU counts, `--colocate` |
+| Loop step | Argument group | Concerns |
+|---|---|---|
+| **1 · Sample** | `rollout_args` | Prompt dataset, the four batch knobs, `--rollout-function-path` |
+| | `diffusion_args` | Resolution, frames, steps, guidance, SDE noise level, flow shift, step strategy |
+| | `sglang_args` | Router, server concurrency, `--sglang-*` engine passthrough |
+| | `eval_args` | Eval dataset, cadence, `--diffusion-eval-num-steps` |
+| **2 · Score** | `reward_args` | `--rm-type`, reward worker pools, advantage-normalization overrides |
+| **3 · Optimize** | `grpo_args` | `--loss-type`, `--advantage-estimator`, clip range, KL beta |
+| | `optimizer_args` | LR, Adam betas, weight decay |
+| | `train_backend_args` | `--train-backend fsdp`, master/reduce/forward dtypes |
+| | `lora_args` | Rank, alpha, targets — what the optimizer actually updates |
+| **4 · Sync** | weight-sync flags | `--lora-ipc-weight-sync`, `--update-weight-buffer-size`, `--update-weight-target-module` |
+
+Two honest footnotes to that map:
+
+- **A few flags configure the run, not a step.** `ckpt_args` (save/load
+  cadence), `misc_args` (GPU layout, `--colocate`, offload), and `wandb_args`
+  (logging) describe *where and how often* the steps execute rather than what
+  any step does.
+- **LoRA straddles steps 3 and 4 by design.** The adapter's shape
+  (rank/alpha/targets) is an optimizer concern, but choosing LoRA also decides
+  what crosses the wire at sync — which is why recipes keep
+  `--lora-ipc-weight-sync` in `lora_args` while the sync transport knobs
+  (`--update-weight-*`) sit in `sglang_args`.
 
 The [Training Script Walkthrough](/user-guide/training-script-walkthrough)
 goes through a canonical launcher group by group, flag by flag — read it next
