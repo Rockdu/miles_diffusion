@@ -3,11 +3,15 @@
 Wan2.2-T2V-A14B 16-GPU (2x8) GRPO LoRA — miles-LLM-style one-command multi-pod launcher.
 
 Same ergonomics as miles core's run_*.py (subcommands + a config dataclass + a single
-command that stands the whole multi-node run up). Stdlib-only (argparse), so it runs on
-the control host where `rx` is authed — RadixArk rx pods have no inter-pod ssh / MPI
-hostfile that the core .sh recipes assume, so the multi-node bootstrap is driven from the
-control host via `rx devbox run`: one command starts Ray across all pods and launches
-train_diffusion.py on the head.
+command that stands the whole multi-node run up). Stdlib-only (argparse). The multi-node
+bootstrap is driven from the control host over ssh, exactly like core's .sh recipes
+(`ssh <user>@<node>` + `ray start` per node): one command starts Ray across all pods and
+launches train_diffusion.py on the head. --nodes are ssh targets (raw IPs, or Host aliases
+from ~/.ssh/config); nodes[0] is the Ray head.
+
+On RadixArk rx the pod containers run no sshd (a raw-IP ssh hits the node host, not the
+container), so run `rx devbox ssh-config <node>` once per pod — it installs an ssh alias
+(ProxyCommand tunnels through `rx devbox run`) — then pass those alias names as --nodes.
 
 Layout "16-GPU colocate": 16 GPU across 2 IB pods, all colocate FSDP train + sglang
 rollout; PickScore reward colocated (no separate reward pod). Parallelism: train
@@ -65,20 +69,27 @@ class Cfg:
         return len(self.nodes) * self.gpus_per_node
 
 
-def rx(node, cmd, timeout=600):
-    p = subprocess.run(f"rx devbox run {node} -- bash -lc {shlex.quote(cmd)}",
-                       shell=True, capture_output=True, text=True, timeout=timeout)
+SSH_USER = "root"   # set from --ssh-user in main(); empty -> use node as-is (rely on ssh config)
+
+
+def run_on(node, cmd, timeout=600):
+    tgt = f"{SSH_USER}@{node}" if SSH_USER else node
+    # ssh flattens argv after the host into one remote string, so hand it a SINGLE token
+    # (else `bash -lc <cmd>` loses cmd's quoting remotely and only the first word runs).
+    remote = "bash -lc " + shlex.quote(cmd)
+    full = f"ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new {tgt} {shlex.quote(remote)}"
+    p = subprocess.run(full, shell=True, capture_output=True, text=True, timeout=timeout)
     return (p.stdout or "") + (p.stderr or "")
 
 
 def node_ip(node):
-    return rx(node, "hostname -i | awk '{print $1}'").strip().split("\n")[-1].strip()
+    return run_on(node, "hostname -i | awk '{print $1}'").strip().split("\n")[-1].strip()
 
 
 def cmd_prepare(c: Cfg, hf_token: str):
     for n in c.nodes:
         print(f"[prepare] {n}")
-        print(rx(n, f"export HF_TOKEN={shlex.quote(hf_token)} HF_HUB_ENABLE_HF_TRANSFER=1; "
+        print(run_on(n, f"export HF_TOKEN={shlex.quote(hf_token)} HF_HUB_ENABLE_HF_TRANSFER=1; "
                    f"hf download {WAN} >/dev/null 2>&1 || true; "
                    f"test -f {DS}/train.jsonl || hf download --repo-type dataset rockdu/miles-diffusion-datasets "
                    f"--include 'flowgrpo_pickscore/**' --local-dir {'/'.join(DS.split('/')[:-1])} >/dev/null 2>&1; "
@@ -93,17 +104,17 @@ def ray_up(c: Cfg):
     # every ray-actor (trainer + sglang engine) must inherit expandable_segments; a shell export
     # on the driver alone does NOT reach them, so set it in each node's ray-start env.
     alloc = "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
-    rx(c.nodes[0], f"{clean}; export CUDA_VISIBLE_DEVICES={cvd} {alloc}; ray start --head --node-ip-address {head_ip} "
+    run_on(c.nodes[0], f"{clean}; export CUDA_VISIBLE_DEVICES={cvd} {alloc}; ray start --head --node-ip-address {head_ip} "
                    f"--port {c.ray_port} --num-gpus {c.gpus_per_node} --disable-usage-stats >/dev/null 2>&1; echo head-up", timeout=120)
     for w in c.nodes[1:]:
-        rx(w, f"{clean}; export CUDA_VISIBLE_DEVICES={cvd} {alloc}; ray start --address {head_ip}:{c.ray_port} "
+        run_on(w, f"{clean}; export CUDA_VISIBLE_DEVICES={cvd} {alloc}; ray start --address {head_ip}:{c.ray_port} "
               f"--num-gpus {c.gpus_per_node} --disable-usage-stats >/dev/null 2>&1; echo worker-up", timeout=120)
     if c.reward_node:
         # dedicated 1-GPU reward worker; PACK keeps the 16 train bundles on the full nodes,
         # so the non-colocate pickscore actor is the only thing that can land here.
-        rx(c.reward_node, f"{clean}; export CUDA_VISIBLE_DEVICES=0 {alloc} HF_HOME=/cluster-storage/models/hf; "
+        run_on(c.reward_node, f"{clean}; export CUDA_VISIBLE_DEVICES=0 {alloc} HF_HOME=/cluster-storage/models/hf; "
               f"ray start --address {head_ip}:{c.ray_port} --num-gpus 1 --disable-usage-stats >/dev/null 2>&1; echo reward-up", timeout=120)
-    print(rx(c.nodes[0], "ray status 2>&1 | grep -E 'GPU|node_' | head"))
+    print(run_on(c.nodes[0], "ray status 2>&1 | grep -E 'GPU|node_' | head"))
     return head_ip
 
 
@@ -169,18 +180,17 @@ def cmd_train(c: Cfg, wandb_key: str, hf_token: str):
     launch = (f"cd {REPO} && {env} setsid bash -c 'python -u train_diffusion.py {train_args(c, wandb_key)} "
               f"> /root/train_{c.world}gpu.log 2>&1' < /dev/null & disown; sleep 4; "
               f"echo launched pid $(pgrep -f train_diffusio[n] | head -1)")
-    print(rx(c.nodes[0], launch, timeout=120))
+    print(run_on(c.nodes[0], launch, timeout=120))
 
 
 def cmd_status(c: Cfg):
-    print(rx(c.nodes[0], f"grep -vE 'GET /health|POST /add_worker|server_args:' /root/train_{c.world}gpu.log 2>/dev/null | tail -20"))
     for n in c.nodes:
-        print(f"[{n}] " + rx(n, "nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits | paste -sd' ' -").strip())
+        print(f"[{n}] " + run_on(n, "nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits | paste -sd' ' -").strip())
 
 
 def cmd_down(c: Cfg):
     for n in c.nodes:
-        rx(n, 'pkill -9 -f "train_diffusio[n]" 2>/dev/null; pkill -9 -f "sgl_diffusio[n]" 2>/dev/null; ray stop --force >/dev/null 2>&1; echo down')
+        run_on(n, 'pkill -9 -f "train_diffusio[n]" 2>/dev/null; pkill -9 -f "sgl_diffusio[n]" 2>/dev/null; ray stop --force >/dev/null 2>&1; echo down')
     print("cluster torn down")
 
 
@@ -190,6 +200,7 @@ def main():
     for name in ("prepare", "train", "status", "down"):
         sp = sub.add_parser(name)
         sp.add_argument("--nodes", default="kangrui-h200-new,kangrui-h200-ltx")
+        sp.add_argument("--ssh-user", default="root", help="ssh login user; empty -> use --nodes verbatim (ssh config)")
         if name in ("prepare", "train"):
             sp.add_argument("--hf-token", default="")
         if name == "train":
@@ -202,6 +213,8 @@ def main():
             sp.add_argument("--microgroup-size", type=int, default=4)
             sp.add_argument("--rollout-batch-size", type=int, default=48)
     args = p.parse_args()
+    global SSH_USER
+    SSH_USER = args.ssh_user
     nodes = tuple(n.strip() for n in args.nodes.split(",") if n.strip())
     if args.cmd == "prepare":
         cmd_prepare(Cfg(nodes=nodes), args.hf_token)
