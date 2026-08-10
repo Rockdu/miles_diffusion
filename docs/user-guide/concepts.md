@@ -14,12 +14,14 @@ flowchart LR
       P[Prompt dataset] --> R[sglang-diffusion engines]
     end
     subgraph Scoring
-      R -- trajectories --> RM[Reward workers]
+      RM[Reward workers]
     end
     subgraph Training
-      RM -- "scored trajectories → timestep pairs" --> A[FSDP actor]
+      A[FSDP actor]
     end
-    A -- weights --> R
+    R -- trajectories --> RM
+    RM -- timestep pairs --> A
+    A --> W([weights]) --> R
 ```
 
 Watch the unit of data change as it crosses the loop. Rollout and scoring
