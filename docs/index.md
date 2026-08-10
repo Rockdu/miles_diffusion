@@ -82,9 +82,11 @@ family's code path and tests enable (no shipped recipe turns it on yet).
    on SD3.5 with 2 GPUs.
 3. **[Core Concepts](/user-guide/concepts)** — the five objects in every
    miles-diffusion job and the loop that connects them.
-4. **[Rewards](/user-guide/rewards)** — built-in reward models and custom
+4. **[Training Script Walkthrough](/user-guide/training-script-walkthrough)** —
+   every argument group in a launch script, annotated.
+5. **[Rewards](/user-guide/rewards)** — built-in reward models and custom
    reward hooks.
-5. **Model guides** — per-model config and recipes, starting from the
+6. **Model guides** — per-model config and recipes, starting from the
    [supported models](#supported-models) table above.
 
 ## Contribute

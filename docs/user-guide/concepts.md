@@ -48,9 +48,7 @@ Two differences from the LLM Miles loop are worth calling out:
   trajectory in one forward; a DiT forward covers a single denoising step, so
   the trainer expands samples into `(x_t → x_{t+1})` train pairs before
   batching — see
-  `miles/ray/data_conversion_hub/flow_grpo.expand_samples_to_train_pairs` and
-  the pair-dispatch refactor in
-  [#10](https://github.com/radixark/miles_diffusion/pull/10).
+  `miles/ray/data_conversion_hub/flow_grpo.expand_samples_to_train_pairs`.
 
 ## The training loop
 
@@ -124,6 +122,10 @@ groups. Use this map when reading any of them:
 | `sglang_args` | Router, server concurrency, weight-sync buffer and target modules |
 | `train_backend_args` | `--train-backend fsdp`, master/reduce/forward dtypes |
 | `misc_args` | GPU layout: actor/rollout GPU counts, `--colocate` |
+
+The [Training Script Walkthrough](/user-guide/training-script-walkthrough)
+goes through a canonical launcher group by group, flag by flag — read it next
+if you are about to write or modify a recipe.
 
 ## Next
 

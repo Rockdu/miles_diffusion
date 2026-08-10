@@ -7,14 +7,7 @@ within a group. The naive way is N separate requests, which encodes the same
 prompt N times and denoises N batches of size 1. Miles-diffusion instead sends
 **one request per microgroup**: sglang-diffusion encodes the conditioning
 once, expands it engine-side, and denoises all N outputs as a batch.
-
-Key sglang-diffusion PRs:
-
-| PR | Scope | Status |
-|---|---|---|
-| [sglang#31233](https://github.com/sgl-project/sglang/pull/31233) | Opt-in Qwen and Wan multi-output conditioning expansion | merged |
-| [sglang#27223](https://github.com/sgl-project/sglang/pull/27223) | Wan multi-output prompt conditioning | open |
-| [sglang#21988](https://github.com/sgl-project/sglang/pull/21988) | Qwen-Image cond-batch alignment for multi-output | open |
+Engine-side expansion is opt-in per model family in sglang-diffusion.
 
 ## 1. Microgroups
 
@@ -42,7 +35,7 @@ Canonical values on `main`:
 | Qwen-Image GRPO + PickScore | 16 | 8 |
 | Wan2.2 GRPO + PickScore | 16 | 8 |
 | LTX-2.3 GRPO + PickScore | 8 | 1 |
-| Cosmos3 (PR [#25](https://github.com/radixark/miles_diffusion/pull/25)) | 16 | 1 — packed forward is single-sample |
+| Cosmos3 GRPO | 16 | 1 — packed forward is single-sample |
 
 ## 2. Seed layout
 

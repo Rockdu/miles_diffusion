@@ -10,13 +10,9 @@ text-to-video model with a **dual-expert MoE DiT**: a high-noise expert
 (`transformer_2`) handles the rest. Conditioning comes from a UMT5 text
 encoder; latents go through the Wan VAE (4× temporal compression).
 
-Training support landed in
-[#8](https://github.com/radixark/miles_diffusion/pull/8); the rollout side is
-enabled by sglang-diffusion's per-request scheduler switch
-([sglang#30036](https://github.com/sgl-project/sglang/pull/30036)) and Wan
-multi-output conditioning
-([sglang#27223](https://github.com/sgl-project/sglang/pull/27223),
-[sglang#31233](https://github.com/sgl-project/sglang/pull/31233)).
+On the rollout side, sglang-diffusion runs the Wan pipeline through a
+per-request scheduler switch and expands multi-output conditioning
+engine-side.
 
 **Key highlights for RL training:**
 
@@ -31,7 +27,7 @@ multi-output conditioning
   recipes override it to `3.0` via `--diffusion-flow-shift`, which repositions
   the expert boundary on the timestep grid.
 - **USP-ready.** Wan was the first family enabled for Ulysses × Ring sequence
-  parallelism ([#21](https://github.com/radixark/miles_diffusion/pull/21)).
+  parallelism.
 
 ## 2. Supported variants
 
@@ -157,8 +153,7 @@ buffers. If you OOM, lower `--rollout-batch-size`,
 
 ## 6. USP sequence parallelism
 
-Wan is the reference family for USP (Ulysses × Ring), added in
-[#21](https://github.com/radixark/miles_diffusion/pull/21). The plan is built
+Wan is the reference family for USP (Ulysses × Ring). The plan is built
 from the model's diffusers `_cp_plan` boundaries at wrap time
 (`miles/backends/fsdp_utils/model_backend.py`):
 

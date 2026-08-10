@@ -2,15 +2,6 @@
 title: Cosmos3-Nano
 description: 16B MoT (8B UND + 8B GEN) omni model — token-level conditioning, packed single-sample forward, VideoAlign reward.
 ---
-<Warning>
-Cosmos3 support is **pending merge**:
-[#25](https://github.com/radixark/miles_diffusion/pull/25) (train pipeline
-config, VideoAlign reward, T2V recipe) plus a companion sglang-diffusion
-branch (`feat/cosmos3-rl-rollout`: rollout SDE-Euler on the serving sigma
-grid, trajectory sigmas, fused-param weight-sync fix). Everything below
-describes that PR, not `main`.
-</Warning>
-
 ## 1. Model introduction
 
 [Cosmos3-Nano](https://huggingface.co/nvidia/Cosmos3-Nano) is a 16 B
@@ -60,7 +51,7 @@ startup).
 
 ## 3. Family config
 
-From `miles/backends/fsdp_utils/configs/cosmos3.py` (on the PR branch):
+From `miles/backends/fsdp_utils/configs/cosmos3.py`:
 
 | Property | Value | Why |
 |---|---|---|
@@ -72,7 +63,7 @@ From `miles/backends/fsdp_utils/configs/cosmos3.py` (on the PR branch):
 
 ## 4. Launch
 
-Recipes on the PR branch:
+Recipes:
 
 | Recipe | Layout | Reward |
 |---|---|---|
@@ -134,7 +125,7 @@ interpreter** via Ray `runtime_env.py_executable`.
 Per-dimension scores are logged on a rolling basis: **TA collapse is the
 canonical reward-hacking mode** and is invisible in the summed Overall score.
 
-## 7. Validation status (from the PR)
+## 7. Validation status
 
 - T2I pipeline smoke (3 rollouts): `ratio_abs_minus_1` stable at 1–2.5e-5
   (10× below clip range); cross-engine weight-sync checksums equal.

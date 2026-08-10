@@ -8,10 +8,6 @@ independent asyncio task, so reward computation and tensor decoding overlap
 with generation that is still in flight. This page covers the three stages of
 that pipeline and the knobs that keep each one off the critical path.
 
-Key PRs: [#44](https://github.com/radixark/miles_diffusion/pull/44)
-(msgpack transport + parser-actor pool, with companion
-[sglang#31565](https://github.com/sgl-project/sglang/pull/31565)).
-
 ## 1. The per-microgroup pipeline
 
 `miles/rollout/sglang_diffusion_rollout.py` runs, per microgroup:
@@ -34,8 +30,7 @@ for the full batch.
 ## 2. Deserialization: msgpack + parser-actor pool
 
 Trajectory tensors are large — for video models the response for one
-microgroup can be gigabytes. Before
-[#44](https://github.com/radixark/miles_diffusion/pull/44), tensors were
+microgroup can be gigabytes. In an earlier implementation, tensors were
 base64-encoded inside a JSON body and parsed on the main asyncio event loop,
 one sample at a time; for LTX-2.3 this serialize/deserialize path dominated
 `perf/rollout_time`.
@@ -43,10 +38,8 @@ one sample at a time; for LTX-2.3 this serialize/deserialize path dominated
 The current path:
 
 - **msgpack raw-bytes transport.** The engine responds with
-  `application/msgpack`
-  ([sglang#31565](https://github.com/sgl-project/sglang/pull/31565));
-  `post(..., raw=True)` returns the body untouched, and tensors decode
-  directly from safetensors raw bytes — no base64.
+  `application/msgpack`; `post(..., raw=True)` returns the body untouched, and
+  tensors decode directly from safetensors raw bytes — no base64.
 - **Unpacking runs inside Ray actors, not the event loop.**
   `RolloutImageResponseParserActor.apply_raw(samples, raw)` does
   `msgpack.unpackb` + tensor decode in a separate process
@@ -58,8 +51,8 @@ The current path:
   up N parser actors so multiple microgroups deserialize in parallel. The
   LTX-2.3 recipe sets 8; the default is 1.
 
-Measured on the LTX-2.3 recipe (H200, same config, two-step average, from
-[#44](https://github.com/radixark/miles_diffusion/pull/44)):
+Measured on the LTX-2.3 recipe (H200, same config, averaged over two
+consecutive RL steps, base64/JSON vs the current path):
 
 | Metric | base64/JSON | msgpack + pool | Speedup |
 |---|---|---|---|
@@ -107,8 +100,7 @@ granularity.
 | Rollout stalls at the end of each iteration | `reward` stage time | More reward workers, or a dedicated reward GPU |
 | Event loop warnings / slow heartbeat | main-process CPU | Confirm parsing is going through the actor pool (it always does on `main`) |
 
-Related but distinct: `--fsdp-load-mode stream`
-([#39](https://github.com/radixark/miles_diffusion/pull/39)) streams weights
+Related but distinct: `--fsdp-load-mode stream` streams weights
 rank-0 → meta-init shards at **startup**; it shares the "stream instead of
 materialize everything" philosophy but is not part of the rollout path.
 
