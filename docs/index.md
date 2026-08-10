@@ -77,20 +77,29 @@ Each model name links to its recipe page.
 
 ## Feature support matrix
 
-Objectives are model-agnostic plugins; ✓ marks combinations exercised by a
-canonical recipe in `scripts/`, except the USP row, which reflects what the
-family's code path and tests enable (no shipped recipe turns it on yet).
+- ✅ **Verified** — exercised by a canonical recipe in `scripts/` or a CI
+  test.
+- 🟡 **Supported** — the code path exists (objectives are model-agnostic
+  plugins), but no shipped recipe or test covers this combination yet.
+- ❌ **Not supported** — no working code path for this combination today.
 
 
-|                                          | SD3.5          | Qwen-Image     | Wan2.2 | LTX-2.3          | Cosmos3            |
-| ---------------------------------------- | -------------- | -------------- | ------ | ---------------- | ------------------ |
-| Flow-GRPO (`policy_loss`)                | ✓              | ✓              | ✓      | ✓                | ✓                  |
-| DiffusionNFT (`nft`)                     | ✓              | —              | —      | —                | —                  |
-| SFT (`sft_loss`, `--train-only`)         | —              | —              | ✓      | —                | —                  |
-| LoRA + IPC weight sync                   | ✓              | ✓              | ✓      | train-side merge | ✓                  |
-| Single-prompt multi-gen (microgroup > 1) | ✓              | ✓              | ✓      | —                | — (packed forward) |
-| USP sequence parallelism                 | via `_cp_plan` | via `_cp_plan` | ✓      | via `_cp_plan`   | —                  |
-| Deterministic mode                       | ✓              | ✓              | —      | ✓                | —                  |
+|                                          | SD3.5 | Qwen-Image | Wan2.2 | LTX-2.3 | Cosmos3 |
+| ---------------------------------------- | ----- | ---------- | ------ | ------- | ------- |
+| Flow-GRPO (`policy_loss`)                | ✅     | ✅          | ✅      | ✅       | ✅       |
+| DiffusionNFT (`nft`)                     | ✅     | 🟡         | 🟡     | 🟡      | 🟡      |
+| SFT (`sft_loss`, `--train-only`)         | 🟡    | 🟡         | ✅      | 🟡      | 🟡      |
+| LoRA + IPC weight sync                   | ✅     | ✅          | ✅      | 🟡 ¹    | ✅       |
+| Single-prompt multi-gen (microgroup > 1) | ✅     | ✅          | ✅      | ❌       | ❌ ²     |
+| USP sequence parallelism                 | ❌     | ❌          | 🟡 ³   | ❌       | ❌       |
+| Deterministic mode                       | ✅     | ✅          | ❌      | ✅       | ❌       |
+
+¹ LTX-2.3 LoRA trains and runs in the canonical recipe, but adapter weights
+merge on the training side instead of syncing over CUDA IPC.
+² Cosmos3's packed forward processes each request as one sequence, so
+engine-side conditioning expansion does not apply.
+³ Wan2.2's USP path is wired through `_cp_plan` and covered by kernel-level
+attention-parity tests, but no shipped recipe enables it yet.
 
 
 
