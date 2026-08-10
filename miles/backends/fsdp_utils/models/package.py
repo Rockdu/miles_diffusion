@@ -6,7 +6,7 @@ Each native model family is a Python package under ``models/<family>/`` with:
     materialize_weights=...)``; distributed rank selection stays outside the package
   - ``modeling`` — ``load_scheduler``, ``enable_gradient_checkpointing``,
     optional ``flash_attention_entrypoints`` / ``required_flash_kernel_label``
-  - ``parallel_plan`` — ``FSDP_NO_SPLIT_MODULES``, ``sequence_parallel_plan``
+  - ``parallel_plan`` — ``FSDP_PARALLEL_PLAN``, ``sequence_parallel_plan``
     (and optional ``install_sequence_parallel_attention``)
   - ``attention`` — ``set_attention_backend``
 

@@ -109,61 +109,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="The backend for training.",
             )
             parser.add_argument(
-                "--diffusion-clip-range",
-                type=float,
-                default=1e-4,
-                help="Clip range for diffusion GRPO ratio.",
-            )
-            parser.add_argument(
-                "--diffusion-adv-clip-max",
-                type=float,
-                default=5.0,
-                help="Max absolute value for advantage clipping in diffusion training.",
-            )
-            parser.add_argument(
-                "--diffusion-recompute-old-log-prob",
-                action="store_true",
-                help=(
-                    "Recompute old log-probs with the trainer forward (pre-update weights) "
-                    "instead of using rollout-stored values, making the PPO ratio "
-                    "implementation-consistent. The first optimizer window skips the extra "
-                    "pass and reuses its training forward's log-prob (ratio == 1)."
-                ),
-            )
-            parser.add_argument(
-                "--diffusion-kl-beta",
-                type=float,
-                default=0.0,
-                help=(
-                    "Reference KL coefficient for diffusion GRPO. When > 0, enables a "
-                    "reference DiT forward (see --ref-mode; default lora_base)."
-                ),
-            )
-            parser.add_argument(
-                "--ref-mode",
-                type=str,
-                choices=["none", "lora_base", "ema"],
-                default=None,
-                help=(
-                    "Which reference weights to use for the no-grad DiT forward. "
-                    "Auto: lora_base when --diffusion-kl-beta > 0 and ema for --loss-type nft. "
-                    "Explicit values skip auto inference."
-                ),
-            )
-            parser.add_argument(
-                "--fsdp-cfg-batching",
-                action=argparse.BooleanOptionalAction,
-                default=False,
-                help=(
-                    "Batch positive and negative CFG branches into a single DiT "
-                    "forward (concat along batch dim, one forward, then chunk). "
-                    "Default False = two separate forwards. Set True to bit-exact "
-                    "match sgl-d models that join CFG into one batched forward "
-                    "(e.g. Flux variants); leave False for split-CFG models like "
-                    "Qwen-Image."
-                ),
-            )
-            parser.add_argument(
                 "--fsdp-master-dtype",
                 type=str,
                 default="fp32",
@@ -218,20 +163,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default="{}",
                 help="Extra environment variables for training process, e.g. PyTorch memory management ones.",
             )
-            parser.add_argument(
-                "--train-memory-margin-bytes",
-                type=int,
-                default=1024**3,
-                help="Add margin for train memory allocation. By default we will reserve 1GB as margin.",
-            )
-            parser.add_argument(
-                "--recompute-loss-function",
-                action="store_true",
-                help="Whether to disable recompute loss function to save memory during training.",
-            )
-            parser.add_argument(
-                "--log-probs-chunk-size", type=int, default=-1, help="Chunk size to compute log probs to save memory"
-            )
 
             return parser
 
@@ -247,16 +178,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "Note that, we will always update the parameters in sglang with that of megatron before training, "
                     "so you only need to provide a huggingface checkpoint that has the same architecture as the model you want to train. "
                     "It doesn't necessary need to contain the most up-to-date parameters."
-                ),
-            )
-            parser.add_argument(
-                "--model-name",
-                type=str,
-                default=None,
-                help=(
-                    "The name of the model, this is used to convert the megatron weights into huggingface format. "
-                    "If not set, we will use `type(AutoConfig.from_pretrained(args.hf_checkpoint)).__name__.lower()` as model_name. "
-                    "Also, sometimes this will help alleviate the bug that transformers cannot find certain model."
                 ),
             )
             parser.add_argument(
@@ -292,12 +213,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Model loading function path; default from the family config.",
             )
             parser.add_argument(
-                "--diffusion-device",
-                type=str,
-                default=None,
-                help="Device for diffusion rollout, e.g. cuda or cpu. Defaults to auto.",
-            )
-            parser.add_argument(
                 "--diffusion-num-steps",
                 type=int,
                 default=10,
@@ -319,12 +234,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=int,
                 default=1,
                 help="Diffusion rollout microgroup size (sub-batch of samples per prompt). Defaults to 1.",
-            )
-            parser.add_argument(
-                "--diffusion-eval-num-steps",
-                type=int,
-                default=None,
-                help="Number of diffusion inference steps for eval rollout. Defaults to diffusion-num-steps.",
             )
             parser.add_argument(
                 "--diffusion-fps",
@@ -436,51 +345,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Set rollout_log_prob_no_const=true on POST /rollout/generate.",
             )
             parser.add_argument(
-                "--apply-sgld-monkey-patches",
-                action="store_true",
-                default=False,
-                help=(
-                    "Apply miles.backends.sglang_diffusion_utils.monkey_patches at "
-                    "sglang-d startup so its DiT forward is bit-exact with diffusers' "
-                    "implementation. Makes rollout (sglang-d path) and training-side "
-                    "log-prob agree on noise_pred down to bf16 ULPs. Small perf hit on "
-                    "the rollout engine."
-                ),
-            )
-            parser.add_argument(
-                "--diffusion-debug-mode",
-                action="store_true",
-                default=False,
-                help="Set rollout_debug_mode=true on POST /rollout/generate.",
-            )
-            parser.add_argument(
-                "--diffusion-return-prev-latents-mean",
-                action="store_true",
-                help="Whether to store prev_latents_mean for KL regularization.",
-            )
-            parser.add_argument(
-                "--diffusion-reward",
-                type=str,
-                default="pickscore",
-                help="Reward function name for diffusion rollout.",
-            )
-            parser.add_argument(
-                "--diffusion-reward-device",
+                "--rollout-patch-group",
                 type=str,
                 default=None,
-                help="Device for diffusion reward model, defaults to diffusion-device.",
-            )
-            parser.add_argument(
-                "--diffusion-log-images",
-                type=int,
-                default=0,
-                help="Number of diffusion images to log to W&B per rollout (0 disables).",
-            )
-            parser.add_argument(
-                "--diffusion-log-image-interval",
-                type=int,
-                default=1,
-                help="Log diffusion images every N rollouts. Only used when diffusion-log-images > 0.",
+                help=(
+                    "Comma-separated rollout patch groups applied at sglang-d startup so its "
+                    "forward is numerically aligned with the training side, e.g. 'sgld' "
+                    "(diffusers op parity, small rollout perf hit) or 'ltx' "
+                    "(see sglang_diffusion_utils/monkey_patches)."
+                ),
             )
             parser.add_argument(
                 "--update-weight-target-module",
@@ -610,12 +483,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "buffer size for update weight, in bytes. "
                     "This is used for updating weights by chunk and should be useful for MoE models."
                 ),
-            )
-            parser.add_argument(
-                "--update-weights-interval",
-                type=int,
-                default=1,
-                help="Interval for updating the weights",
             )
             return parser
 
@@ -785,6 +652,19 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--train-dp-split-mode",
+                type=str,
+                default="contiguous",
+                choices=["contiguous", "stride"],
+                help=(
+                    "How rollout train pairs are dealt to DP ranks. contiguous gives each rank an "
+                    "adjacent block, so a micro-batch can reproduce a rollout microgroup exactly. "
+                    "stride deals them round-robin, reproducing the miles-core dispatch that strides "
+                    "for sequence-length balance -- diffusion samples are equal-sized, so stride is "
+                    "only useful for the legacy parity check."
+                ),
+            )
+            parser.add_argument(
                 "--diffusion-train-iter-order",
                 type=str,
                 default="sample_major",
@@ -847,6 +727,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="number of responses for each prompt in generation",
             )
 
+            parser.add_argument(
+                "--diffusion-eval-num-steps",
+                type=int,
+                default=None,
+                help="Number of diffusion inference steps for eval rollout. Defaults to diffusion-num-steps.",
+            )
             return parser
 
         def add_algo_arguments(parser):
@@ -884,11 +770,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             )
             reset_arg(parser, "--seed", type=int, default=1234)
             reset_arg(parser, "--clip-grad", type=float, default=1.0)
-            reset_arg(parser, "--calculate-per-token-loss", action="store_true")
             reset_arg(parser, "--lr", type=float, default=1e-6)
-
-            parser.add_argument("--eps-clip", type=float, default=0.2, help="PPO clip range")
-            parser.add_argument("--eps-clip-high", type=float, default=None, help="PPO clip upper range")
             parser.add_argument(
                 "--loss-type",
                 type=str,
@@ -927,12 +809,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="DiffusionNFT dual-prediction blend coefficient (UniRL beta).",
             )
             parser.add_argument(
-                "--diffusion-nft-adv-clip-max",
-                type=float,
-                default=5.0,
-                help="DiffusionNFT advantage clip before remap to r in [0, 1].",
-            )
-            parser.add_argument(
                 "--no-diffusion-nft-adaptive-weight",
                 action="store_false",
                 dest="diffusion_nft_adaptive_weight",
@@ -961,18 +837,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default="grpo",
             )
             parser.add_argument(
-                "--disable-compute-advantages-and-returns",
-                action="store_false",
-                dest="compute_advantages_and_returns",
-                help=(
-                    "Whether to disable computing advantages and returns. "
-                    "If set, we will not compute the advantages and returns, "
-                    "This is useful for sft or custom loss function."
-                ),
-            )
-            parser.add_argument("--entropy-coef", type=float, default=0.0, help="Entropy loss coef")
-            parser.add_argument("--normalize-advantages", action="store_true", default=False)
-            parser.add_argument(
                 "--disable-grpo-std-normalization",
                 action="store_false",
                 dest="grpo_std_normalization",
@@ -998,12 +862,49 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
-                "--use-rollout-entropy",
-                action="store_true",
-                default=False,
+                "--diffusion-clip-range",
+                type=float,
+                default=1e-4,
+                help="Clip range for diffusion GRPO ratio.",
+            )
+            parser.add_argument(
+                "--diffusion-adv-clip-max",
+                type=float,
+                default=5.0,
                 help=(
-                    "Whether to calculate the entropy when calculating the logprobs from actor and reference model. "
-                    "This is useful for doing special loss mask."
+                    "Advantage clip. Under --loss-type policy_loss this only bounds outliers. "
+                    "Under nft it also sets the advantage-to-r slope, so raising it flattens the "
+                    "positive/negative contrast."
+                ),
+            )
+            parser.add_argument(
+                "--diffusion-recompute-old-log-prob",
+                action="store_true",
+                help=(
+                    "Recompute old log-probs with the trainer forward (pre-update weights) "
+                    "instead of using rollout-stored values, making the PPO ratio "
+                    "implementation-consistent. The first optimizer window skips the extra "
+                    "pass and reuses its training forward's log-prob (ratio == 1)."
+                ),
+            )
+            parser.add_argument(
+                "--diffusion-kl-beta",
+                type=float,
+                default=0.0,
+                help=(
+                    "Reference KL coefficient for diffusion GRPO. When > 0, enables a "
+                    "reference DiT forward (see --ref-mode; default lora_base)."
+                ),
+            )
+            parser.add_argument(
+                "--ref-mode",
+                type=str,
+                choices=["none", "lora_base", "ema"],
+                default=None,
+                help=(
+                    "Which reference weights to use for the no-grad DiT forward. "
+                    "Auto: lora_base when --diffusion-kl-beta > 0 and ema for --loss-type nft. "
+                    "Explicit values skip auto inference."
                 ),
             )
             return parser
@@ -1068,6 +969,118 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument("--wandb-run-id", type=str, default=None)
+            parser.add_argument(
+                "--wandb-log-num-images",
+                type=int,
+                default=0,
+                help="Images or videos sent to W&B per rollout (0 disables).",
+            )
+            parser.add_argument(
+                "--wandb-log-image-interval",
+                type=int,
+                default=1,
+                help="Send media every N rollouts. Only used when --wandb-log-num-images > 0.",
+            )
+            return parser
+
+        def add_lora_arguments(parser):
+            parser.add_argument(
+                "--use-lora", action="store_true", default=False, help="Use LoRA adapters instead of full finetune."
+            )
+            parser.add_argument("--lora-rank", type=int, default=64)
+            parser.add_argument("--lora-alpha", type=int, default=64)
+            parser.add_argument(
+                "--lora-target-modules",
+                type=str,
+                nargs="+",
+                default=None,
+                help="Override LoRA target modules. Default: per-model from TrainPipelineConfig.",
+            )
+            parser.add_argument(
+                "--lora-init-weights",
+                type=str,
+                default="gaussian",
+                help=(
+                    "PEFT LoraConfig.init_lora_weights. flow_grpo's Qwen-Image uses 'gaussian' "
+                    "(N(0, 1/r) for lora_A, 0 for lora_B). 'kaiming-uniform' maps to PEFT's "
+                    "default Kaiming-uniform init. Other PEFT schemes ('olora', 'pissa', "
+                    "'pissa_niter_N', 'loftq', ...) pass through unchanged."
+                ),
+            )
+            parser.add_argument(
+                "--lora-ipc-weight-sync",
+                action="store_true",
+                default=False,
+                help=(
+                    "Sync only lora_A/lora_B to rollout via IPC with weight_update_mode=lora_merge "
+                    "(requires matching sglang-d LoRAPipeline support)."
+                ),
+            )
+            return parser
+
+        def add_ema_arguments(parser):
+            parser.add_argument(
+                "--use-ema",
+                action="store_true",
+                default=False,
+                help=(
+                    "Maintain an exponential moving average of the trainable weights as pi_old "
+                    "(LoRA or full finetune). Consumed by --ref-mode ema; combine with "
+                    "--ema-rollout-policy ema to sample under pi_old."
+                ),
+            )
+            parser.add_argument(
+                "--ema-rollout-policy",
+                type=str,
+                choices=["live", "ema"],
+                default="live",
+                help=(
+                    "Which trainable weights to push to rollout after each rollout_end when "
+                    "--use-ema is set: live weights, or the EMA copy (pi_old)."
+                ),
+            )
+            parser.add_argument(
+                "--ema-decay-init",
+                type=float,
+                default=0.001,
+                help="EMA decay during the flat period, before the ramp starts.",
+            )
+            parser.add_argument(
+                "--ema-decay-ramp",
+                type=float,
+                default=0.001,
+                help=(
+                    "Per-step increase of the EMA decay once the flat period ends. The ramp "
+                    "restarts from zero rather than continuing from --ema-decay-init."
+                ),
+            )
+            parser.add_argument(
+                "--ema-decay-max",
+                type=float,
+                default=0.5,
+                help="Ceiling the ramping EMA decay stops at.",
+            )
+            parser.add_argument(
+                "--ema-decay-flat-steps",
+                type=int,
+                default=0,
+                help="Steps the decay holds at --ema-decay-init before the ramp begins.",
+            )
+            return parser
+
+        def add_dashboard_arguments(parser):
+            parser.add_argument(
+                "--use-miles-dashboard",
+                action="store_true",
+                default=False,
+                help="Collect phase and trajectory telemetry asynchronously.",
+            )
+            parser.add_argument(
+                "--miles-dashboard-workspace",
+                type=str,
+                default="./miles_dashboard",
+                help="Base directory for miles dashboard telemetry; each launch writes to its own run_<ts> subdir.",
+            )
             return parser
 
         # debug
@@ -1129,90 +1142,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
 
-            # LoRA
-            parser.add_argument(
-                "--diffusion-ignore-last",
-                type=int,
-                default=0,
-                help="Skip last N denoising steps for training (avoids small-sigma numerical issues). FlowGRPO/DanceGRPO use 1.",
-            )
-            parser.add_argument(
-                "--use-lora", action="store_true", default=False, help="Use LoRA adapters instead of full finetune."
-            )
-            parser.add_argument("--lora-rank", type=int, default=64)
-            parser.add_argument("--lora-alpha", type=int, default=64)
-            parser.add_argument(
-                "--lora-target-modules",
-                type=str,
-                nargs="+",
-                default=None,
-                help="Override LoRA target modules. Default: per-model from TrainPipelineConfig.",
-            )
-            parser.add_argument(
-                "--lora-ipc-weight-sync",
-                action="store_true",
-                default=False,
-                help=(
-                    "Sync only lora_A/lora_B to rollout via IPC with weight_update_mode=lora_merge "
-                    "(requires matching sglang-d LoRAPipeline support)."
-                ),
-            )
-            parser.add_argument(
-                "--ema-shadow",
-                action="store_true",
-                default=False,
-                help=(
-                    "Maintain an EMA shadow of trainable weights (pi_old; LoRA or full finetune). "
-                    "Consumed when --ref-mode ema; combine with --ema-rollout-policy ema to "
-                    "sample under pi_old."
-                ),
-            )
-            parser.add_argument(
-                "--ema-rollout-policy",
-                type=str,
-                choices=["live", "ema"],
-                default="live",
-                help=(
-                    "Which trainable weights to push to rollout after each rollout_end when "
-                    "--ema-shadow is set: live weights, or EMA shadow (pi_old)."
-                ),
-            )
-            parser.add_argument(
-                "--ema-decay",
-                type=float,
-                default=0.001,
-                help="EMA decay while step <= flat_steps.",
-            )
-            parser.add_argument(
-                "--ema-uprate",
-                type=float,
-                default=0.001,
-                help="EMA warmup rate after flat_steps.",
-            )
-            parser.add_argument(
-                "--ema-uphold",
-                type=float,
-                default=0.5,
-                help="EMA warmup cap.",
-            )
-            parser.add_argument(
-                "--ema-flat-steps",
-                type=int,
-                default=0,
-                help="EMA flat steps before warmup begins.",
-            )
-            parser.add_argument(
-                "--diffusion-init-lora-weight",
-                type=str,
-                default="gaussian",
-                help=(
-                    "PEFT LoraConfig.init_lora_weights. flow_grpo's Qwen-Image uses 'gaussian' "
-                    "(N(0, 1/r) for lora_A, 0 for lora_B). 'kaiming-uniform' maps to PEFT's "
-                    "default Kaiming-uniform init. Other PEFT schemes ('olora', 'pissa', "
-                    "'pissa_niter_N', 'loftq', ...) pass through unchanged."
-                ),
-            )
-
             parser.add_argument(
                 "--save-debug-train-data",
                 type=str,
@@ -1229,16 +1158,10 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help=("Dump all details of training for post-hoc analysis and visualization."),
             )
             parser.add_argument(
-                "--use-miles-dashboard",
+                "--diffusion-debug-mode",
                 action="store_true",
                 default=False,
-                help="Collect phase and trajectory telemetry asynchronously.",
-            )
-            parser.add_argument(
-                "--miles-dashboard-workspace",
-                type=str,
-                default="./miles_dashboard",
-                help="Base directory for miles dashboard telemetry; each launch writes to its own run_<ts> subdir.",
+                help="Set rollout_debug_mode=true on POST /rollout/generate.",
             )
             return parser
 
@@ -1270,12 +1193,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             )
             parser.add_argument(
                 "--group-rm", action="store_true", default=False, help="Whether to do rm on a whole group."
-            )
-            parser.add_argument(
-                "--rm-url",
-                type=str,
-                default=None,
-                help="URL for the reward model service for --rm-type remote_rm, e.g. http://localhost:8000",
             )
             parser.add_argument(
                 "--ocr-num-workers",
@@ -1405,7 +1322,10 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
         parser = add_data_arguments(parser)
         parser = add_eval_arguments(parser)
         parser = add_algo_arguments(parser)
+        parser = add_lora_arguments(parser)
+        parser = add_ema_arguments(parser)
         parser = add_wandb_arguments(parser)
+        parser = add_dashboard_arguments(parser)
         parser = add_router_arguments(parser)
         parser = add_debug_arguments(parser)
         parser = add_sglang_diffusion_arguments(parser)
@@ -1527,15 +1447,6 @@ def miles_validate_args(args):
     if args.save_interval is not None:
         assert args.save is not None, "'--save' is required when save_interval is set."
 
-    if args.advantage_estimator in ["reinforce_plus_plus", "reinforce_plus_plus_baseline"]:
-        assert args.normalize_advantages, (
-            "The 'reinforce_plus_plus' and 'reinforce_plus_plus_baseline' advantage estimators "
-            "require advantage normalization. Please add `--normalize-advantages` to your command."
-        )
-
-    if args.eps_clip_high is None:
-        args.eps_clip_high = args.eps_clip
-
     if (args.micro_batch_size_sample is None) != (args.micro_batch_size_tstep is None):
         raise ValueError("--micro-batch-size-sample and --micro-batch-size-tstep must be set together")
     if args.micro_batch_size_sample is not None:
@@ -1554,10 +1465,10 @@ def miles_validate_args(args):
     if len(set(args.update_weight_target_modules)) != len(args.update_weight_target_modules):
         raise ValueError(f"--update-weight-target-module has duplicates: {args.update_weight_target_module!r}")
 
-    if args.diffusion_log_image_interval < 1:
-        raise ValueError(f"diffusion_log_image_interval must be >= 1, got {args.diffusion_log_image_interval}")
+    if args.wandb_log_image_interval < 1:
+        raise ValueError(f"wandb_log_image_interval must be >= 1, got {args.wandb_log_image_interval}")
 
-    args.rollout_patch_groups = ["sgld"] if args.apply_sgld_monkey_patches else []
+    args.rollout_patch_groups = [name for name in (args.rollout_patch_group or "").split(",") if name]
 
     if getattr(args, "diffusion_model", None):
         from miles.utils.misc import load_function
@@ -1577,8 +1488,6 @@ def miles_validate_args(args):
             args.train_pipeline_config_path = f"{cfg_cls.__module__}.{cfg_cls.__qualname__}"
         if args.model_backend_path is None:
             args.model_backend_path = cfg_cls.model_backend_path
-        if cfg_cls.rollout_patch_group:
-            args.rollout_patch_groups.append(cfg_cls.rollout_patch_group)
         if not cfg_cls.supports_cfg_training and (
             args.diffusion_guidance_scale != 1.0 or args.diffusion_negative_prompt is not None
         ):
@@ -1590,6 +1499,11 @@ def miles_validate_args(args):
         if args.use_lora and args.lora_target_modules is None:
             args.lora_target_modules = list(cfg_cls.lora_target_modules)
 
+    if args.rollout_patch_groups:
+        from miles.backends.sglang_diffusion_utils.monkey_patches import validate_rollout_patch_groups
+
+        validate_rollout_patch_groups(args.rollout_patch_groups)
+
     if args.lora_ipc_weight_sync:
         if not args.use_lora:
             raise ValueError("--lora-ipc-weight-sync requires --use-lora")
@@ -1599,16 +1513,18 @@ def miles_validate_args(args):
                 "set --diffusion-model (for per-model defaults) or --lora-target-modules."
             )
 
-    if not 0.0 <= args.ema_decay <= 1.0:
-        raise ValueError(f"--ema-decay must be in [0, 1], got {args.ema_decay}")
-    if args.ema_uprate < 0.0:
-        raise ValueError(f"--ema-uprate must be non-negative, got {args.ema_uprate}")
-    if not 0.0 <= args.ema_uphold <= 1.0:
-        raise ValueError(f"--ema-uphold must be in [0, 1], got {args.ema_uphold}")
-    if args.ema_flat_steps < 0:
-        raise ValueError(f"--ema-flat-steps must be non-negative, got {args.ema_flat_steps}")
-    if args.ema_rollout_policy == "ema" and not args.ema_shadow:
-        raise ValueError("--ema-rollout-policy ema requires --ema-shadow")
+    if not 0.0 <= args.ema_decay_init <= 1.0:
+        raise ValueError(f"--ema-decay-init must be in [0, 1], got {args.ema_decay_init}")
+    if args.ema_decay_ramp < 0.0:
+        raise ValueError(f"--ema-decay-ramp must be non-negative, got {args.ema_decay_ramp}")
+    if not 0.0 <= args.ema_decay_max <= 1.0:
+        raise ValueError(f"--ema-decay-max must be in [0, 1], got {args.ema_decay_max}")
+    if args.ema_decay_flat_steps < 0:
+        raise ValueError(f"--ema-decay-flat-steps must be non-negative, got {args.ema_decay_flat_steps}")
+    if args.use_ema and args.ref_mode != "ema" and args.ema_rollout_policy != "ema":
+        raise ValueError("--use-ema has no consumer; set --ref-mode ema or --ema-rollout-policy ema")
+    if args.ema_rollout_policy == "ema" and not args.use_ema:
+        raise ValueError("--ema-rollout-policy ema requires --use-ema")
 
     if args.loss_type == "sft_loss":
         if not args.train_only:
@@ -1627,7 +1543,7 @@ def miles_validate_args(args):
             if getattr(args, name) is None:
                 raise ValueError(
                     f"--loss-type sft_loss requires --{name.replace('_', '-')}; "
-                    "see scripts/run-diffusion-sft-wan22.sh"
+                    "see scripts/run_diffusion_sft_wan22.py"
                 )
         if args.prompt_data is None:
             raise ValueError("--loss-type sft_loss requires --prompt-data (jsonl with prompt + metadata.video)")
@@ -1651,8 +1567,8 @@ def miles_validate_args(args):
             raise ValueError("--loss-type sft_loss does not support --diffusion-recompute-old-log-prob")
         if args.ref_mode != "none":
             raise ValueError("--loss-type sft_loss does not use a reference model; drop --ref-mode")
-        if args.ema_shadow:
-            raise ValueError("--loss-type sft_loss does not support --ema-shadow (EMA updates run in weight sync)")
+        if args.use_ema:
+            raise ValueError("--loss-type sft_loss does not support --use-ema (EMA updates run in weight sync)")
 
     is_nft = args.loss_type == "nft"
     if is_nft:
@@ -1660,8 +1576,8 @@ def miles_validate_args(args):
             raise ValueError("--loss-type nft with --diffusion-noise-level 0 requires --diffusion-sde-type ode")
         if args.diffusion_nft_beta <= 0:
             raise ValueError(f"--diffusion-nft-beta must be > 0, got {args.diffusion_nft_beta}")
-        if args.diffusion_nft_adv_clip_max <= 0:
-            raise ValueError(f"--diffusion-nft-adv-clip-max must be > 0, got {args.diffusion_nft_adv_clip_max}")
+        if args.diffusion_adv_clip_max <= 0:
+            raise ValueError(f"--diffusion-adv-clip-max must be > 0, got {args.diffusion_adv_clip_max}")
         if not 0.0 < args.diffusion_nft_timestep_fraction <= 1.0:
             raise ValueError(
                 f"--diffusion-nft-timestep-fraction must be in (0, 1], got {args.diffusion_nft_timestep_fraction}"
@@ -1673,8 +1589,8 @@ def miles_validate_args(args):
 
     if is_nft and args.ref_mode == "none":
         raise ValueError("--loss-type nft requires a reference model; set --ref-mode ema or lora_base")
-    if args.ref_mode == "ema" and not args.ema_shadow:
-        raise ValueError("--ref-mode ema requires --ema-shadow")
+    if args.ref_mode == "ema" and not args.use_ema:
+        raise ValueError("--ref-mode ema requires --use-ema")
     if args.ref_mode == "lora_base" and not args.use_lora:
         raise ValueError("--ref-mode lora_base requires --use-lora")
     if args.diffusion_kl_beta > 0 and args.ref_mode == "none":
@@ -1708,9 +1624,6 @@ def miles_validate_args(args):
             args.actor_num_nodes = args.rollout_num_gpus // args.actor_num_gpus_per_node
         args.colocate = False
         args.offload_train = args.offload_rollout = False
-        if args.train_memory_margin_bytes > 0:
-            logger.warning("Force train_memory_margin_bytes=0 since debug_rollout_only does not support it")
-            args.train_memory_margin_bytes = 0
 
     if getattr(args, "diffusion_model", None):
         from miles.backends.fsdp_utils.arguments import validate_hybrid_shard_args, validate_sp_args

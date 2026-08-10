@@ -18,6 +18,7 @@ import pytest
 
 _E2E_WORKER = Path(__file__).with_name("_param_dtype_map_worker.py")
 _ADVERSARIAL_WORKER = Path(__file__).with_name("_param_dtype_map_adversarial_worker.py")
+_INTEGRATION_WORKER = Path(__file__).with_name("_param_dtype_map_integration_worker.py")
 _VALIDATION_WORKER = Path(__file__).with_name("_param_dtype_map_validation_worker.py")
 _EQUIVALENCE_WORKER = Path(__file__).with_name("_param_dtype_map_equivalence_worker.py")
 
@@ -48,6 +49,10 @@ def _run_worker(worker, *args):
 
 def test_param_dtype_map_full_size_blocks():
     _run_worker(_E2E_WORKER)
+
+
+def test_param_dtype_map_apply_fsdp2_integration():
+    _run_worker(_INTEGRATION_WORKER)
 
 
 @pytest.mark.parametrize(

@@ -24,5 +24,5 @@ KNOWN_LABELS: dict[str, str] = {
     "ray": "Ray actor / placement_group tests",
     "router": "Router routing decision tests",
     "arguments": "Top-level argparse / validate_args tests",
-    "model-scripts": "train_diffusion.py + scripts/*.sh smoke tests",
+    "model-scripts": "train_diffusion.py + scripts/*.py smoke tests",
 }

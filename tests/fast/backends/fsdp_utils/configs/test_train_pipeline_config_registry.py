@@ -5,7 +5,10 @@ register_cpu_ci(est_time=30, suite="stage-a-cpu", labels=[])
 import pytest
 import torch
 
+from miles.backends.fsdp_utils.configs.qwen_image import QwenImageTrainPipelineConfig
+from miles.backends.fsdp_utils.configs.sd3 import SD3TrainPipelineConfig
 from miles.backends.fsdp_utils.configs.train_pipeline_config import TrainPipelineConfig, resolve_diffusion_model_family
+from miles.backends.fsdp_utils.configs.wan2_2 import Wan2_2TrainPipelineConfig
 
 
 class TestFamilyResolution:
@@ -85,3 +88,22 @@ class TestComputeNoisePred:
     def test_joint_batch_matches_two_pass(self):
         joint = {"bias": torch.cat([self.pos["bias"], self.neg["bias"]], dim=0)}
         torch.testing.assert_close(self._call(cfg_batching=True, joint_cond=joint), self._call())
+
+
+class TestProcessTimestepAsInput:
+    # What a family hands its DiT as the timestep, given the trajectory's t and the
+    # scheduler range N. Each family must reproduce the arithmetic its sglang-d DiT runs.
+    #
+    #   sd3, wan2_2   t         the DiT takes the trajectory timestep unchanged
+    #   qwen_image    t / 1000  the model's own normalizer, which Timesteps(scale=1000) undoes
+    TIMESTEPS = torch.tensor([978.2581787109375, 500.0])
+
+    @pytest.mark.parametrize("config_cls", [SD3TrainPipelineConfig, Wan2_2TrainPipelineConfig])
+    def test_raw_trajectory_timestep(self, config_cls):
+        out = config_cls.process_timestep_as_input(config_cls, self.TIMESTEPS)
+        assert torch.equal(out, self.TIMESTEPS)
+
+    def test_qwen_image_divides_by_the_model_normalizer(self):
+        out = QwenImageTrainPipelineConfig.process_timestep_as_input(QwenImageTrainPipelineConfig, self.TIMESTEPS)
+        # One division, like the rollout: any rewrite of the expression drifts ULPs.
+        assert torch.equal(out, self.TIMESTEPS / 1000.0)

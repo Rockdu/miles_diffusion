@@ -3,6 +3,8 @@ from tests.ci.ci_register import register_cpu_ci
 register_cpu_ci(est_time=30, suite="stage-a-cpu", labels=[])
 
 import json
+import subprocess
+import sys
 
 import pytest
 
@@ -15,8 +17,8 @@ from tests.ci.e2e_metrics_registry import register_e2e_ci
 register_e2e_ci(
     est_time=100,
     suite="stage-c-5-gpu-h200",
-    script="scripts/example.sh",
-    env={"NUM_ROLLOUT": "2"},
+    script="scripts/example.py",
+    args=["--num-rollout", "2"],
     metrics=["train/loss", "rollout/reward"],
 )
 """
@@ -85,6 +87,36 @@ def test_metrics_spec_extracted_via_ast(sandbox):
     assert reg._test_metrics_spec(str(mini)) == ["train/loss", "rollout/reward"]
 
 
+def test_recipe_runs_under_this_interpreter_with_its_args(sandbox, monkeypatch):
+    """The registry launches a Python recipe directly — no shell in between."""
+    launched = []
+    monkeypatch.setattr(reg, "RECORDINGS_DIR", sandbox / "recordings")
+    monkeypatch.setattr(reg, "_cleanup_gpu_state", lambda: None)
+    monkeypatch.setattr(reg, "check_or_update", lambda *a, **k: None)
+    monkeypatch.setattr(
+        reg.subprocess,
+        "run",
+        lambda cmd, **kw: launched.append((cmd, kw)) or subprocess.CompletedProcess(cmd, 0),
+    )
+
+    caller = {"__name__": "__main__", "__file__": str(sandbox / "test_mini.py")}
+    exec("reg.register_e2e_ci(**kwargs)", {"reg": reg, **caller}, {"reg": reg, "kwargs": _E2E_CALL})
+
+    ((cmd, kwargs),) = launched
+    assert cmd[0] == sys.executable and "bash" not in cmd
+    assert cmd[1:] == ["-u", str(reg.REPO_ROOT / "scripts/example.py"), "--num-rollout", "2"]
+    assert kwargs["env"]["MILES_METRICS_JSONL"].endswith("test_mini.jsonl")
+
+
+_E2E_CALL = dict(
+    est_time=100,
+    suite="stage-c-5-gpu-h200",
+    script="scripts/example.py",
+    args=["--num-rollout", "2"],
+    metrics=["m"],
+)
+
+
 def test_register_e2e_ci_parses_like_other_registers(sandbox):
     mini = sandbox / "test_mini.py"
     mini.write_text(_MINI_TEST)
@@ -93,6 +125,6 @@ def test_register_e2e_ci_parses_like_other_registers(sandbox):
     assert entry.suite == "stage-c-5-gpu-h200"
     assert entry.est_time == 100.0
     bad = sandbox / "test_bad.py"
-    bad.write_text(_MINI_TEST.replace("env=", "typo_kwarg="))
+    bad.write_text(_MINI_TEST.replace("args=", "typo_kwarg="))
     with pytest.raises(ValueError, match="unknown argument"):
         ci_register.ut_parse_one_file(str(bad))

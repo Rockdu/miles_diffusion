@@ -39,6 +39,7 @@ from .input_dtype_policy import apply_input_dtype_policy
 from .loss_hub import DiffusionLossContext, flow_grpo_loss_formula, prepare_flow_grpo_batch
 from .lr_scheduler import get_lr_scheduler
 from .metrics import new_metric_buffer
+from .mixed_precision import compile_param_dtype_maps, parse_dtype_from_str
 from .parallel import create_fsdp_parallel_state
 from .sequence_parallel.plan import apply_sequence_parallel
 
@@ -95,8 +96,8 @@ class FSDPTrainRayActor(TrainRayActor):
 
         self.prof = TrainProfiler(args)
 
-        self._master_dtype = _resolve_dtype(args.fsdp_master_dtype)
-        self._forward_dtype = _resolve_dtype(args.diffusion_forward_dtype)
+        self._master_dtype = parse_dtype_from_str(args.fsdp_master_dtype)
+        self._forward_dtype = parse_dtype_from_str(args.diffusion_forward_dtype)
 
         from miles.utils.misc import load_function
 
@@ -140,10 +141,10 @@ class FSDPTrainRayActor(TrainRayActor):
             full_state = model.state_dict() if rank == 0 else {}
             model = apply_fsdp2(
                 model,
+                self.model_backend.fsdp_parallel_plan(model),
                 mesh=self.parallel_state.get_mesh("fsdp"),
                 cpu_offload=self.args.fsdp_cpu_offload,
                 args=self.args,
-                no_split_modules=self.model_backend.fsdp_no_split_modules(model),
             )
             checkpoint.broadcast_full_state_to_fsdp(
                 model,
@@ -214,13 +215,13 @@ class FSDPTrainRayActor(TrainRayActor):
         checkpoint_payload = checkpoint.load(self)
 
         self.ema_shadow = None
-        if self.args.ema_shadow:
+        if self.args.use_ema:
             self.ema_shadow = EmaShadow(
                 (p for m in self.models.values() for p in m.parameters()),
-                decay=self.args.ema_decay,
-                uprate=self.args.ema_uprate,
-                uphold=self.args.ema_uphold,
-                flat_steps=self.args.ema_flat_steps,
+                decay=self.args.ema_decay_init,
+                uprate=self.args.ema_decay_ramp,
+                uphold=self.args.ema_decay_max,
+                flat_steps=self.args.ema_decay_flat_steps,
             )
 
         # sglang-d now supports /update_weights_from_tensor (PR #20464).
@@ -597,10 +598,6 @@ def move_torch_optimizer(optimizer, device):
     torch.cuda.synchronize()
 
 
-def _resolve_dtype(name: str) -> torch.dtype:
-    return {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}[name]
-
-
 def apply_lora(model: torch.nn.Module, args: Namespace, train_pipeline_config) -> torch.nn.Module:
     """Apply PEFT LoRA, leaving non-rank0 adapters uninitialized on meta."""
     from peft import LoraConfig, get_peft_model
@@ -608,7 +605,7 @@ def apply_lora(model: torch.nn.Module, args: Namespace, train_pipeline_config) -
     on_meta = dist.get_rank() != 0
     # Per-model fallback when --lora-target-modules is unset (runtime inference: depends on loaded pipeline).
     targets = args.lora_target_modules or train_pipeline_config.lora_target_modules
-    init_lora_weight = args.diffusion_init_lora_weight
+    init_lora_weight = args.lora_init_weights
     if init_lora_weight == "kaiming-uniform":
         init_lora_weight = True  # namely kaiming-uniform
     model = get_peft_model(
@@ -626,36 +623,84 @@ def apply_lora(model: torch.nn.Module, args: Namespace, train_pipeline_config) -
     return model
 
 
-def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules=None):
+def apply_fsdp2(
+    model,
+    parallel_plan,
+    mesh=None,
+    cpu_offload=False,
+    args=None,
+):
+    """Apply FSDP2 per the model's FSDPParallelPlan.
+
+    ``parallel_plan.param_dtype_patterns`` is matched against FQNs from ``model``. Each child
+    ``fully_shard`` call receives exact FQNs relative to that child module, while
+    parameters managed by the root call retain their root-relative FQNs.
+    """
     from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, fully_shard
 
     offload_policy = CPUOffloadPolicy() if cpu_offload else None
 
-    layer_cls_to_wrap = no_split_modules if no_split_modules is not None else model._no_split_modules
-    assert len(layer_cls_to_wrap) > 0 and layer_cls_to_wrap[0] is not None
+    layer_cls_to_wrap = parallel_plan.no_split_modules
+    assert layer_cls_to_wrap is not None and len(layer_cls_to_wrap) > 0 and layer_cls_to_wrap[0] is not None
 
     modules = [module for name, module in model.named_modules() if module.__class__.__name__ in layer_cls_to_wrap]
 
-    param_dtype = _resolve_dtype(args.diffusion_forward_dtype)
-    reduce_dtype = _resolve_dtype(args.fsdp_reduce_dtype)
+    param_dtype = parse_dtype_from_str(args.diffusion_forward_dtype)
+    reduce_dtype = parse_dtype_from_str(args.fsdp_reduce_dtype)
+    # A wrap entry may also be a module LIST — fully_shard can group several modules into one wrap
+    # (one shared all-gather); today every wrap holds a single block.
+    param_dtype_maps = compile_param_dtype_maps(
+        model,
+        modules,
+        parallel_plan.param_dtype_patterns,
+        param_dtype,
+    )
+    has_param_dtype_overrides = bool(any(param_dtype_maps.wrap_maps) or param_dtype_maps.root_map)
+    param_dtype_policy_cls = None
+    if has_param_dtype_overrides:
+        from .monkey_patches.fsdp_param_dtype_patch import ParamDtypeMixedPrecisionPolicy, apply_param_dtype_map_patch
+
+        apply_param_dtype_map_patch()
+        param_dtype_policy_cls = ParamDtypeMixedPrecisionPolicy
     logger.info(
-        f"FSDP: wrapping {len(modules)} modules of type {layer_cls_to_wrap}, param_dtype={param_dtype}, reduce_dtype={reduce_dtype}"
+        f"FSDP: wrapping {len(modules)} modules of type {layer_cls_to_wrap}, "
+        f"param_dtype={param_dtype}, reduce_dtype={reduce_dtype}, "
+        f"param_dtype_overrides={param_dtype_maps.override_count} "
+        f"({param_dtype_maps.override_numel:,} parameters)"
     )
 
     fsdp_kwargs = {
-        # input_dtype_policy owns boundary casts; autocast owns compute and keeps grad-ckpt recompute consistent.
-        "mp_policy": MixedPrecisionPolicy(
-            param_dtype=param_dtype,
-            reduce_dtype=reduce_dtype,
-            cast_forward_inputs=False,
-        ),
         "offload_policy": offload_policy,
         "mesh": mesh,
     }
 
-    for module in modules:
-        fully_shard(module, **fsdp_kwargs)
+    # input_dtype_policy owns boundary casts; autocast owns compute and keeps grad-ckpt recompute consistent.
+    def make_mp_policy(param_dtype_map):
+        if param_dtype_map:
+            assert param_dtype_policy_cls is not None
+            return param_dtype_policy_cls(
+                param_dtype=param_dtype,
+                reduce_dtype=reduce_dtype,
+                cast_forward_inputs=False,
+                param_dtype_map=param_dtype_map,
+            )
+        return MixedPrecisionPolicy(
+            param_dtype=param_dtype,
+            reduce_dtype=reduce_dtype,
+            cast_forward_inputs=False,
+        )
 
-    fully_shard(model, **fsdp_kwargs)
+    for module, wrap_map in zip(modules, param_dtype_maps.wrap_maps, strict=True):
+        fully_shard(
+            module,
+            mp_policy=make_mp_policy(wrap_map),
+            **fsdp_kwargs,
+        )
+
+    fully_shard(
+        model,
+        mp_policy=make_mp_policy(param_dtype_maps.root_map),
+        **fsdp_kwargs,
+    )
 
     return model
