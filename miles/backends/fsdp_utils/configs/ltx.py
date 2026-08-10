@@ -19,12 +19,13 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
     supports_cfg_training = False
     # Rollout stores σ×1000 in trajectory timesteps; ltx_core AdaLN uses σ∈[0,1].
     sde_timestep_divisor = 1000.0
-    rollout_patch_group = "ltx"
     hf_ckpt_name_patterns = ("ltx",)
     model_backend_path = "miles.backends.fsdp_utils.model_backend.MilesModelBackend"
     model_package = "miles.backends.fsdp_utils.models.ltx"
     # Audio branch has no optimizer state: we only train the video stream.
     optimizer_state_allowed_missing = ["audio"]
+    # forward_velocity anchors element-wise math on latents.dtype; rollout runs it bf16, so cast at the boundary.
+    input_dtype_policy = {"latents": "default", "cond": "default", "timestep": None}
 
     def configure(self, args: Namespace) -> None:
         self._height = args.diffusion_height
@@ -129,7 +130,6 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
         from ltx_core.model.transformer.modality import Modality
         from ltx_core.utils import to_denoised
 
-        device = latents_input.device
         dtype = latents_input.dtype
         B = latents_input.shape[0]
 
@@ -148,10 +148,8 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
             context=cond["context"].to(dtype),
             context_mask=None,
         )
-        # FSDP mixed precision casts parameters but does not replace LTX's
-        # operation-level autocast semantics.
-        with torch.autocast(device_type=str(device).split(":")[0], dtype=dtype):
-            velocity, _ = model(video=video_modality, audio=None, perturbations=None)
+        # Compute dtype comes from the trainer's ambient autocast around compute_noise_pred.
+        velocity, _ = model(video=video_modality, audio=None, perturbations=None)
 
         # Keep the original fp32 denoised reconstruction path: although this is
         # algebraically an identity for T2V, strict e2e metrics depend on its rounding.

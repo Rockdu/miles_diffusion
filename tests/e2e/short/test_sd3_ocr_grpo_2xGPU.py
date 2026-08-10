@@ -9,11 +9,8 @@ from tests.ci.e2e_metrics_registry import register_e2e_ci
 register_e2e_ci(
     est_time=1200,
     suite="stage-c-3-gpu-h200",
-    script="scripts/run-diffusion-grpo-sd3-ocr-sglang.sh",
-    env={
-        "NUM_ROLLOUT": "2",
-        "CUDA_VISIBLE_DEVICES": "0,1",
-    },
+    script="scripts/run_diffusion_grpo_sd3_ocr_sglang.py",
+    args=["--num-rollout", "2", "--cuda-visible-devices", "0,1"],
     metrics=[
         "rollout/reward/raw_num_samples",
         "rollout/reward/raw_mean",

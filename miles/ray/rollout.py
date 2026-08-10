@@ -17,7 +17,7 @@ from miles.ray.data_conversion_hub.flow_grpo import (
     expand_samples_to_train_pairs as flow_grpo_expand_samples_to_train_pairs,
 )
 from miles.rollout.base_types import call_rollout_fn
-from miles.rollout.rm_hub.core import set_reward_placement_group
+from miles.rollout.rm_hub.core import set_manager_placement_group
 from miles.utils import tracking_utils
 from miles.utils.health_monitor import RolloutHealthMonitor
 from miles.utils.http_utils import _wrap_ipv6, find_available_port, get_host_info, init_http_client
@@ -54,9 +54,10 @@ class RolloutManager:
         from miles.dashboard import hooks
 
         hooks.register_rollout_manager(args)
-        set_reward_placement_group(pg)
-        logger.info("RolloutManager: starting router...")
-        _start_router(args)
+        set_manager_placement_group(pg)
+        if not args.train_only:
+            logger.info("RolloutManager: starting router...")
+            _start_router(args)
         logger.info("RolloutManager: router started, init tracking...")
         # TODO make args immutable
         init_tracking(args, primary=False, router_addr=f"http://{args.sglang_router_ip}:{args.sglang_router_port}")
@@ -91,10 +92,10 @@ class RolloutManager:
 
         logger.info("RolloutManager rollout_num_gpus=%s", self.args.rollout_num_gpus)
 
-        if self.args.debug_train_only:
+        if self.args.train_only:
             self.all_rollout_engines = []
             self.num_new_engines = 0
-            logger.info("RolloutManager using no sglang engines (debug_train_only).")
+            logger.info("RolloutManager using no sglang engines (train_only).")
         else:
             num_gpu_per_engine = min(args.rollout_num_gpus_per_engine, args.num_gpus_per_node)
             num_engines = args.rollout_num_gpus // num_gpu_per_engine
@@ -178,10 +179,8 @@ class RolloutManager:
         log_perf_data_raw(rollout_id, self.args, is_primary_rank=True)
         logger.info("RolloutManager generate done: rollout_id=%s", rollout_id)
         dp_size = self.train_parallel_config["dp_size"]
-        # Legacy 2D compat: strided DP split + tile reorder reproduce the legacy
-        # tiles bit-for-bit; otherwise the native 1D contiguous split.
+        shards = self.train_data_dp_splitter.split_by_dp(data, dp_size, mode=self.args.train_dp_split_mode)
         if self.args.micro_batch_size_sample is not None:
-            shards = self.train_data_dp_splitter.split_by_dp(data, dp_size, mode="baseline_stride")
             shards = [
                 {
                     **shard,
@@ -195,12 +194,10 @@ class RolloutManager:
                 }
                 for shard in shards
             ]
-        else:
-            shards = self.train_data_dp_splitter.split_by_dp(data, dp_size)
         return [Box(ray.put(shard)) for shard in shards]
 
     def eval(self, rollout_id):
-        if self.args.debug_train_only:
+        if self.args.train_only:
             # if debug train only, we don't generate evaluation data
             return
         self.health_monitoring_resume()
@@ -209,7 +206,7 @@ class RolloutManager:
         data = result.data
         self._save_debug_rollout_data(data, rollout_id=rollout_id, evaluation=True)
         metrics = _log_eval_rollout_data(rollout_id, self.args, data, result.metrics)
-        max_images = self.args.diffusion_log_images
+        max_images = self.args.wandb_log_num_images
         if max_images > 0:
             self._log_images(
                 {
@@ -400,8 +397,8 @@ class RolloutManager:
         reward_stats["rollout/step"] = compute_rollout_step(self.args, self.rollout_id)
         tracking_utils.log(self.args, reward_stats, step_key="rollout/step")
 
-        max_images = self.args.diffusion_log_images
-        interval = self.args.diffusion_log_image_interval
+        max_images = self.args.wandb_log_num_images
+        interval = self.args.wandb_log_image_interval
         if max_images > 0 and self.rollout_id % interval == 0:
             self._log_images(
                 {"rollout_media/sample_images": samples},
@@ -426,7 +423,7 @@ class RolloutManager:
     ) -> None:
         """Log per-key sample image grids under their own media namespace.
 
-        Caller decides whether to invoke (gating like ``--diffusion-log-images``
+        Caller decides whether to invoke (gating like ``--wandb-log-num-images``
         > 0 or rollout-side interval lives at the call site, not here). wandb
         media panels do not honor ``step_metric`` (they slide on the internal
         commit step), so panels pile up over a run — keeping them in their
@@ -474,7 +471,7 @@ class RolloutManager:
 
 
 def init_rollout_engines(args, pg, all_rollout_engines):
-    if args.debug_train_only:
+    if args.train_only:
         return 0
 
     num_gpu_per_engine = min(args.rollout_num_gpus_per_engine, args.num_gpus_per_node)

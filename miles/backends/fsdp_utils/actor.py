@@ -35,9 +35,11 @@ from .diffusion_update_weight_utils import (
     DiffusionUpdateWeightFromTensorLoRAIPC,
 )
 from .ema import EmaShadow
+from .input_dtype_policy import apply_input_dtype_policy
 from .loss_hub import DiffusionLossContext, flow_grpo_loss_formula, prepare_flow_grpo_batch
 from .lr_scheduler import get_lr_scheduler
 from .metrics import new_metric_buffer
+from .mixed_precision import compile_param_dtype_maps, parse_dtype_from_str
 from .parallel import create_fsdp_parallel_state
 from .sequence_parallel.plan import apply_sequence_parallel
 
@@ -94,8 +96,8 @@ class FSDPTrainRayActor(TrainRayActor):
 
         self.prof = TrainProfiler(args)
 
-        self._master_dtype = _resolve_dtype(args.fsdp_master_dtype)
-        self._forward_dtype = _resolve_dtype(args.diffusion_forward_dtype)
+        self._master_dtype = parse_dtype_from_str(args.fsdp_master_dtype)
+        self._forward_dtype = parse_dtype_from_str(args.diffusion_forward_dtype)
 
         from miles.utils.misc import load_function
 
@@ -139,10 +141,10 @@ class FSDPTrainRayActor(TrainRayActor):
             full_state = model.state_dict() if rank == 0 else {}
             model = apply_fsdp2(
                 model,
+                self.model_backend.fsdp_parallel_plan(model),
                 mesh=self.parallel_state.get_mesh("fsdp"),
                 cpu_offload=self.args.fsdp_cpu_offload,
                 args=self.args,
-                no_split_modules=self.model_backend.fsdp_no_split_modules(model),
             )
             checkpoint.broadcast_full_state_to_fsdp(
                 model,
@@ -213,17 +215,17 @@ class FSDPTrainRayActor(TrainRayActor):
         checkpoint_payload = checkpoint.load(self)
 
         self.ema_shadow = None
-        if self.args.ema_shadow:
+        if self.args.use_ema:
             self.ema_shadow = EmaShadow(
                 (p for m in self.models.values() for p in m.parameters()),
-                decay=self.args.ema_decay,
-                uprate=self.args.ema_uprate,
-                uphold=self.args.ema_uphold,
-                flat_steps=self.args.ema_flat_steps,
+                decay=self.args.ema_decay_init,
+                uprate=self.args.ema_decay_ramp,
+                uphold=self.args.ema_decay_max,
+                flat_steps=self.args.ema_decay_flat_steps,
             )
 
         # sglang-d now supports /update_weights_from_tensor (PR #20464).
-        if self.args.debug_train_only:
+        if self.args.train_only:
             self.weight_updater = None
         elif self.args.use_lora and self.args.lora_ipc_weight_sync:
             self.weight_updater = DiffusionUpdateWeightFromTensorLoRAIPC(self.args, self.models)
@@ -292,7 +294,7 @@ class FSDPTrainRayActor(TrainRayActor):
 
     @timer
     def update_weights(self) -> None:  # type: ignore[override]
-        if self.args.debug_train_only or self.args.debug_rollout_only:
+        if self.args.train_only or self.args.debug_rollout_only:
             return
 
         if self.weight_updater is None:
@@ -357,14 +359,13 @@ class FSDPTrainRayActor(TrainRayActor):
 
     def _train_core(self, rollout_id: int, rollout_data) -> None:
         """Run the shared diffusion training loop."""
-        device = torch.cuda.current_device()
+        device = torch.device("cuda", torch.cuda.current_device())
 
         train_pairs: list = rollout_data["train_data"]
         if not train_pairs:
             raise ValueError("rollout_data['train_data'] is empty")
 
         num_pairs = len(train_pairs)
-        num_train_timesteps = self.scheduler.config.num_train_timesteps
 
         ref_mode = self.args.ref_mode
         if ref_mode == "lora_base" and not all(hasattr(m, "disable_adapter") for m in self.models.values()):
@@ -376,7 +377,6 @@ class FSDPTrainRayActor(TrainRayActor):
         scheduler_timesteps, scheduler_sigmas = scheduler_meta_from_rollout(
             rollout_data,
             device=device,
-            num_train_timesteps=num_train_timesteps,
         )
         self.scheduler.timesteps = scheduler_timesteps
         self.scheduler.sigmas = scheduler_sigmas
@@ -416,6 +416,8 @@ class FSDPTrainRayActor(TrainRayActor):
             args=self.args,
             forward_dtype=self._forward_dtype,
             device=device,
+            rollout_id=rollout_id,
+            dp_rank=self.parallel_state.dp_rank,
         )
 
         # ------------- Recompute old log-probs (impl-consistent PPO ratio) -------------
@@ -424,9 +426,13 @@ class FSDPTrainRayActor(TrainRayActor):
                 # write_old_log_prob returns before recording; this is never reduced.
                 unused_metrics = new_metric_buffer(self.parallel_state.dp_group, device, self.models)
                 # Skip window 0: its training forward runs on the same pre-update weights and doubles as the recompute.
+                # Start the id after window 0's micro-batches to stay aligned with the training loop.
+                microbatch_id = len(microbatch_schedule[0])
                 for microbatch_ranges in microbatch_schedule[1:]:
                     legacy_pad_to_len = self._maybe_legacy_window_pad_len(train_pairs, microbatch_ranges)
                     for pair_lo, pair_hi in microbatch_ranges:
+                        loss_ctx.microbatch_id = microbatch_id
+                        microbatch_id += 1
                         self._forward_train_pair_batch(
                             loss_ctx,
                             train_pairs[pair_lo:pair_hi],
@@ -437,6 +443,7 @@ class FSDPTrainRayActor(TrainRayActor):
 
         # ------------- Forward / Backward -------------
         with timer("actor_train"):
+            microbatch_id = 0
             for optim_step_idx, microbatch_ranges in enumerate(microbatch_schedule):
                 self.optimizer.zero_grad(set_to_none=True)
 
@@ -451,6 +458,8 @@ class FSDPTrainRayActor(TrainRayActor):
 
                 for pair_lo, pair_hi in microbatch_ranges:
                     chunk = train_pairs[pair_lo:pair_hi]
+                    loss_ctx.microbatch_id = microbatch_id
+                    microbatch_id += 1
                     loss_sum = self._forward_train_pair_batch(
                         loss_ctx,
                         chunk,
@@ -514,22 +523,29 @@ class FSDPTrainRayActor(TrainRayActor):
         train_pipeline_config = self.train_pipeline_config
         forward_dtype = self._forward_dtype
 
-        latents_input = prepared.latents.to(forward_dtype)
-        timesteps_input = prepared.timesteps_for_model.to(forward_dtype)
+        # Boundary dtypes are family policy; op interiors stay autocast-managed.
+        latents_in, timesteps_in, (pos_cond_in, neg_cond_in, joint_cond_in) = apply_input_dtype_policy(
+            train_pipeline_config.input_dtype_policy,
+            latents=prepared.latents,
+            timesteps=prepared.timesteps_for_model,
+            conds=(prepared.pos_cond, prepared.neg_cond, prepared.joint_cond),
+            default_dtype=forward_dtype,
+        )
 
         def _compute_noise_pred() -> torch.Tensor:
-            return train_pipeline_config.compute_noise_pred(
-                model=prepared.model,
-                latents_input=latents_input,
-                timesteps_input=timesteps_input,
-                pos_cond=prepared.pos_cond,
-                neg_cond=prepared.neg_cond,
-                joint_cond=prepared.joint_cond,
-                use_cfg=prepared.use_cfg,
-                cfg_batching=prepared.cfg_batching,
-                guidance_scale=prepared.guidance_scale,
-                true_cfg_scale=prepared.true_cfg_scale,
-            )
+            with torch.autocast("cuda", dtype=forward_dtype, enabled=forward_dtype != torch.float32):
+                return train_pipeline_config.compute_noise_pred(
+                    model=prepared.model,
+                    latents_input=latents_in,
+                    timesteps_input=timesteps_in,
+                    pos_cond=pos_cond_in,
+                    neg_cond=neg_cond_in,
+                    joint_cond=joint_cond_in,
+                    use_cfg=prepared.use_cfg,
+                    cfg_batching=prepared.cfg_batching,
+                    guidance_scale=prepared.guidance_scale,
+                    true_cfg_scale=prepared.true_cfg_scale,
+                )
 
         new_pred = _compute_noise_pred()
 
@@ -582,10 +598,6 @@ def move_torch_optimizer(optimizer, device):
     torch.cuda.synchronize()
 
 
-def _resolve_dtype(name: str) -> torch.dtype:
-    return {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}[name]
-
-
 def apply_lora(model: torch.nn.Module, args: Namespace, train_pipeline_config) -> torch.nn.Module:
     """Apply PEFT LoRA, leaving non-rank0 adapters uninitialized on meta."""
     from peft import LoraConfig, get_peft_model
@@ -593,7 +605,7 @@ def apply_lora(model: torch.nn.Module, args: Namespace, train_pipeline_config) -
     on_meta = dist.get_rank() != 0
     # Per-model fallback when --lora-target-modules is unset (runtime inference: depends on loaded pipeline).
     targets = args.lora_target_modules or train_pipeline_config.lora_target_modules
-    init_lora_weight = args.diffusion_init_lora_weight
+    init_lora_weight = args.lora_init_weights
     if init_lora_weight == "kaiming-uniform":
         init_lora_weight = True  # namely kaiming-uniform
     model = get_peft_model(
@@ -611,43 +623,84 @@ def apply_lora(model: torch.nn.Module, args: Namespace, train_pipeline_config) -
     return model
 
 
-def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules=None):
+def apply_fsdp2(
+    model,
+    parallel_plan,
+    mesh=None,
+    cpu_offload=False,
+    args=None,
+):
+    """Apply FSDP2 per the model's FSDPParallelPlan.
+
+    ``parallel_plan.param_dtype_patterns`` is matched against FQNs from ``model``. Each child
+    ``fully_shard`` call receives exact FQNs relative to that child module, while
+    parameters managed by the root call retain their root-relative FQNs.
+    """
     from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, fully_shard
 
     offload_policy = CPUOffloadPolicy() if cpu_offload else None
 
-    layer_cls_to_wrap = no_split_modules if no_split_modules is not None else model._no_split_modules
-    assert len(layer_cls_to_wrap) > 0 and layer_cls_to_wrap[0] is not None
+    layer_cls_to_wrap = parallel_plan.no_split_modules
+    assert layer_cls_to_wrap is not None and len(layer_cls_to_wrap) > 0 and layer_cls_to_wrap[0] is not None
 
     modules = [module for name, module in model.named_modules() if module.__class__.__name__ in layer_cls_to_wrap]
 
-    param_dtype = _resolve_dtype(args.diffusion_forward_dtype)
-    reduce_dtype = _resolve_dtype(args.fsdp_reduce_dtype)
+    param_dtype = parse_dtype_from_str(args.diffusion_forward_dtype)
+    reduce_dtype = parse_dtype_from_str(args.fsdp_reduce_dtype)
+    # A wrap entry may also be a module LIST — fully_shard can group several modules into one wrap
+    # (one shared all-gather); today every wrap holds a single block.
+    param_dtype_maps = compile_param_dtype_maps(
+        model,
+        modules,
+        parallel_plan.param_dtype_patterns,
+        param_dtype,
+    )
+    has_param_dtype_overrides = bool(any(param_dtype_maps.wrap_maps) or param_dtype_maps.root_map)
+    param_dtype_policy_cls = None
+    if has_param_dtype_overrides:
+        from .monkey_patches.fsdp_param_dtype_patch import ParamDtypeMixedPrecisionPolicy, apply_param_dtype_map_patch
+
+        apply_param_dtype_map_patch()
+        param_dtype_policy_cls = ParamDtypeMixedPrecisionPolicy
     logger.info(
-        f"FSDP: wrapping {len(modules)} modules of type {layer_cls_to_wrap}, param_dtype={param_dtype}, reduce_dtype={reduce_dtype}"
+        f"FSDP: wrapping {len(modules)} modules of type {layer_cls_to_wrap}, "
+        f"param_dtype={param_dtype}, reduce_dtype={reduce_dtype}, "
+        f"param_dtype_overrides={param_dtype_maps.override_count} "
+        f"({param_dtype_maps.override_numel:,} parameters)"
     )
 
     fsdp_kwargs = {
-        "mp_policy": MixedPrecisionPolicy(
-            param_dtype=param_dtype,
-            reduce_dtype=reduce_dtype,
-        ),
         "offload_policy": offload_policy,
         "mesh": mesh,
     }
 
-    if args.gradient_checkpointing:
-        # MixedPrecisionPolicy does not cast buffers; a buffer above param_dtype
-        # makes the ckpt recompute dtype-diverge from the forward and abort.
-        for module in model.modules():
-            for name, buf in module.named_buffers(recurse=False):
-                if buf.is_floating_point() and buf.dtype != param_dtype:
-                    persistent = name not in module._non_persistent_buffers_set
-                    module.register_buffer(name, buf.to(param_dtype), persistent=persistent)
+    # input_dtype_policy owns boundary casts; autocast owns compute and keeps grad-ckpt recompute consistent.
+    def make_mp_policy(param_dtype_map):
+        if param_dtype_map:
+            assert param_dtype_policy_cls is not None
+            return param_dtype_policy_cls(
+                param_dtype=param_dtype,
+                reduce_dtype=reduce_dtype,
+                cast_forward_inputs=False,
+                param_dtype_map=param_dtype_map,
+            )
+        return MixedPrecisionPolicy(
+            param_dtype=param_dtype,
+            reduce_dtype=reduce_dtype,
+            cast_forward_inputs=False,
+        )
 
-    for module in modules:
-        fully_shard(module, **fsdp_kwargs)
+    for module, wrap_map in zip(modules, param_dtype_maps.wrap_maps, strict=True):
+        fully_shard(
+            module,
+            mp_policy=make_mp_policy(wrap_map),
+            **fsdp_kwargs,
+        )
 
-    fully_shard(model, **fsdp_kwargs)
+    fully_shard(
+        model,
+        mp_policy=make_mp_policy(param_dtype_maps.root_map),
+        **fsdp_kwargs,
+    )
 
     return model

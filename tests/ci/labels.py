@@ -19,9 +19,10 @@ here: they bypass the per-test labels filter and run the full suite via the
 KNOWN_LABELS: dict[str, str] = {
     "sglang-diffusion": "sglang_diffusion_utils engine / monkey patch tests",
     "fsdp": "FSDP backend + config tests",
+    "torch": "Ported PyTorch regression tests",
     "rollout": "Rollout sampling / filter / strategy tests",
     "ray": "Ray actor / placement_group tests",
     "router": "Router routing decision tests",
     "arguments": "Top-level argparse / validate_args tests",
-    "model-scripts": "train_diffusion.py + scripts/*.sh smoke tests",
+    "model-scripts": "train_diffusion.py + scripts/*.py smoke tests",
 }

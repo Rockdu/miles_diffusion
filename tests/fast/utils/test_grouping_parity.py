@@ -8,12 +8,13 @@ non-determinism that makes end-to-end training comparison unreliable
 (see determinism/BACKWARD_NONDETERMINISM.md).
 
 Contract under test: with the parity flags
-``--diffusion-train-dp-split baseline_stride`` + ``--diffusion-train-cond-pad-window``,
+``--train-dp-split-mode stride`` + ``--diffusion-train-cond-pad-window``,
 the refactored pipeline feeds each DP rank / each micro-batch the **same tensors in
 the same order** as the legacy grid-based path.
 
 Layers:
-  L1  DP split            — baseline_stride == legacy range(rank, N, dp)
+  L1  DP split            — stride == legacy range(rank, N, dp), and only
+                            contiguous keeps a rollout microgroup whole on one rank
   L2  Converter           — flat train-pairs == direct sde-indexed trajectory data
   L3  Cond window padding — per-microbatch collate(pad_to_len=window_max)
                             == legacy window-collate-then-tile-slice
@@ -32,11 +33,11 @@ from types import SimpleNamespace
 import torch
 
 from miles.ray.data_conversion_hub.flow_grpo import expand_samples_to_train_pairs
-from miles.utils.train_data_utils import TrainDataDPSplitter
+from miles.utils.train_data_utils import TrainDataDPSplitter, scheduler_meta_from_rollout
 
 
 # --------------------------------------------------------------------------------------
-# L1 — DP split parity: baseline_stride reproduces legacy range(rank, N, dp_size)
+# L1 — DP split parity: stride reproduces legacy range(rank, N, dp_size)
 # --------------------------------------------------------------------------------------
 def _legacy_dp_partition(num_samples: int, dp_size: int):
     return [list(range(r, num_samples, dp_size)) for r in range(dp_size)]
@@ -56,11 +57,11 @@ def _rank_sample_order(shard):
     return seen
 
 
-def test_l1_dp_split_baseline_stride_matches_legacy():
+def test_l1_dp_split_stride_matches_legacy():
     splitter = TrainDataDPSplitter()
     for num_samples, ppp, dp in [(256, 2, 2), (256, 2, 4), (16, 1, 2), (12, 3, 3)]:
         data = _make_flat_pairs(num_samples, ppp)
-        shards = splitter.split_by_dp(data, dp, mode="baseline_stride")
+        shards = splitter.split_by_dp(data, dp, mode="stride")
         expected = _legacy_dp_partition(num_samples, dp)
         for r in range(dp):
             assert _rank_sample_order(shards[r]) == expected[r], (num_samples, dp, r)
@@ -74,8 +75,28 @@ def test_l1_contiguous_differs_from_stride():
     splitter = TrainDataDPSplitter()
     data = _make_flat_pairs(256, 2)
     cont = splitter.split_by_dp(data, 2, mode="contiguous")
-    strd = splitter.split_by_dp(data, 2, mode="baseline_stride")
+    strd = splitter.split_by_dp(data, 2, mode="stride")
     assert _rank_sample_order(cont[0]) != _rank_sample_order(strd[0])
+
+
+def test_l1_only_contiguous_keeps_rollout_microgroups_whole():
+    """A micro-batch can only reproduce a rollout forward if its samples reached one rank.
+
+    8 samples generated as 4 microgroups of 2, split over 2 DP ranks:
+
+        microgroups   [0 1] [2 3] [4 5] [6 7]
+        contiguous    rank0 = 0 1 2 3   -> microgroups {0,1} intact
+        stride        rank0 = 0 2 4 6   -> one sample from every microgroup
+    """
+    splitter = TrainDataDPSplitter()
+    data = _make_flat_pairs(num_samples=8, pairs_per_sample=1)
+    microgroups = [{0, 1}, {2, 3}, {4, 5}, {6, 7}]
+
+    contiguous = set(_rank_sample_order(splitter.split_by_dp(data, 2, mode="contiguous")[0]))
+    stride = set(_rank_sample_order(splitter.split_by_dp(data, 2, mode="stride")[0]))
+
+    assert sum(group <= contiguous for group in microgroups) == 2
+    assert sum(group <= stride for group in microgroups) == 0
 
 
 # --------------------------------------------------------------------------------------
@@ -154,12 +175,16 @@ def test_l2_converter_pairs_match_direct_indexing():
             assert torch.equal(d["rollout_step_noise_std_dev"], s.rollout_debug_tensors.rollout_noise_std_devs[idx])
 
 
-def test_l2_converter_sigmas_optional():
+def test_l2_converter_requires_sigmas():
+    """A trajectory without the rollout sigmas snapshot must raise (no derived fallback)."""
     T, sde = 4, [0, 2]
     samples = [_mk_sample(i, T, sde, with_sigmas=False, with_debug=False) for i in range(2)]
-    out = expand_samples_to_train_pairs(None, samples, [1.0, 2.0], [1.0, 2.0])
-    assert "scheduler_sigmas" not in out
-    assert len(out["train_data"]) == 2 * len(sde)
+    try:
+        expand_samples_to_train_pairs(None, samples, [1.0, 2.0], [1.0, 2.0])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for missing dit_trajectory.sigmas")
 
 
 def test_l2_converter_rejects_mismatched_scheduler_timesteps():
@@ -184,6 +209,22 @@ def test_l2_converter_rejects_mismatched_scheduler_sigmas():
         pass
     else:
         raise AssertionError("expected ValueError for mismatched scheduler_sigmas")
+
+
+def test_scheduler_meta_from_rollout_requires_sigmas():
+    """The train actor consumes the rollout sigmas snapshot verbatim; no timesteps/N fallback."""
+    ts = torch.tensor([999.0, 500.0, 1.0])
+    sig = torch.tensor([1.0, 0.5, 0.001, 0.0])
+    out_ts, out_sig = scheduler_meta_from_rollout(
+        {"scheduler_timesteps": ts, "scheduler_sigmas": sig}, device=torch.device("cpu")
+    )
+    assert torch.equal(out_ts, ts) and torch.equal(out_sig, sig)
+    try:
+        scheduler_meta_from_rollout({"scheduler_timesteps": ts}, device=torch.device("cpu"))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for missing scheduler_sigmas")
 
 
 # --------------------------------------------------------------------------------------

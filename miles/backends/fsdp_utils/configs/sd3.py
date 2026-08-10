@@ -14,6 +14,7 @@ class SD3TrainPipelineConfig(TrainPipelineConfig):
     """Training-side adapters for diffusers SD3Transformer2DModel."""
 
     hf_ckpt_name_patterns = ("stable-diffusion-3", "sd3")
+    cfg_batching = False
 
     lora_target_modules = [
         "attn.to_q",
@@ -25,7 +26,6 @@ class SD3TrainPipelineConfig(TrainPipelineConfig):
         "attn.add_v_proj",
         "attn.to_add_out",
     ]
-    needs_timestep_scaling = False
 
     def prepare_cond_kwargs(self, cond: CondKwargs | None, device: torch.device) -> dict:
         if cond is None:

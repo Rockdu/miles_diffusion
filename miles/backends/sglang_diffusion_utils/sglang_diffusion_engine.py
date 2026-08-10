@@ -1,16 +1,21 @@
+from __future__ import annotations
+
 import dataclasses
 import ipaddress
 import logging
 import multiprocessing
 import os
 import time
+from typing import TYPE_CHECKING
 
 import requests
-from sglang.multimodal_gen.runtime.launch_server import kill_process_tree
-from sglang.multimodal_gen.runtime.server_args import ServerArgs
+from sglang.srt.utils.common import kill_process_tree
 
 from miles.ray.ray_actor import RayActor
 from miles.utils.http_utils import get_host_info
+
+if TYPE_CHECKING:
+    from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +144,8 @@ class SGLangDiffusionEngine(RayActor):
         self._init_normal(server_args_dict)
 
     def _init_normal(self, server_args_dict):
+        from sglang.multimodal_gen.runtime.server_args import ServerArgs
+
         logger.info(f"Launch HttpServerEngineAdapter at: {self.server_host}:{self.server_port}")
         self._pin_to_assigned_gpu()
         from miles.backends.sglang_diffusion_utils.monkey_patches import ROLLOUT_PATCH_GROUPS_ENV
@@ -165,14 +172,15 @@ class SGLangDiffusionEngine(RayActor):
     def _pin_to_assigned_gpu(self):
         if self.base_gpu_id is None:
             return
+        span = self.args.rollout_num_gpus_per_engine
         cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         if not cvd:
-            # No ambient device list (full-node multi-node ray start): pin to the physical GPU.
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(self.base_gpu_id)
+            # No ambient device list (full-node multi-node ray start): pin to the physical GPUs.
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(self.base_gpu_id + i) for i in range(span))
             return
         visible = [x.strip() for x in cvd.split(",") if x.strip()]
         local_idx = _to_local_gpu_id(self.base_gpu_id)
-        pinned = visible[local_idx]
+        pinned = ",".join(visible[local_idx : local_idx + span])
         os.environ["CUDA_VISIBLE_DEVICES"] = pinned
         logger.info(
             f"Engine rank={self.rank}: pinned CUDA_VISIBLE_DEVICES={pinned} "
@@ -226,6 +234,7 @@ class SGLangDiffusionEngine(RayActor):
     def update_weights_from_tensor(
         self,
         serialized_named_tensors: list[str],
+        payload_gpu_uuids: list[str],
         load_format: str | None = None,
         target_modules: list[str] | None = None,
         weight_version: str | None = None,
@@ -241,6 +250,7 @@ class SGLangDiffusionEngine(RayActor):
         """
         payload = {
             "serialized_named_tensors": serialized_named_tensors,
+            "payload_gpu_uuids": payload_gpu_uuids,
             "load_format": load_format,
         }
         if target_modules is not None:
@@ -300,6 +310,8 @@ class SGLangDiffusionEngine(RayActor):
 
 
 def _compute_server_args(args, host, port, nccl_port):
+    from sglang.multimodal_gen.runtime.server_args import ServerArgs
+
     # Only set fields SGL-D's ServerArgs actually accepts. GPU pinning is done
     # in `_init_normal` via CUDA_VISIBLE_DEVICES — SGL-D has no base_gpu_id arg.
     kwargs = {
@@ -310,12 +322,13 @@ def _compute_server_args(args, host, port, nccl_port):
         "nccl_port": nccl_port,
         # Distinct per engine so concurrent settle_port() probes don't race on the default.
         "master_port": nccl_port + 10000 if nccl_port is not None else None,
-        # Must match rollout allocation, not user CLI.
-        "tp_size": args.rollout_num_gpus_per_engine,
+        # SGL-D runs one worker per num_gpus; tp_size * sp_degree splits that span.
+        "num_gpus": args.rollout_num_gpus_per_engine,
+        "tp_size": args.sglang_tp_size,
         "sp_degree": args.sglang_sp_degree,
         "enable_cfg_parallel": args.sglang_enable_cfg_parallel,
         # Skip warmup to avoid timeout during RL rollouts.
-        "warmup": False,
+        "warmup_mode": "off",
     }
 
     if getattr(args, "diffusion_flow_shift", None) is not None:

@@ -26,7 +26,9 @@ def register_train_pipeline_config(family: str):
     """Decorator: register a TrainPipelineConfig subclass under a family key (``sd3``, ``wan``, ...)."""
 
     def wrapper(cls):
-        _REGISTRY[family.lower()] = cls
+        model_family = family.lower()
+        cls.model_family = model_family
+        _REGISTRY[model_family] = cls
         return cls
 
     return wrapper
@@ -74,14 +76,16 @@ def get_train_pipeline_config_cls(family: str) -> type[TrainPipelineConfig]:
 class TrainPipelineConfig(abc.ABC):
     """Base class. Subclass per model family."""
 
+    model_family: str | None = None
     lora_target_modules: list[str] = ["to_q", "to_k", "to_v", "to_out.0"]
-    needs_timestep_scaling: bool = True
     optimizer_state_allowed_missing: list[str] = []
     # Case-insensitive substrings matched against the checkpoint name (--diffusion-model).
     hf_ckpt_name_patterns: tuple[str, ...] = ()
     supports_cfg_training: bool = True
-    # Rollout parity patch group applied by the engine (see monkey_patches; None = none).
-    rollout_patch_group: str | None = None
+    # Mirrors serial sgl-d serving; not valid when the rollout engine runs --enable-cfg-parallel (branches split per rank, different combine formula).
+    cfg_batching: bool = False
+    # Model-boundary input dtypes (see input_dtype_policy); families opt into casts explicitly.
+    input_dtype_policy: dict = {"latents": None, "cond": None, "timestep": None}
     # Default component paths (miles custom-function style); CLI args override.
     model_backend_path: str = "miles.backends.fsdp_utils.model_backend.DiffusersModelBackend"
     # Native model package import path; required when model_backend_path is MilesModelBackend.
@@ -95,6 +99,11 @@ class TrainPipelineConfig(abc.ABC):
 
     def configure(self, args) -> None:  # noqa: B027  optional no-op hook, not abstract
         """Bind the request constants a family needs at train time; default binds none."""
+
+    def process_timestep_as_input(self, timesteps: torch.Tensor) -> torch.Tensor:
+        """The trajectory timestep as this family's DiT takes it, rescaled the way its own
+        sglang-d DiT rescales it -- the arithmetic has to match, not just the value."""
+        return timesteps
 
     def compute_noise_pred(
         self,

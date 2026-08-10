@@ -1,0 +1,408 @@
+"""Four-GPU end-to-end parity tests for the FSDP param-dtype patch.
+
+Test matrix:
+
+    full-size block                 data-parallel topology
+    +----------------------+        +----------------------+
+    | Wan 2.2              |   x    | FSDP: 1 x 4 shards  |
+    | LTX 2.3              |        | HSDP: 2 x 2 mesh    |
+    +----------------------+        +----------------------+
+                |
+                v
+    deterministic model parameters + per-rank Gaussian inputs
+                |
+      +---------+---------------------------+
+      | before installing the patch         |
+      |                                     |
+      | standard BF16 ------> BF16 reference|
+      | nested FP32 wraps --> FP32 reference|
+      +---------+---------------------------+
+                |
+                v
+          install Miles patch
+                |
+      +---------+---------------------------+
+      | patched standard BF16 --bitwise----> BF16 reference
+      | all-BF16 dtype map -----bitwise----> BF16 reference
+      | mapped FP32 params ------bitwise----> nested FP32 reference
+      +-------------------------------------+
+
+Each path runs a real forward and backward. A forward-pre-hook observes parameters
+after all-gather and checks the complete FQN set, dtype, logical shape, and numel,
+including parameters that require dim-0 shard padding. FP32 boundary hooks make
+the mapped and nested paths use identical input/output casting semantics. Final
+outputs and reconstructed full gradients must be bitwise equal.
+"""
+
+import gc
+import os
+from dataclasses import dataclass
+
+import torch
+import torch.distributed as dist
+from diffusers.models.transformers.transformer_ltx2 import LTX2VideoTransformerBlock
+from diffusers.models.transformers.transformer_wan import WanTransformerBlock
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
+from torch.distributed.tensor import DTensor
+from torch.nn.attention import SDPBackend, sdpa_kernel
+
+from miles.backends.fsdp_utils.monkey_patches import fsdp_param_dtype_patch
+
+MODEL_NAMES = ("wan2_2", "ltx2_3")
+TOPOLOGIES = ("fully_shard_1x4", "hybrid_shard_2x2")
+FP32_MODULES = {
+    "wan2_2": ("attn1.to_q", "attn2.to_out.0", "ffn.net.2"),
+    "ltx2_3": ("attn1.to_q", "audio_attn1.to_q", "audio_ff.net.2"),
+}
+MODEL_SEED = 42
+INPUT_SEED = 123
+
+
+@dataclass
+class RunResult:
+    outputs: tuple[torch.Tensor, ...]
+    grads: dict[str, torch.Tensor | None]
+
+
+def _create_wan_case(rank):
+    torch.manual_seed(MODEL_SEED)
+    model = WanTransformerBlock(
+        dim=5120,
+        ffn_dim=13824,
+        num_heads=40,
+        cross_attn_norm=True,
+    ).cuda()
+    torch.manual_seed(INPUT_SEED + rank)
+    inputs = (
+        torch.randn(1, 3, 5120, device="cuda"),
+        torch.randn(1, 2, 5120, device="cuda"),
+        torch.randn(1, 6, 5120, device="cuda"),
+        None,
+    )
+    return model, inputs
+
+
+def _create_ltx_case(rank):
+    torch.manual_seed(MODEL_SEED)
+    model = LTX2VideoTransformerBlock(
+        dim=4096,
+        num_attention_heads=32,
+        attention_head_dim=128,
+        cross_attention_dim=4096,
+        audio_dim=2048,
+        audio_num_attention_heads=32,
+        audio_attention_head_dim=64,
+        audio_cross_attention_dim=2048,
+    ).cuda()
+    torch.manual_seed(INPUT_SEED + rank)
+    inputs = (
+        torch.randn(1, 3, 4096, device="cuda"),
+        torch.randn(1, 2, 2048, device="cuda"),
+        torch.randn(1, 2, 4096, device="cuda"),
+        torch.randn(1, 2, 2048, device="cuda"),
+        torch.randn(1, 1, 6 * 4096, device="cuda"),
+        torch.randn(1, 1, 6 * 2048, device="cuda"),
+        torch.randn(1, 1, 4 * 4096, device="cuda"),
+        torch.randn(1, 1, 4 * 2048, device="cuda"),
+        torch.randn(1, 1, 4096, device="cuda"),
+        torch.randn(1, 1, 2048, device="cuda"),
+    )
+    return model, inputs
+
+
+def _create_case(model_name, rank):
+    if model_name == "wan2_2":
+        return _create_wan_case(rank)
+    if model_name == "ltx2_3":
+        return _create_ltx_case(rank)
+    raise AssertionError(f"Unknown model {model_name}")
+
+
+def _create_mesh(topology):
+    if topology == "fully_shard_1x4":
+        return init_device_mesh(
+            "cuda",
+            (4,),
+            mesh_dim_names=("dp_shard",),
+        )
+    if topology == "hybrid_shard_2x2":
+        return init_device_mesh(
+            "cuda",
+            (2, 2),
+            mesh_dim_names=("dp_replicate", "dp_shard"),
+        )
+    raise AssertionError(f"Unknown topology {topology}")
+
+
+def _as_output_tuple(output):
+    return output if isinstance(output, tuple) else (output,)
+
+
+def _full_grad(param):
+    if param.grad is None:
+        return None
+    grad = param.grad
+    if isinstance(grad, DTensor):
+        grad = grad.full_tensor()
+    return grad.detach().clone()
+
+
+def _assert_bitwise_equal(actual, expected, context):
+    assert actual.dtype == expected.dtype, f"{context}: expected dtype {expected.dtype}, got {actual.dtype}"
+    assert actual.shape == expected.shape, f"{context}: expected shape {expected.shape}, got {actual.shape}"
+    assert torch.equal(actual, expected), f"{context}: tensors are not bitwise equal"
+
+
+def _assert_run_equal(actual, expected, context):
+    assert len(actual.outputs) == len(expected.outputs)
+    for index, (actual_output, expected_output) in enumerate(zip(actual.outputs, expected.outputs, strict=True)):
+        _assert_bitwise_equal(
+            actual_output,
+            expected_output,
+            f"{context} output {index}",
+        )
+    assert actual.grads.keys() == expected.grads.keys()
+    for name in actual.grads:
+        actual_grad = actual.grads[name]
+        expected_grad = expected.grads[name]
+        if actual_grad is None or expected_grad is None:
+            assert actual_grad is expected_grad, f"{context} grad {name}"
+        else:
+            _assert_bitwise_equal(
+                actual_grad,
+                expected_grad,
+                f"{context} grad {name}",
+            )
+
+
+def _register_unsharded_param_hook(
+    model,
+    expected_shapes,
+    expected_dtypes,
+):
+    hook_calls = []
+
+    def check_unsharded_params(module, _inputs):
+        params = dict(module.named_parameters())
+        assert params.keys() == expected_shapes.keys()
+        for name, param in params.items():
+            expected_shape = expected_shapes[name]
+            assert (
+                tuple(param.shape) == expected_shape
+            ), f"{name}: expected shape {expected_shape}, got {tuple(param.shape)}"
+            assert param.numel() == expected_shape.numel(), (
+                f"{name}: expected {expected_shape.numel()} elements, " f"got {param.numel()}"
+            )
+            assert param.dtype == expected_dtypes[name], (
+                f"{name}: expected dtype {expected_dtypes[name]}, " f"got {param.dtype}"
+            )
+        hook_calls.append(True)
+
+    model.register_forward_pre_hook(check_unsharded_params)
+    return hook_calls
+
+
+def _selected_param_fqns(model, model_name):
+    fqns = []
+    for module_fqn in FP32_MODULES[model_name]:
+        module = model.get_submodule(module_fqn)
+        fqns.extend(f"{module_fqn}.{param_fqn}" for param_fqn, _ in module.named_parameters())
+    return fqns
+
+
+def _register_fp32_boundaries(model, model_name):
+    hook_calls = {}
+
+    for module_fqn in FP32_MODULES[model_name]:
+        module = model.get_submodule(module_fqn)
+        expected_shapes = {name: param.shape for name, param in module.named_parameters()}
+        calls = []
+        hook_calls[module_fqn] = calls
+
+        def cast_inputs(
+            gathered_module,
+            inputs,
+            *,
+            expected_shapes=expected_shapes,
+            calls=calls,
+        ):
+            params = dict(gathered_module.named_parameters())
+            assert params.keys() == expected_shapes.keys()
+            for name, param in params.items():
+                assert param.dtype == torch.float32
+                assert param.shape == expected_shapes[name]
+                assert param.numel() == expected_shapes[name].numel()
+            calls.append(True)
+            return tuple(
+                value.float() if isinstance(value, torch.Tensor) and value.is_floating_point() else value
+                for value in inputs
+            )
+
+        def cast_outputs(_module, _inputs, output):
+            return output.to(torch.bfloat16)
+
+        module.register_forward_pre_hook(cast_inputs)
+        module.register_forward_hook(cast_outputs)
+
+    return hook_calls
+
+
+def _run_case(
+    model_name,
+    topology,
+    mesh,
+    policy_kind,
+    rank,
+):
+    model, inputs = _create_case(model_name, rank)
+    expected_shapes = {name: param.shape for name, param in model.named_parameters()}
+    shard_size = 4 if topology == "fully_shard_1x4" else 2
+    assert any(
+        len(shape) > 0 and shape[0] % shard_size != 0 for shape in expected_shapes.values()
+    ), f"{model_name} does not exercise dim-0 padding for shard size {shard_size}"
+
+    selected_fqns = _selected_param_fqns(model, model_name)
+    expected_dtypes = dict.fromkeys(expected_shapes, torch.bfloat16)
+    boundary_hooks = {}
+    if policy_kind == "all_bf16_map":
+        param_dtype_map = {name: torch.bfloat16 for name in expected_shapes}
+        mp_policy = fsdp_param_dtype_patch.ParamDtypeMixedPrecisionPolicy(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            param_dtype_map=param_dtype_map,
+        )
+    elif policy_kind == "nested_fp32":
+        fp32_policy = MixedPrecisionPolicy(
+            param_dtype=torch.float32,
+            reduce_dtype=torch.float32,
+            cast_forward_inputs=False,
+        )
+        for module_fqn in FP32_MODULES[model_name]:
+            fully_shard(
+                model.get_submodule(module_fqn),
+                mesh=mesh,
+                mp_policy=fp32_policy,
+            )
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+        )
+        expected_dtypes.update(dict.fromkeys(selected_fqns, torch.float32))
+    elif policy_kind == "mapped_fp32":
+        mp_policy = fsdp_param_dtype_patch.ParamDtypeMixedPrecisionPolicy(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            param_dtype_map=dict.fromkeys(selected_fqns, torch.float32),
+        )
+        expected_dtypes.update(dict.fromkeys(selected_fqns, torch.float32))
+    else:
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+        )
+
+    fully_shard(model, mesh=mesh, mp_policy=mp_policy)
+    hook_calls = _register_unsharded_param_hook(
+        model,
+        expected_shapes,
+        expected_dtypes,
+    )
+    if policy_kind in ("nested_fp32", "mapped_fp32"):
+        boundary_hooks = _register_fp32_boundaries(model, model_name)
+    with sdpa_kernel(SDPBackend.MATH):
+        output = model(*inputs)
+        output_tuple = _as_output_tuple(output)
+        sum(tensor.float().sum() for tensor in output_tuple).backward()
+    assert len(hook_calls) == 1
+    assert all(len(calls) == 1 for calls in boundary_hooks.values())
+
+    result = RunResult(
+        outputs=tuple(tensor.detach().clone() for tensor in output_tuple),
+        grads={name: _full_grad(param) for name, param in model.named_parameters()},
+    )
+    del model, inputs, output, output_tuple
+    gc.collect()
+    torch.cuda.empty_cache()
+    dist.barrier()
+    return result
+
+
+def main():
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(
+        "nccl",
+        device_id=torch.device("cuda", local_rank),
+    )
+    torch.use_deterministic_algorithms(True)
+    rank = dist.get_rank()
+    meshes = {topology: _create_mesh(topology) for topology in TOPOLOGIES}
+
+    references = {}
+    nested_references = {}
+    for model_name in MODEL_NAMES:
+        for topology in TOPOLOGIES:
+            references[(model_name, topology)] = _run_case(
+                model_name,
+                topology,
+                meshes[topology],
+                "unpatched",
+                rank,
+            )
+            nested_references[(model_name, topology)] = _run_case(
+                model_name,
+                topology,
+                meshes[topology],
+                "nested_fp32",
+                rank,
+            )
+
+    fsdp_param_dtype_patch.apply_param_dtype_map_patch()
+    for model_name in MODEL_NAMES:
+        for topology in TOPOLOGIES:
+            reference = references[(model_name, topology)]
+            patched = _run_case(
+                model_name,
+                topology,
+                meshes[topology],
+                "patched_standard",
+                rank,
+            )
+            _assert_run_equal(
+                patched,
+                reference,
+                f"{model_name} {topology} patched standard policy",
+            )
+            mapped = _run_case(
+                model_name,
+                topology,
+                meshes[topology],
+                "all_bf16_map",
+                rank,
+            )
+            _assert_run_equal(
+                mapped,
+                reference,
+                f"{model_name} {topology} all-BF16 map",
+            )
+            mapped_fp32 = _run_case(
+                model_name,
+                topology,
+                meshes[topology],
+                "mapped_fp32",
+                rank,
+            )
+            _assert_run_equal(
+                mapped_fp32,
+                nested_references[(model_name, topology)],
+                f"{model_name} {topology} mapped vs nested FP32",
+            )
+
+    if rank == 0:
+        print("OK")
+    dist.destroy_process_group()
+
+
+if __name__ == "__main__":
+    main()

@@ -5,7 +5,6 @@ from __future__ import annotations
 import torch
 
 from miles.backends.fsdp_utils.loss_hub.types import DiffusionLossContext, PreparedBatch
-from miles.backends.fsdp_utils.loss_hub.utils import cast_cond_to_dtype
 from miles.backends.fsdp_utils.metrics import record_rollout_train_abs_diff
 from miles.utils.metric_buffer import MetricBuffer
 from miles.utils.train_data_utils import stack_train_pair_rollout_debug
@@ -63,10 +62,7 @@ def prepare_flow_grpo_batch(
             args.diffusion_guidance_scale_2,
         )
 
-    if config.needs_timestep_scaling:
-        timesteps_for_model = timesteps / float(num_train_timesteps)
-    else:
-        timesteps_for_model = timesteps
+    timesteps_for_model = config.process_timestep_as_input(timesteps)
 
     pos_list = [config.prepare_cond_kwargs(batch[i]["denoising_env"].pos_cond_kwargs, device) for i in range(bsz)]
     neg_list = (
@@ -74,23 +70,14 @@ def prepare_flow_grpo_batch(
         if use_cfg
         else None
     )
-    cfg_batching = use_cfg and bool(args.fsdp_cfg_batching)
+    cfg_batching = use_cfg and config.cfg_batching
     joint_cond = pos_cond = neg_cond = None
     if cfg_batching:
-        joint_cond = cast_cond_to_dtype(
-            config.collate_cond_for_sample_batch(pos_list + neg_list, device, pad_to_len=pad_to_len),
-            ctx.forward_dtype,
-        )
+        joint_cond = config.collate_cond_for_sample_batch(pos_list + neg_list, device, pad_to_len=pad_to_len)
     else:
-        pos_cond = cast_cond_to_dtype(
-            config.collate_cond_for_sample_batch(pos_list, device, pad_to_len=pad_to_len),
-            ctx.forward_dtype,
-        )
+        pos_cond = config.collate_cond_for_sample_batch(pos_list, device, pad_to_len=pad_to_len)
         if use_cfg and neg_list is not None:
-            neg_cond = cast_cond_to_dtype(
-                config.collate_cond_for_sample_batch(neg_list, device, pad_to_len=pad_to_len),
-                ctx.forward_dtype,
-            )
+            neg_cond = config.collate_cond_for_sample_batch(neg_list, device, pad_to_len=pad_to_len)
 
     return PreparedBatch(
         latents=latents,

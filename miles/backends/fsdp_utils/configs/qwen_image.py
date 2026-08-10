@@ -57,6 +57,10 @@ def _rebuild_pos_embed_freqs_on_cuda(model) -> None:
 @register_train_pipeline_config("qwen_image")
 class QwenImageTrainPipelineConfig(TrainPipelineConfig):
     hf_ckpt_name_patterns = ("qwen-image",)
+    cfg_batching = False
+
+    def process_timestep_as_input(self, timesteps):
+        return timesteps / 1000.0
 
     lora_target_modules = [
         "to_q",
