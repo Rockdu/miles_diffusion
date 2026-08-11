@@ -107,3 +107,33 @@ class TestProcessTimestepAsInput:
         out = QwenImageTrainPipelineConfig.process_timestep_as_input(QwenImageTrainPipelineConfig, self.TIMESTEPS)
         # One division, like the rollout: any rewrite of the expression drifts ULPs.
         assert torch.equal(out, self.TIMESTEPS / 1000.0)
+
+
+class TestProcessSigmaAsInput:
+    # What a family hands its DiT for NFT, whose grid is sigma in [0, 1] off scheduler.sigmas
+    # rather than a trajectory timestep. The rescaling runs the opposite direction from
+    # process_timestep_as_input, which is why NFT needs its own hook:
+    #
+    #   sd3, wan2_2   sigma * N   the DiT wants the raw scheduler range back
+    #   qwen_image    sigma       already the normalized quantity the DiT takes
+    NUM_TRAIN_TIMESTEPS = 1000
+    # 0.8474337458610535 is one of the ~2% of float32 sigmas where a multiply by 1000 followed
+    # by a divide by 1000 does not land back on the input.
+    SIGMAS = torch.tensor([0.8474337458610535, 0.5])
+
+    @pytest.mark.parametrize("config_cls", [SD3TrainPipelineConfig, Wan2_2TrainPipelineConfig])
+    def test_scales_up_to_the_scheduler_range(self, config_cls):
+        out = config_cls.process_sigma_as_input(config_cls, self.SIGMAS, num_train_timesteps=self.NUM_TRAIN_TIMESTEPS)
+        assert torch.equal(out, self.SIGMAS * float(self.NUM_TRAIN_TIMESTEPS))
+
+    def test_qwen_image_passes_the_sigma_through(self):
+        out = QwenImageTrainPipelineConfig.process_sigma_as_input(
+            QwenImageTrainPipelineConfig, self.SIGMAS, num_train_timesteps=self.NUM_TRAIN_TIMESTEPS
+        )
+        # Bit-exact, not merely close: routing this through process_timestep_as_input instead
+        # would multiply then divide by 1000 and drift a ULP on the first element.
+        assert torch.equal(out, self.SIGMAS)
+        round_tripped = QwenImageTrainPipelineConfig.process_timestep_as_input(
+            QwenImageTrainPipelineConfig, self.SIGMAS * float(self.NUM_TRAIN_TIMESTEPS)
+        )
+        assert not torch.equal(round_tripped, self.SIGMAS)

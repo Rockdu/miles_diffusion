@@ -8,8 +8,11 @@ from argparse import Namespace
 
 import torch
 
+from miles.backends.fsdp_utils.configs.qwen_image import QwenImageTrainPipelineConfig
+from miles.backends.fsdp_utils.configs.train_pipeline_config import TrainPipelineConfig
 from miles.backends.fsdp_utils.ema import EmaShadow
-from miles.backends.fsdp_utils.loss_hub.nft import corrupt, nft_r_from_advantages
+from miles.backends.fsdp_utils.loss_hub.nft import corrupt, nft_r_from_advantages, prepare_nft_batch
+from miles.backends.fsdp_utils.loss_hub.types import DiffusionLossContext
 from miles.ray.data_conversion_hub.nft import expand_samples_to_train_pairs, resolve_nft_sigmas
 from miles.utils.types import Sample
 
@@ -118,6 +121,89 @@ class TestNftHooks:
             assert "sigmas" in str(e)
         else:
             raise AssertionError("expected ValueError for missing dit_trajectory.sigmas")
+
+
+class _StubConfig:
+    """Cond plumbing stubbed out; both timestep hooks are bound so that a prepare hook wired to
+    the wrong one fails on the numbers rather than on a missing attribute."""
+
+    process_timestep_as_input = TrainPipelineConfig.process_timestep_as_input
+    process_sigma_as_input = TrainPipelineConfig.process_sigma_as_input
+
+    def prepare_cond_kwargs(self, cond, device):
+        return {}
+
+    def collate_cond_for_sample_batch(self, per_sample_cond_kwargs, device, pad_to_len=None):
+        return {}
+
+
+class _Sd3StyleConfig(_StubConfig):
+    # sd3, wan2_2 and ltx all inherit both base hooks.
+    pass
+
+
+class _QwenStyleConfig(_StubConfig):
+    process_timestep_as_input = QwenImageTrainPipelineConfig.process_timestep_as_input
+    process_sigma_as_input = QwenImageTrainPipelineConfig.process_sigma_as_input
+
+
+class TestPrepareNftBatch:
+    # NFT's pair timestep is a sigma in [0, 1] off scheduler.sigmas, so prepare has to route it
+    # through process_sigma_as_input. Sending it through process_timestep_as_input instead means
+    # scaling up by N only for the normalizing families to divide it straight back out.
+    NUM_TRAIN_TIMESTEPS = 1000
+    SIGMAS = [0.8474337458610535, 0.5]
+
+    class _Env:
+        pos_cond_kwargs = None
+        neg_cond_kwargs = None
+
+    def _ctx(self, config):
+        return DiffusionLossContext(
+            models={"transformer": torch.nn.Identity()},
+            train_pipeline_config=config,
+            sde_backend=None,
+            scheduler=Namespace(config=Namespace(num_train_timesteps=self.NUM_TRAIN_TIMESTEPS)),
+            args=Namespace(seed=42),
+            forward_dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+
+    def _batch(self):
+        return [
+            {
+                "x0": torch.zeros(2, 2),
+                "timestep": sigma,
+                "denoising_env": self._Env(),
+                "advantage": 1.0,
+                "nft_num_timesteps": len(self.SIGMAS),
+            }
+            for sigma in self.SIGMAS
+        ]
+
+    def test_raw_sigma_reaches_the_family_hook(self):
+        seen = {}
+
+        class _Recording(_StubConfig):
+            def process_sigma_as_input(self, sigmas, *, num_train_timesteps):
+                seen["sigmas"] = sigmas.clone()
+                seen["num_train_timesteps"] = num_train_timesteps
+                return sigmas
+
+        prepare_nft_batch(self._ctx(_Recording()), self._batch())
+        # The un-rescaled sigma, not sigma * N: the family decides which direction to go.
+        assert torch.equal(seen["sigmas"], torch.tensor(self.SIGMAS))
+        assert seen["num_train_timesteps"] == self.NUM_TRAIN_TIMESTEPS
+
+    def test_sd3_style_family_gets_the_scheduler_range(self):
+        prepared = prepare_nft_batch(self._ctx(_Sd3StyleConfig()), self._batch())
+        assert torch.equal(prepared.timesteps, torch.tensor(self.SIGMAS))
+        assert torch.equal(prepared.timesteps_for_model, torch.tensor(self.SIGMAS) * float(self.NUM_TRAIN_TIMESTEPS))
+
+    def test_qwen_style_family_gets_the_sigma_bit_exactly(self):
+        prepared = prepare_nft_batch(self._ctx(_QwenStyleConfig()), self._batch())
+        # Bit-exact: the multiply-then-divide round trip drifts a ULP on the first sigma.
+        assert torch.equal(prepared.timesteps_for_model, torch.tensor(self.SIGMAS))
 
 
 class TestEmaShadow:

@@ -106,6 +106,15 @@ class TrainPipelineConfig(abc.ABC):
         sglang-d DiT rescales it -- the arithmetic has to match, not just the value."""
         return timesteps
 
+    def process_sigma_as_input(self, sigmas: torch.Tensor, *, num_train_timesteps: int) -> torch.Tensor:
+        """The NFT training sigma as this family's DiT takes it. NFT draws its own grid off
+        ``scheduler.sigmas``, so it starts from sigma in [0, 1] rather than a trajectory
+        timestep in [0, num_train_timesteps): the families that need no rescaling above need
+        one here, and vice versa. Separate hook, not a reuse of process_timestep_as_input --
+        composing the two round-trips the value through a multiply and a divide that do not
+        cancel in float32."""
+        return sigmas * float(num_train_timesteps)
+
     def compute_noise_pred(
         self,
         *,

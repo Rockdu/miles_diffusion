@@ -62,6 +62,10 @@ class QwenImageTrainPipelineConfig(TrainPipelineConfig):
     def process_timestep_as_input(self, timesteps):
         return timesteps / 1000.0
 
+    def process_sigma_as_input(self, sigmas, *, num_train_timesteps):
+        # NFT's sigma is already the normalized quantity this DiT takes; hand it over untouched.
+        return sigmas
+
     lora_target_modules = [
         "to_q",
         "to_k",
