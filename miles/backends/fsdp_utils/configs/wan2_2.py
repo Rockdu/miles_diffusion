@@ -16,8 +16,6 @@ class Wan2_2TrainPipelineConfig(TrainPipelineConfig):
     # ("transformer_2") the rest.
     boundary_ratio = 0.875
 
-    # Wan DiT expects raw scheduler timesteps (0..num_train_timesteps), no /1000 scaling: it
-    # inherits the identity process_timestep_as_input and the scaling process_sigma_as_input.
     def component_for_timestep(self, timestep: float, num_train_timesteps: int) -> str:
         if timestep >= self.boundary_ratio * num_train_timesteps:
             return "transformer"

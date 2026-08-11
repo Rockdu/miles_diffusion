@@ -124,8 +124,8 @@ class TestNftHooks:
 
 
 class _StubConfig:
-    """Cond plumbing stubbed out; both timestep hooks are bound so that a prepare hook wired to
-    the wrong one fails on the numbers rather than on a missing attribute."""
+    """Cond plumbing stubbed out. Binds both timestep hooks so that a prepare wired to the wrong
+    one fails on the numbers rather than on a missing attribute."""
 
     process_timestep_as_input = TrainPipelineConfig.process_timestep_as_input
     process_sigma_as_input = TrainPipelineConfig.process_sigma_as_input
@@ -138,7 +138,7 @@ class _StubConfig:
 
 
 class _Sd3StyleConfig(_StubConfig):
-    # sd3, wan2_2 and ltx all inherit both base hooks.
+    # Stands in for sd3, wan2_2 and ltx, which all inherit both base hooks.
     pass
 
 
@@ -148,10 +148,9 @@ class _QwenStyleConfig(_StubConfig):
 
 
 class TestPrepareNftBatch:
-    # NFT's pair timestep is a sigma in [0, 1] off scheduler.sigmas, so prepare has to route it
-    # through process_sigma_as_input. Sending it through process_timestep_as_input instead means
-    # scaling up by N only for the normalizing families to divide it straight back out.
     NUM_TRAIN_TIMESTEPS = 1000
+    # 0.8474337458610535 is one of the ~2% of float32 sigmas that a multiply by 1000 followed by
+    # a divide by 1000 does not return unchanged.
     SIGMAS = [0.8474337458610535, 0.5]
 
     class _Env:
@@ -191,7 +190,6 @@ class TestPrepareNftBatch:
                 return sigmas
 
         prepare_nft_batch(self._ctx(_Recording()), self._batch())
-        # The un-rescaled sigma, not sigma * N: the family decides which direction to go.
         assert torch.equal(seen["sigmas"], torch.tensor(self.SIGMAS))
         assert seen["num_train_timesteps"] == self.NUM_TRAIN_TIMESTEPS
 
@@ -202,7 +200,7 @@ class TestPrepareNftBatch:
 
     def test_qwen_style_family_gets_the_sigma_bit_exactly(self):
         prepared = prepare_nft_batch(self._ctx(_QwenStyleConfig()), self._batch())
-        # Bit-exact: the multiply-then-divide round trip drifts a ULP on the first sigma.
+        # equal, not allclose: routing through process_timestep_as_input would still pass allclose.
         assert torch.equal(prepared.timesteps_for_model, torch.tensor(self.SIGMAS))
 
 
