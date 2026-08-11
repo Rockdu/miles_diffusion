@@ -1,19 +1,18 @@
 ---
 title: Quick Start
-description: A working Flow-GRPO training job on SD3.5 + OCR — 2 GPUs, using the Flow-GRPO OCR dataset (`flowgrpo_ocr`).
+description: A working Flow-GRPO training job on SD3.5 + OCR — default script uses 2 GPUs, using the Flow-GRPO OCR dataset (`flowgrpo_ocr`).
 ---
 This page takes you from `docker pull` to a running **Flow-GRPO** job on
-**Stable Diffusion 3.5 Medium** with **OCR** reward. It assumes a Linux node
-with at least **2 GPUs** and Hugging Face access to the gated SD3.5 checkpoint.
+**Stable Diffusion 3.5 Medium** with **OCR** reward. The launch script below
+targets **2 GPUs** (colocate train + rollout). You need Hugging Face access to the gated SD3.5
+checkpoint.
 
 Installation and environment setup are documented separately — this page starts
 inside a ready container or machine.
 
 For other models and recipes (including DiffusionNFT + PickScore), see
-[Models](/models/index). This quick start covers the Flow-GRPO OCR path only —
-the full SD3 write-up (both recipes, batch/GPU config, reference
-`rollout/reward/raw_mean` curves, precision notes) lives in the
-[SD3 model guide](/models/sd3/sd3).
+[Models](/models/index). Deeper SD3 recipe config and reference curves are in
+the [SD3 model guide](/models/sd3/sd3).
 
 ## 1. Start the container
 
@@ -102,10 +101,6 @@ After a minute or two you should see iteration logs along these lines:
 [trainer]  rollout 1/600 | reward=0.31 loss=... log_prob_diff=... rollout=...s train=...s
 ```
 
-GPU layout, batch sizing, SDE flags, and reference training curves are in the
-[SD3 model guide](/models/sd3/sd3) (§6 recipe configuration, §9 reference
-results) — not repeated here.
-
 To finish faster while debugging, override rollout count (default **600**):
 
 ```bash
@@ -114,14 +109,8 @@ python3 scripts/run_diffusion_grpo_sd3_ocr_sglang.py \
   --num-rollout 2
 ```
 
-Equivalent env vars (any `ScriptArgs` field accepts `MILES_SCRIPT_<FIELD>`):
-
-```bash
-MILES_SCRIPT_NUM_ROLLOUT=2 MILES_SCRIPT_CUDA_VISIBLE_DEVICES=6,7 \
-  python3 scripts/run_diffusion_grpo_sd3_ocr_sglang.py
-```
-
-For train/rollout alignment debugging:
+Any `ScriptArgs` field also accepts `MILES_SCRIPT_<FIELD>` (e.g.
+`MILES_SCRIPT_NUM_ROLLOUT=2`). For train/rollout alignment debugging:
 
 ```bash
 MILES_SCRIPT_DEBUG_ALIGNMENT=1 python3 scripts/run_diffusion_grpo_sd3_ocr_sglang.py
@@ -154,8 +143,8 @@ level 0.7, and CFG 4.5. `--deterministic-mode` and `--global-batch-size 64`
 match the CI e2e recipe. Train-side dynamics go through the
 [SDE step backend](/advanced/sde-backend).
 
-**DiffusionNFT + PickScore** (3 GPUs, ODE, EMA reference) is a separate recipe —
-see [SD3 model guide](/models/sd3/sd3) §5.3.
+**DiffusionNFT + PickScore** (3 GPUs, ODE, EMA reference) is a separate recipe
+covered in the SD3 model guide.
 
 ## Inspecting a run
 
@@ -166,6 +155,3 @@ see [SD3 model guide](/models/sd3/sd3) §5.3.
 | Policy loss stable? | `train/loss`, `train/kl_loss` |
 | Rollout or train bottleneck? | `perf/rollout_time`, `perf/train_time` |
 | Generated images? | WandB `rollout_media/sample_images` |
-
-Compare your `rollout/reward/raw_mean` against the reference plots in the
-[SD3 model guide](/models/sd3/sd3) §9.

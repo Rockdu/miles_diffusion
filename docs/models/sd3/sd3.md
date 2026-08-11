@@ -96,22 +96,12 @@ All recipes are Python modules under `scripts/`. Each exposes a Typer CLI
 `command_utils.execute_train`. Common overrides: `--cuda-visible-devices`,
 `--num-rollout`, `--data-dir`, `--extra-args`.
 
-<Note>
-Script names that include **`Ngpu`** count **total** GPUs — train colocate
-**plus** any dedicated reward worker. Example: `pickscore_5gpu` = 4 train +
-1 PickScore GPU.
-</Note>
-
 ### 5.1 Script inventory
 
-| Script | Model | Reward | GPUs | Algorithm |
-|---|---|---|---|---|
-| `run_diffusion_grpo_sd3_ocr_sglang.py` | SD3.5 | OCR (CPU) | 2 colocate | Flow-GRPO |
-| `run_diffusion_nft_sd3_pickscore.py` | SD3.5 | PickScore | 3 (2+1) | DiffusionNFT |
-| `run_diffusion_grpo_pickscore_5gpu_flowgrpo_aligned.py` | Qwen-Image | PickScore | 5 (4+1) | Flow-GRPO (flow_grpo parity) |
-| `run_diffusion_grpo_wan22_pickscore_5gpu.py` | Wan2.2-T2V | PickScore | 5 (4+1) | Flow-GRPO (video) |
-| `run_diffusion_grpo_ltx23_sglang.py` | LTX-2.3 | PickScore | 5 (4+1) | Flow-GRPO (video) |
-| `run_diffusion_sft_wan22.py` | Wan2.2-T2V | — | 4 colocate | SFT (no rollout engine) |
+| Script | Reward | GPUs | Algorithm |
+|---|---|---|---|
+| `run_diffusion_grpo_sd3_ocr_sglang.py` | OCR (CPU) | 2 colocate | Flow-GRPO |
+| `run_diffusion_nft_sd3_pickscore.py` | PickScore | 3 (2+1) | DiffusionNFT |
 
 ### 5.2 Flow-GRPO + OCR (2 GPU colocate)
 
@@ -176,30 +166,6 @@ E2E test: `tests/e2e/short/test_sd3_pickscore_nft_2xGPU.py` (pending merge on ma
 PickScore runs as a Ray actor pool on a dedicated GPU. With `--colocate-reward`
 (not used in the default script), reward workers share rollout GPUs at 0.05 GPU
 per worker — useful only when GPU count is tight.
-
-### Batch sizing
-
-**GRPO + OCR:**
-
-| Flag | Value |
-|---|---|
-| `--rollout-batch-size` | 8 |
-| `--n-samples-per-prompt` | 16 |
-| `--num-rollout` | 600 (default; `--num-rollout` CLI) |
-| `--global-batch-size` | 64 |
-| `--rollout-microgroup-size` | 8 |
-| `--micro-batch-size-sample` / `--micro-batch-size-tstep` | 16 / 5 |
-| `--train-dp-split-mode` | `stride` |
-
-**NFT + PickScore (100-rollout default):**
-
-| Flag | Value |
-|---|---|
-| `--rollout-batch-size` | 8 |
-| `--n-samples-per-prompt` | 8 |
-| `--micro-batch-size` | 4 |
-| `--num-rollout` | 100 |
-| `--eval-interval` | 30 |
 
 ### Algorithm flags
 
@@ -269,7 +235,7 @@ Train/rollout dtype alignment for Flow-GRPO is covered in
 `rollout/reward/raw_mean` from `scripts/run_diffusion_grpo_sd3_ocr_sglang.py`
 (default batch, 600 rollouts):
 
-![Flow-GRPO OCR raw reward](/assets/images/sd3/grpo-ocr-raw-reward.png)
+![Flow-GRPO OCR raw reward](../../assets/images/sd3/grpo-ocr-raw-reward.png)
 
 Online runs: wandb project **`miles-diffusion-grpo`**.
 
@@ -278,7 +244,7 @@ Online runs: wandb project **`miles-diffusion-grpo`**.
 `rollout/reward/raw_mean` from `scripts/run_diffusion_nft_sd3_pickscore.py` (100
 rollouts):
 
-![DiffusionNFT PickScore raw reward](/assets/images/sd3/nft-pickscore-raw-reward.png)
+![DiffusionNFT PickScore raw reward](../../assets/images/sd3/nft-pickscore-raw-reward.png)
 
 Online runs: wandb project **`miles-diffusion-nft`**. Held-out
 **`eval/pickscore_test` ≈ 0.78** on the default eval config (`--eval-interval 30`,

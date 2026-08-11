@@ -7,24 +7,10 @@ sglang-diffusion rollout engines each iteration. The rollout engine has no PEFT
 layers — weights arrive either as merged base tensors or as raw `lora_A` /
 `lora_B` pairs for local merge.
 
-## 1. Example launchers
+## 1. Recommended flags
 
-Representative **LoRA + IPC merge** recipes (not an exhaustive list — search
-`scripts/` for `--lora-ipc-weight-sync` to find all IPC launchers):
-
-| Script | Model | LoRA mode |
-|---|---|---|
-| `scripts/run_diffusion_grpo_sd3_ocr_sglang.py` | SD3.5 | IPC merge |
-| `scripts/run_diffusion_grpo_pickscore_5gpu_flowgrpo_aligned.py` | Qwen-Image | IPC merge |
-| `scripts/run_diffusion_grpo_wan22_pickscore_5gpu.py` | Wan 2.2 | IPC merge |
-| `scripts/run_diffusion_nft_sd3_pickscore.py` | SD3.5 | IPC merge |
-
-Other diffusion scripts use **`--use-lora`** with train-side merge
-(for example `scripts/run_diffusion_grpo_ltx23_sglang.py`). Any new recipe
-that passes both `--use-lora` and `--colocate` can opt into IPC merge with
-`--lora-ipc-weight-sync`.
-
-All IPC recipes above share:
+For colocated LoRA training, prefer **IPC merge** — push only `lora_A` /
+`lora_B` and let the rollout engine merge locally:
 
 ```bash
 --use-lora \
@@ -34,14 +20,19 @@ All IPC recipes above share:
 --colocate
 ```
 
+`--lora-rank` / `--lora-alpha` vary by recipe (e.g. SD3 uses 32/64; some others
+use 64/128). Without `--lora-ipc-weight-sync`, LoRA still trains but merges on
+the train side and pushes full merged weights (§3). IPC merge requires
+`--colocate`.
+
 ## 2. Key flags
 
 | Flag | Purpose |
 |---|---|
 | `--use-lora` | Enable PEFT LoRA on the FSDP actor |
 | `--lora-ipc-weight-sync` | Push only `lora_A`/`lora_B`; rollout merges locally |
-| `--lora-rank` | LoRA rank (recipes use 32) |
-| `--lora-alpha` | LoRA alpha (recipes use 64, i.e. 2× rank) |
+| `--lora-rank` | LoRA rank (recipe-specific; often 32 or 64) |
+| `--lora-alpha` | LoRA alpha (typically 2× rank) |
 | `--lora-target-modules` | Override family defaults (optional) |
 | `--lora-init-weights` | Init scheme, e.g. `gaussian` |
 | `--update-weight-buffer-size` | IPC bucket size in bytes (recipes use 2 GB) |
@@ -120,26 +111,7 @@ On the first few syncs, rank 0 logs lines like:
 LoRA IPC weight sync v1 [transformer]: pushed N lora tensors, M layer prefixes in K buckets
 ```
 
-## 4. Verification
-
-<Warning>
-`MILES_VERIFY_WEIGHT_SYNC=1` applies only to the **train-side merge** path
-(`DiffusionUpdateWeightFromTensorLoRA`, i.e. `--use-lora` without
-`--lora-ipc-weight-sync`). It is **not implemented** for
-`DiffusionUpdateWeightFromTensorLoRAIPC`, which is what the canonical recipes
-use.
-</Warning>
-
-When using train-side merge, set `MILES_VERIFY_WEIGHT_SYNC=1` to compare
-SHA-256 checksums between the train-side merged weights and the live rollout
-engine (`compute_weights_checksum` from sglang-d). Logs appear as
-`[weight_sync verify]` / `[weight_sync verify cross-engine]`. Only the
-gather-src rank performs the comparison.
-
-Unit test: `tests/fast-gpu/test_lora_weight_sync.py` (IPC bucket grouping for
-the IPC updater path).
-
-## 5. IPC bucketing and gather rank
+## 4. IPC bucketing and gather rank
 
 This section covers **how large each IPC payload is** and **which train rank
 talks to the rollout engine** — not a separate feature flag.
@@ -160,7 +132,7 @@ payload per dtype group is live on the path to the engine.
 If sync stalls or VRAM grows across rollouts, check trainer logs for `LoRA IPC
 weight sync` lines and Ray worker stderr under `~/.ray/session_latest/logs/`.
 
-## 6. Internals
+## 5. Internals
 
 | File | Role |
 |---|---|
@@ -169,7 +141,7 @@ weight sync` lines and Ray worker stderr under `~/.ray/session_latest/logs/`.
 | `miles/backends/sglang_diffusion_utils/sglang_diffusion_engine.py` | HTTP `update_weights_from_tensor` to rollout |
 | `miles/ray/rollout.py` | Engine env vars (`SGLANG_DIFFUSION_LORA_MERGE_FP32`) |
 
-## 7. Limitations
+## 6. Limitations
 
 - **Colocate only** — disaggregated train/rollout is not supported for LoRA IPC.
 - **Single adapter per run** — one set of `--lora-*` flags per job.
