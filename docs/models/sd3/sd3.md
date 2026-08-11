@@ -136,8 +136,6 @@ Smoke test (1 rollout, OCR dataset, 2 GPUs):
 MILES_SCRIPT_SMOKE=1 python3 scripts/run_diffusion_nft_sd3_pickscore.py
 ```
 
-E2E test: `tests/e2e/short/test_sd3_pickscore_nft_2xGPU.py` (pending merge on main).
-
 ### Recipe comparison
 
 | | GRPO + OCR | NFT + PickScore |
@@ -145,9 +143,9 @@ E2E test: `tests/e2e/short/test_sd3_pickscore_nft_2xGPU.py` (pending merge on ma
 | Script | `run_diffusion_grpo_sd3_ocr_sglang.py` | `run_diffusion_nft_sd3_pickscore.py` |
 | `--loss-type` | `policy_loss` (default) | `nft` |
 | SDE | Full window, noise=0.7, CFG=4.5 | ODE, noise=0 |
-| Reference | LoRA base KL | EMA |
+| Reference | LoRA base KL | EMA (`--use-ema`) |
 | Reward GPU | None (CPU OCR) | Dedicated (3 GPU total) |
-| Deterministic e2e | `test_sd3_ocr_grpo_2xGPU` | `test_sd3_pickscore_nft_2xGPU` (pending) |
+| Deterministic e2e | `test_sd3_ocr_grpo_2xGPU` | — (smoke via `MILES_SCRIPT_SMOKE=1`) |
 
 ## 6. Recipe configuration
 
@@ -186,7 +184,7 @@ per worker — useful only when GPU count is tight.
 | Setting | Value |
 |---|---|
 | Algorithm | `--loss-type nft` |
-| Reference | `--ref-mode ema --ema-shadow` |
+| Reference | `--ref-mode ema --use-ema --ema-rollout-policy ema` |
 | Reward | `--rm-type pickscore` |
 | SDE | `--diffusion-sde-type ode --diffusion-noise-level 0.0` |
 | LoRA | rank 32, alpha 64, IPC sync |
@@ -210,7 +208,7 @@ merge internals.
 
 ## 8. Precision notes
 
-Both SD3 launch scripts on **current main** use fp16 DiT forward:
+Both SD3 launch scripts use fp16 DiT forward:
 
 ```bash
 --diffusion-forward-dtype fp16 \
@@ -226,7 +224,7 @@ Flow-GRPO recipes also set **`--diffusion-clip-range`** (e.g. `1e-4` in the OCR
 script) to clip importance ratios during the policy update.
 
 Train/rollout dtype alignment for Flow-GRPO is covered in
-[SDE step backend](/advanced/sde-backend) § Train / rollout alignment.
+[SDE step backend](/advanced/sde-backend).
 
 ## 9. Reference results
 

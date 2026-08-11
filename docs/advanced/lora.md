@@ -111,28 +111,12 @@ On the first few syncs, rank 0 logs lines like:
 LoRA IPC weight sync v1 [transformer]: pushed N lora tensors, M layer prefixes in K buckets
 ```
 
-## 4. IPC bucketing and gather rank
+After FSDP all-gather, serialized buckets are collected on the **gather-src
+rank** only; that rank calls the rollout engine. If sync stalls or VRAM grows
+across rollouts, check trainer logs for `LoRA IPC weight sync` lines and Ray
+worker stderr under `~/.ray/session_latest/logs/`.
 
-This section covers **how large each IPC payload is** and **which train rank
-talks to the rollout engine** — not a separate feature flag.
-
-**Bucket size** — controlled by `--update-weight-buffer-size` (bytes). Canonical
-recipes use `2147483648` (2 GB). Each flush sends one flattened bucket to
-sglang-d; LoRA IPC may take multiple buckets per sync (see log line
-`… in K buckets`).
-
-**Pair-safe packing** — described in §3: buckets fill by whole layer groups so
-rollout-side `lora_merge` always receives matching `lora_A`/`lora_B` pairs.
-
-**Gather-src rank** — after FSDP all-gather, serialized buckets are collected with
-`dist.gather_object` on the **gather-src rank** only; that rank calls the
-rollout engine. Other ranks join the collective and return, so at most one IPC
-payload per dtype group is live on the path to the engine.
-
-If sync stalls or VRAM grows across rollouts, check trainer logs for `LoRA IPC
-weight sync` lines and Ray worker stderr under `~/.ray/session_latest/logs/`.
-
-## 5. Internals
+## 4. Internals
 
 | File | Role |
 |---|---|
@@ -141,7 +125,7 @@ weight sync` lines and Ray worker stderr under `~/.ray/session_latest/logs/`.
 | `miles/backends/sglang_diffusion_utils/sglang_diffusion_engine.py` | HTTP `update_weights_from_tensor` to rollout |
 | `miles/ray/rollout.py` | Engine env vars (`SGLANG_DIFFUSION_LORA_MERGE_FP32`) |
 
-## 6. Limitations
+## 5. Limitations
 
 - **Colocate only** — disaggregated train/rollout is not supported for LoRA IPC.
 - **Single adapter per run** — one set of `--lora-*` flags per job.

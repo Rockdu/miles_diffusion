@@ -4,15 +4,15 @@ description: A working Flow-GRPO training job on SD3.5 + OCR — default script 
 ---
 This page takes you from `docker pull` to a running **Flow-GRPO** job on
 **Stable Diffusion 3.5 Medium** with **OCR** reward. The launch script below
-targets **2 GPUs** (colocate train + rollout). You need Hugging Face access to the gated SD3.5
+targets **2 GPUs** (colocate train + rollout); a single GPU also works if you
+override the GPU layout. You need Hugging Face access to the gated SD3.5
 checkpoint.
 
 Installation and environment setup are documented separately — this page starts
 inside a ready container or machine.
 
-For other models and recipes (including DiffusionNFT + PickScore), see
-[Models](/models/index). Deeper SD3 recipe config and reference curves are in
-the [SD3 model guide](/models/sd3/sd3).
+Deeper SD3 recipe config, reference curves, and the DiffusionNFT + PickScore
+recipe are in the [SD3 model guide](/models/sd3/sd3).
 
 ## 1. Start the container
 
@@ -93,13 +93,9 @@ FSDP actor with LoRA, syncs weights via CUDA IPC (`--lora-ipc-weight-sync`),
 and runs the Flow-GRPO rollout / train loop. With `WANDB_API_KEY` set, images
 and metrics are logged to project `miles-diffusion-grpo`.
 
-After a minute or two you should see iteration logs along these lines:
-
-```text
-[ray]      starting cluster ...
-[sglang]   launching rollout engines ...
-[trainer]  rollout 1/600 | reward=0.31 loss=... log_prob_diff=... rollout=...s train=...s
-```
+After a minute or two you should see rollout/train metrics such as
+`rollout/reward/raw_mean`, `train/loss`, and `train/log_prob_mean_abs_diff`
+(stdout and WandB when configured).
 
 To finish faster while debugging, override rollout count (default **600**):
 
@@ -110,7 +106,8 @@ python3 scripts/run_diffusion_grpo_sd3_ocr_sglang.py \
 ```
 
 Any `ScriptArgs` field also accepts `MILES_SCRIPT_<FIELD>` (e.g.
-`MILES_SCRIPT_NUM_ROLLOUT=2`). For train/rollout alignment debugging:
+`MILES_SCRIPT_NUM_ROLLOUT=2`). For train/rollout alignment debugging (skips the
+optimizer step; does not run IPC weight-sync checksums):
 
 ```bash
 MILES_SCRIPT_DEBUG_ALIGNMENT=1 python3 scripts/run_diffusion_grpo_sd3_ocr_sglang.py

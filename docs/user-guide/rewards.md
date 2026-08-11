@@ -15,12 +15,6 @@ from `sglang_diffusion_rollout.generate_and_rm_microgroup`.
 | Advantage norm | `--custom-reward-post-process-path` | Replaces GRPO mean/std normalization |
 | Per-sample override | `metadata.rm_type` in JSONL | Overrides global `--rm-type` |
 
-<Warning>
-`--diffusion-reward` is a legacy CLI argument (default `"pickscore"`) that is
-**not read by reward dispatch code**. Scripts may still pass
-`--diffusion-reward pickscore:1.0`, but the effective knob is **`--rm-type`**.
-</Warning>
-
 ## 2. Built-in reward models
 
 ### PickScore (`--rm-type pickscore`)
@@ -71,13 +65,17 @@ Example from `scripts/run_diffusion_nft_sd3_pickscore.py`:
 Implementation: `miles/rollout/rm_hub/ocr.py`.
 
 OCR reward compares PaddleOCR output against target text embedded in the
-prompt. The target is extracted as the string between the first pair of double
-quotes in the prompt:
+prompt. The target is the string between the first pair of double quotes.
+Simplified scoring:
 
 ```python
 target = prompt.split('"')[1]
 reward = 1 - levenshtein_distance(recognized, target) / len(target)
 ```
+
+The implementation also lowercases both sides, strips spaces, treats a
+substring hit as perfect (`dist=0`), and caps `dist` at `len(target)` — see
+`miles/rollout/rm_hub/ocr.py`.
 
 OCR runs on **CPU** Ray actors (`--ocr-num-workers`, default 4). Used by the
 SD3 Flow-GRPO recipe (`scripts/run_diffusion_grpo_sd3_ocr_sglang.py`).
