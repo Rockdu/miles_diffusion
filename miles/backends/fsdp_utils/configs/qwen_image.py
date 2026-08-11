@@ -59,15 +59,13 @@ class QwenImageTrainPipelineConfig(TrainPipelineConfig):
     hf_ckpt_name_patterns = ("qwen-image",)
     cfg_batching = False
 
-    # 1000 is the model's normalizer, not the scheduler range: sglang-d's DiT divides by the
-    # literal 1000 and diffusers leaves that division to its caller. Reading num_train_timesteps
-    # here would diverge from the rollout under any other scheduler range.
+    # 1000 is the model's normalizer, not the scheduler range: sglang-d's DiT divides by the same
+    # literal. Reading num_train_timesteps here would diverge from the rollout at any other range.
     def process_timestep_as_input(self, timesteps):
         return timesteps / 1000.0
 
-    def process_sigma_as_input(self, sigmas, *, num_train_timesteps):
-        # Exact only because the two 1000s above coincide: rollout sends sigma * num_train_timesteps
-        # and the DiT divides by 1000. A range other than 1000 would need sigma * N / 1000.
+    def process_sigma_as_timesteps_input(self, sigmas, *, num_train_timesteps):
+        # Identity only while the scheduler range equals the 1000 above; else sigma * N / 1000.
         return sigmas
 
     lora_target_modules = [

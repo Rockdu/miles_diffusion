@@ -109,29 +109,25 @@ class TestProcessTimestepAsInput:
         assert torch.equal(out, self.TIMESTEPS / 1000.0)
 
 
-class TestProcessSigmaAsInput:
-    # The NFT counterpart, whose input is sigma off scheduler.sigmas. Each family rescales the
-    # opposite way from above: identity there means sigma * N here, and a divide there means
-    # pass-through here.
-    #
-    #   sd3, wan2_2   sigma * N   the DiT wants the scheduler range back
-    #   qwen_image    sigma       already the normalized quantity the DiT takes
+class TestProcessSigmaAsTimestepsInput:
+    # The NFT counterpart: each family rescales the opposite way from above.
     NUM_TRAIN_TIMESTEPS = 1000
-    # 0.8474337458610535 is one of the ~2% of float32 sigmas that a multiply by 1000 followed by
-    # a divide by 1000 does not return unchanged.
+    # 0.8474... does not survive a multiply then divide by 1000 in fp32.
     SIGMAS = torch.tensor([0.8474337458610535, 0.5])
 
     @pytest.mark.parametrize("config_cls", [SD3TrainPipelineConfig, Wan2_2TrainPipelineConfig])
     def test_scales_up_to_the_scheduler_range(self, config_cls):
-        out = config_cls.process_sigma_as_input(config_cls, self.SIGMAS, num_train_timesteps=self.NUM_TRAIN_TIMESTEPS)
+        out = config_cls.process_sigma_as_timesteps_input(
+            config_cls, self.SIGMAS, num_train_timesteps=self.NUM_TRAIN_TIMESTEPS
+        )
         assert torch.equal(out, self.SIGMAS * float(self.NUM_TRAIN_TIMESTEPS))
 
     def test_qwen_image_passes_the_sigma_through(self):
-        out = QwenImageTrainPipelineConfig.process_sigma_as_input(
+        out = QwenImageTrainPipelineConfig.process_sigma_as_timesteps_input(
             QwenImageTrainPipelineConfig, self.SIGMAS, num_train_timesteps=self.NUM_TRAIN_TIMESTEPS
         )
         assert torch.equal(out, self.SIGMAS)
-        # The composition this hook exists to avoid; asserted so the equal() above keeps its teeth.
+        # Asserted so the equal() above keeps its teeth.
         round_tripped = QwenImageTrainPipelineConfig.process_timestep_as_input(
             QwenImageTrainPipelineConfig, self.SIGMAS * float(self.NUM_TRAIN_TIMESTEPS)
         )

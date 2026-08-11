@@ -124,11 +124,11 @@ class TestNftHooks:
 
 
 class _StubConfig:
-    """Cond plumbing stubbed out. Binds both timestep hooks so that a prepare wired to the wrong
-    one fails on the numbers rather than on a missing attribute."""
+    """Cond plumbing stubbed out. Binds both hooks so a prepare wired to the wrong one fails on
+    the numbers, not on a missing attribute."""
 
     process_timestep_as_input = TrainPipelineConfig.process_timestep_as_input
-    process_sigma_as_input = TrainPipelineConfig.process_sigma_as_input
+    process_sigma_as_timesteps_input = TrainPipelineConfig.process_sigma_as_timesteps_input
 
     def prepare_cond_kwargs(self, cond, device):
         return {}
@@ -138,19 +138,17 @@ class _StubConfig:
 
 
 class _Sd3StyleConfig(_StubConfig):
-    # Stands in for sd3, wan2_2 and ltx, which all inherit both base hooks.
     pass
 
 
 class _QwenStyleConfig(_StubConfig):
     process_timestep_as_input = QwenImageTrainPipelineConfig.process_timestep_as_input
-    process_sigma_as_input = QwenImageTrainPipelineConfig.process_sigma_as_input
+    process_sigma_as_timesteps_input = QwenImageTrainPipelineConfig.process_sigma_as_timesteps_input
 
 
 class TestPrepareNftBatch:
     NUM_TRAIN_TIMESTEPS = 1000
-    # 0.8474337458610535 is one of the ~2% of float32 sigmas that a multiply by 1000 followed by
-    # a divide by 1000 does not return unchanged.
+    # 0.8474... does not survive a multiply then divide by 1000 in fp32.
     SIGMAS = [0.8474337458610535, 0.5]
 
     class _Env:
@@ -184,7 +182,7 @@ class TestPrepareNftBatch:
         seen = {}
 
         class _Recording(_StubConfig):
-            def process_sigma_as_input(self, sigmas, *, num_train_timesteps):
+            def process_sigma_as_timesteps_input(self, sigmas, *, num_train_timesteps):
                 seen["sigmas"] = sigmas.clone()
                 seen["num_train_timesteps"] = num_train_timesteps
                 return sigmas
@@ -200,7 +198,7 @@ class TestPrepareNftBatch:
 
     def test_qwen_style_family_gets_the_sigma_bit_exactly(self):
         prepared = prepare_nft_batch(self._ctx(_QwenStyleConfig()), self._batch())
-        # equal, not allclose: routing through process_timestep_as_input would still pass allclose.
+        # equal, not allclose: the wrong hook would still pass allclose.
         assert torch.equal(prepared.timesteps_for_model, torch.tensor(self.SIGMAS))
 
 
