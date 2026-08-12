@@ -45,16 +45,6 @@ from .sequence_parallel.plan import apply_sequence_parallel
 logger = logging.getLogger(__name__)
 
 
-def _enable_deterministic_training(args: Namespace) -> None:
-    """Train-actor deterministic mode. NCCL/CUBLAS env is set at spawn (actor_group);
-    here we set the torch-runtime knobs."""
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    # warn_only=False is required: SDPA's deterministic backward is gated on
-    # !warnOnly (aten attention_backward.cu), so warn_only=True is a no-op on native.
-    torch.use_deterministic_algorithms(True, warn_only=False)
-
-
 class FSDPTrainRayActor(TrainRayActor):
     """FSDP training actor for diffusion GRPO.
 
@@ -67,7 +57,9 @@ class FSDPTrainRayActor(TrainRayActor):
         super().init(args, role, with_ref)
 
         if args.deterministic_mode:
-            _enable_deterministic_training(args)
+            from .deterministic import enable_deterministic_runtime
+
+            enable_deterministic_runtime()
 
         self.parallel_state = create_fsdp_parallel_state(args)
         torch.manual_seed(args.seed)

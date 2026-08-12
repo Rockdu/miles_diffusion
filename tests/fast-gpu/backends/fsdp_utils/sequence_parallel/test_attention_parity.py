@@ -45,7 +45,7 @@ def _run_worker(ulysses_degree, *, deterministic=False, ring_backend=None):
 
 @pytest.mark.parametrize(
     ("ulysses_degree", "ring_backend"),
-    [(4, None), (2, None), (1, None), (2, "_native_cudnn"), (1, "_native_cudnn")],
+    [(4, None), (2, None), (1, None), (2, "torch_cudnn_sdpa"), (1, "torch_cudnn_sdpa")],
     ids=["sp4-u4r1", "sp4-u2r2", "sp4-u1r4", "sp4-u2r2-cudnn", "sp4-u1r4-cudnn"],
 )
 def test_usp_forward_backward_matches_full_sequence_sdpa(ulysses_degree, ring_backend):

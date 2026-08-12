@@ -1,5 +1,6 @@
 import argparse
 import dataclasses
+import importlib
 from dataclasses import dataclass
 
 import yaml
@@ -29,7 +30,8 @@ class FSDPArgs:
     adam_beta2: float = 0.999
     adam_eps: float = 1e-8
 
-    # diffusers set_attention_backend value; None keeps the default. Ring attention accepts the RING_KERNELS subset.
+    # sglang-diffusion's backend words (see validate_attention_backend); None keeps
+    # the model backend's default. Ring and deterministic_mode accept subsets.
     fsdp_attention_backend: str | None = None
 
     # Logging
@@ -48,8 +50,7 @@ class FSDPArgs:
     # Hybrid sharding: parameter replica count; dp_shard uses the ranks left by this and SP.
     dp_replicate_size: int = 1
 
-    # Train-actor deterministic mode; see validate_attention_args for the backend
-    # support matrix. Name kept identical to Megatron's.
+    # Train-actor deterministic mode, gated in deterministic.py. Name kept identical to Megatron's.
     deterministic_mode: bool = False
 
     # Sequence Parallelism (USP = Ulysses x Ring)
@@ -89,66 +90,49 @@ def parse_fsdp_cli(extra_args_provider=None):
     return args
 
 
-# Deterministic-mode attention support matrix — KEEP IN SYNC. torch's flag only
-# governs torch-native ops, so an unlisted custom kernel runs nondeterministic
-# silently under deterministic mode.
-#   native / _native_*  (SDPA)      : torch's flag (needs warn_only=False)
-#   flash* / _flash_3*  (flash-attn): patch deterministic= on (flag can't reach it)
-#   sage / xformers / flex / aiter  : opaque to torch, no hook -> reject (validate)
-
-# diffusers dispatches flash through these module globals (FA3 op reads them too).
-_FLASH_ATTN_DISPATCH_FNS = (
-    "flash_attn_func",
-    "flash_attn_varlen_func",
-    "flash_attn_3_func",
-    "flash_attn_3_varlen_func",
-)
+def resolve_sp_degrees(args) -> tuple[int, int]:
+    """(ulysses, ring) degrees; ``ulysses_degree=0`` means ulysses fills sp."""
+    ulysses_degree = args.ulysses_degree or args.sequence_parallel_size
+    return ulysses_degree, args.sequence_parallel_size // ulysses_degree
 
 
-def deterministic_capable_flash_fns():
-    """diffusers flash entry points whose signature accepts a `deterministic` arg."""
-    import inspect
+def resolve_attention_module(args):
+    """The ``models/<backend>/attention.py`` module driving this run."""
+    from miles.utils.misc import load_function
 
-    import diffusers.models.attention_dispatch as ad
+    from .model_backend import MilesModelBackend
 
-    out = []
-    for name in _FLASH_ATTN_DISPATCH_FNS:
-        fn = getattr(ad, name, None)
-        if fn is None:
-            continue
-        try:
-            if "deterministic" in inspect.signature(fn).parameters:
-                out.append(name)
-        except (TypeError, ValueError):
-            continue
-    return out
+    if issubclass(load_function(args.model_backend_path), MilesModelBackend):
+        package = load_function(args.train_pipeline_config_path).model_package
+        return importlib.import_module(f"{package}.attention")
+
+    from .models.diffusers import attention
+
+    return attention
 
 
-def validate_attention_args(args):
-    """Fail fast (driver-side, before any actor launches) on deterministic-mode misconfig.
+def validate_attention_backend(args) -> None:
+    """Reject an --fsdp-attention-backend word this run's model backend has no kernel for.
 
-    Enforces the support matrix documented above _FLASH_ATTN_DISPATCH_FNS.
+    The words are sglang-diffusion's ``AttentionBackendEnum`` names: miles and SGL-D are
+    one system, and a kernel SGL-D cannot serve is not one worth training with.
+    ``torch_{math,flash,efficient}_sdpa`` narrow SGL-D's ``torch_sdpa`` to one kernel of
+    that dispatcher (rollout has no backward and lets it choose; training pins the kernel
+    whose backward it trusts), and SGL-D's bare ``fa`` is not accepted -- the train side
+    has to name a generation. Each model backend spells the words for its own kernel
+    library in ``models/<backend>/attention.py``.
     """
-    if not args.deterministic_mode:
+    if args.fsdp_attention_backend is None:
         return
-    backend = args.fsdp_attention_backend
-    name = "" if backend is None else backend.lower()
-    if backend is None or "native" in name or "math" in name:
-        return
-    if "flash" in name:
-        if not deterministic_capable_flash_fns():
-            raise RuntimeError(
-                "deterministic_mode with a flash attention backend, but no diffusers "
-                "flash entry point exposes a deterministic argument (is flash-attn "
-                "installed and recent enough?)."
-            )
-        return
-    raise ValueError(
-        f"deterministic_mode cannot guarantee a deterministic backward for attention "
-        f"backend '{backend}': it is a custom kernel opaque to "
-        f"torch.use_deterministic_algorithms with no deterministic hook here. Use a "
-        f"flash (flash/_flash_3) or native (SDPA) backend."
-    )
+    table = resolve_attention_module(args).MILES_TO_KERNEL
+    name = args.fsdp_attention_backend.strip().lower()
+    if name not in table:
+        raise ValueError(
+            f"--fsdp-attention-backend {args.fsdp_attention_backend!r} is not a kernel this "
+            f"model backend serves; choose from {sorted(table)}."
+        )
+    # Downstream readers (spelling tables, RING_KERNELS, the deterministic sets) compare exactly.
+    args.fsdp_attention_backend = name
 
 
 def validate_sp_config(world_size, sequence_parallel_size, ulysses_degree=0):
@@ -196,9 +180,7 @@ def validate_sp_args(args) -> None:
     )
     if args.sequence_parallel_size == 1:
         return
-    # ulysses SP by default
-    ulysses_degree = args.ulysses_degree or args.sequence_parallel_size
-    ring_degree = args.sequence_parallel_size // ulysses_degree
+    _, ring_degree = resolve_sp_degrees(args)
     if ring_degree > 1 and args.fsdp_attention_backend not in RING_KERNELS:
         raise ValueError(
             f"--fsdp-attention-backend {args.fsdp_attention_backend!r} cannot drive ring attention; "
@@ -214,5 +196,4 @@ def load_fsdp_args(extra_args_provider=None):
         for k, v in data.items():
             if not hasattr(args, k):
                 setattr(args, k, v)
-    validate_attention_args(args)
     return args

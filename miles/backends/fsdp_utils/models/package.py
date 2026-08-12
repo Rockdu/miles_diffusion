@@ -4,11 +4,13 @@ Each native model family is a Python package under ``models/<family>/`` with:
 
   - ``loading`` — checkpoint resolution and ``load_component(...,
     materialize_weights=...)``; distributed rank selection stays outside the package
-  - ``modeling`` — ``load_scheduler``, ``enable_gradient_checkpointing``,
-    optional ``flash_attention_entrypoints`` / ``required_flash_kernel_label``
+  - ``modeling`` — ``load_scheduler``, ``enable_gradient_checkpointing``, plus
+    ``flash_attention_entrypoints`` / ``required_flash_kernel_label`` when the
+    package declares patchable flash backends
   - ``parallel_plan`` — ``FSDP_PARALLEL_PLAN``, ``sequence_parallel_plan``
     (and optional ``install_sequence_parallel_attention``)
-  - ``attention`` — ``set_attention_backend``
+  - ``attention`` — ``set_attention_backend`` and ``MILES_TO_KERNEL``, this
+    package's slice of the backend words (see arguments.validate_attention_backend)
 
 ``geometry`` and other train-forward helpers are family-specific and consumed by
 the family ``TrainPipelineConfig``, not by the backend loader.

@@ -10,12 +10,13 @@ Onboarding a model family:
   package ``models/<family>/`` with at least:
 
   - ``loading.py`` — checkpoint resolution/materialization and ``load_component``
-  - ``modeling.py`` — ``load_scheduler``, ``enable_gradient_checkpointing``,
-    optional ``flash_attention_entrypoints`` /
-    ``required_flash_kernel_label`` for deterministic flash patching
+  - ``modeling.py`` — ``load_scheduler``, ``enable_gradient_checkpointing``, plus
+    ``flash_attention_entrypoints`` / ``required_flash_kernel_label`` when the
+    package declares patchable flash backends
   - ``parallel_plan.py`` — ``FSDP_PARALLEL_PLAN``,
     ``sequence_parallel_plan``
-  - ``attention.py`` — ``set_attention_backend``
+  - ``attention.py`` — ``set_attention_backend`` and ``MILES_TO_KERNEL``
+    (see arguments.validate_attention_backend)
 
   Point ``configs/<family>.py`` at::
 

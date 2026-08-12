@@ -33,7 +33,7 @@ TOLERANCES = {
 }
 
 
-_SDPA_BACKENDS = {None: SDPBackend.FLASH_ATTENTION, "_native_cudnn": SDPBackend.CUDNN_ATTENTION}
+_SDPA_BACKENDS = {None: SDPBackend.FLASH_ATTENTION, "torch_cudnn_sdpa": SDPBackend.CUDNN_ATTENTION}
 _REFERENCE_BACKEND = None
 
 
@@ -150,7 +150,7 @@ def _enable_deterministic_mode():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ulysses-degree", type=int, choices=(1, 2, 4), required=True)
-    parser.add_argument("--ring-backend", choices=("_native_cudnn",), default=None)
+    parser.add_argument("--ring-backend", choices=("torch_cudnn_sdpa",), default=None)
     parser.add_argument("--deterministic", action="store_true")
     args = parser.parse_args()
 

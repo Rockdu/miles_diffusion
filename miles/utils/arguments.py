@@ -1634,10 +1634,17 @@ def miles_validate_args(args):
         args.colocate = False
         args.offload_train = args.offload_rollout = False
 
-    from miles.backends.fsdp_utils.arguments import validate_hybrid_shard_args, validate_sp_args
+    from miles.backends.fsdp_utils.arguments import (
+        validate_attention_backend,
+        validate_hybrid_shard_args,
+        validate_sp_args,
+    )
+    from miles.backends.fsdp_utils.deterministic import validate_deterministic_args
 
+    validate_attention_backend(args)
     validate_sp_args(args)
     validate_hybrid_shard_args(args)
+    validate_deterministic_args(args)
 
     # always true on offload for colocate at the moment.
     if args.colocate:

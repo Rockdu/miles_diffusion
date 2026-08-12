@@ -18,9 +18,7 @@ concrete modeling rather than of the training loop:
 from __future__ import annotations
 
 import abc
-import functools
 import importlib
-import logging
 from dataclasses import replace
 from typing import Any
 
@@ -31,8 +29,6 @@ from .models.parallel_plan import FSDPParallelPlan
 from .sequence_parallel.diffusers_dispatch import install_diffusers_usp_patch
 from .sequence_parallel.plan import MILES_SP_PLAN_ATTR, SequenceParallelPlan
 
-logger = logging.getLogger(__name__)
-
 
 class BaseModelBackend(abc.ABC):
     """Contract consumed by the FSDP actor for model-family integration."""
@@ -42,6 +38,7 @@ class BaseModelBackend(abc.ABC):
 
     @abc.abstractmethod
     def enable_deterministic_attention(self, backend: str | None) -> None:
+        """Install the deterministic hook ``backend`` needs; see deterministic.py."""
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -97,12 +94,9 @@ class MilesModelBackend(BaseModelBackend):
         self._pkg = load_model_package(pkg_path)
 
     def enable_deterministic_attention(self, backend: str | None) -> None:
-        """Deterministic-mode hook: flash kernels need per-backend patching; native/math need none."""
-        name = "" if backend is None else backend.lower()
-        if "flash" in name or name.startswith("fa"):
-            from .models.deterministic_attention import patch_modeling_flash_attention_deterministic
+        from .deterministic import patch_package_flash_attention
 
-            patch_modeling_flash_attention_deterministic(self._pkg.modeling, name)
+        patch_package_flash_attention(self._pkg, backend)
 
     def load_component(
         self,
@@ -150,7 +144,9 @@ class DiffusersModelBackend(BaseModelBackend):
         super().__init__(train_pipeline_config)
 
     def set_attention_backend(self, model: torch.nn.Module, backend: str) -> None:
-        model.set_attention_backend(backend)
+        from .models.diffusers.attention import set_attention_backend
+
+        set_attention_backend(model, backend)
 
     def enable_gradient_checkpointing(self, model: torch.nn.Module) -> None:
         model.enable_gradient_checkpointing()
@@ -173,21 +169,9 @@ class DiffusersModelBackend(BaseModelBackend):
         install_diffusers_usp_patch(model, parallel_state)
 
     def enable_deterministic_attention(self, backend: str | None) -> None:
-        # Configure every installed kernel we know how to control. Native/SDPA
-        # determinism is handled by torch.use_deterministic_algorithms; unsupported
-        # opaque kernels are rejected by argument validation before actor startup.
-        self._enable_deterministic_flash_attention()
+        from .deterministic import patch_diffusers_flash_attention
 
-    def _enable_deterministic_flash_attention(self) -> None:
-        """Patch diffusers flash entrypoints to deterministic=True (backward only; idempotent)."""
-        import diffusers.models.attention_dispatch as ad
-
-        from .arguments import deterministic_capable_flash_fns
-
-        names = deterministic_capable_flash_fns()
-        for fn_name in names:
-            setattr(ad, fn_name, functools.partial(getattr(ad, fn_name), deterministic=True))
-        logger.info("Enabled deterministic flash attention backward for: %s", ", ".join(names))
+        patch_diffusers_flash_attention(backend)
 
     def load_component(
         self,

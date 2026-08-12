@@ -9,6 +9,7 @@ untouched.
 import functools
 import inspect
 
+from ..models.diffusers.attention import KERNEL_TO_MILES
 from .attention import usp_attention
 
 
@@ -52,13 +53,15 @@ def _wrap_dispatch(module):
         if arguments.get("scale") is not None:
             raise ValueError("USP self-attention uses the default 1/sqrt(d) scale")
         if parallel_config.ring_group is not None:
+            # The processor forwards diffusers' own backend name; ring speaks miles names.
+            backend = arguments.get("backend")
             return usp_attention(
                 query,
                 key,
                 value,
                 parallel_config.ulysses_group,
                 parallel_config.ring_group,
-                ring_backend=arguments.get("backend"),
+                ring_backend=KERNEL_TO_MILES.get(backend, backend),
             )
 
         def local_attention_fn(local_query, local_key, local_value):

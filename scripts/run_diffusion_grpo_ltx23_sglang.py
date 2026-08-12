@@ -2,7 +2,7 @@
 
 57-frame 512x768 video at 24 fps, 24 denoising steps, CPS-SDE with 3 trainable steps drawn
 per epoch from candidate steps 0-9. Everything runs bf16 end to end — master, reduce,
-forward and the sgl-d engine — on the sdpa_math attention backend.
+forward and the sgl-d engine — on the torch_math_sdpa attention backend.
 
 Video rollouts take minutes per request, so the health checker gets a far longer interval
 and failure budget than the image recipes.
@@ -101,7 +101,7 @@ def execute(args: ScriptArgs, data_dir: str) -> None:
         "--fsdp-master-dtype bf16 "
         "--fsdp-reduce-dtype bf16 "
         "--diffusion-forward-dtype bf16 "
-        "--fsdp-attention-backend sdpa_math "
+        "--fsdp-attention-backend torch_math_sdpa "
     )
 
     perf_args = (

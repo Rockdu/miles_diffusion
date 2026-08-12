@@ -104,7 +104,11 @@ def ulysses_output_all_to_all(x, group):
 
 
 # --fsdp-attention-backend values ring attention honors: aten ops returning LSE with a real backward.
-RING_KERNELS = {None: "flash", "_native_flash": "flash", "_native_cudnn": "cudnn"}
+RING_KERNELS = {None: "flash", "torch_flash_sdpa": "flash", "torch_cudnn_sdpa": "cudnn"}
+
+# Ring calls the aten ops directly, so torch's guard against non-deterministic
+# kernels never runs and cuDNN's backward would go unnoticed.
+DETERMINISTIC_RING_KERNELS = frozenset({None, "torch_flash_sdpa"})
 
 
 class _RingAttention(torch.autograd.Function):
