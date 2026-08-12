@@ -46,9 +46,11 @@ class TestBackendHierarchy:
         backend = DiffusersModelBackend(Wan2_2TrainPipelineConfig())
         plan = backend.fsdp_parallel_plan(_RecordingModel())
 
+        # norm2 only: the engine keeps FP32LayerNorm affine params fp32-resident
+        # and LayerNorm consumes them at fp32, so the pin makes both sides use
+        # the same values. scale_shift_table and time_embedder must NOT be
+        # pinned -- see the plan module for the two-condition rule.
         assert plan.param_dtype_patterns == {
-            "*scale_shift_table": "fp32",
-            "*time_embedder*": "fp32",
             "*.norm2.*": "fp32",
         }
 
