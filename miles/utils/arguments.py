@@ -1458,6 +1458,15 @@ def miles_validate_args(args):
         raise ValueError(f"wandb_log_image_interval must be >= 1, got {args.wandb_log_image_interval}")
 
     args.rollout_patch_groups = [name for name in (args.rollout_patch_group or "").split(",") if name]
+    if (
+        getattr(args, "sglang_lora_merge_mode", None) == "dynamic"
+        and "lora_parity" not in args.rollout_patch_groups
+    ):
+        # An unmerged LoRA engine is only bitwise with the trainer once these two
+        # engine-side fixes are in (see monkey_patches/patch_lora_parity.py), so the
+        # group rides the flag that asks for one -- forgetting to list it would cost
+        # 2e-2 of train/rollout output diff with nothing in the log to say so.
+        args.rollout_patch_groups.append("lora_parity")
 
     if not args.hf_checkpoint:
         raise ValueError("--hf-checkpoint is required: it names the diffusers pipeline to train and to serve.")

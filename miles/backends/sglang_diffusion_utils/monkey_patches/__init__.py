@@ -55,6 +55,17 @@ def apply_sgld_monkey_patches() -> None:
     patch_qk_norm_rope.apply()
 
 
+@register_rollout_patch_group("lora_parity")
+def apply_lora_parity_patches() -> None:
+    """Engine-side LoRA fixes an unmerged engine needs to stay bitwise with a
+    PEFT-adapted trainer: honor the requested mode in the IPC weight update, and
+    fuse bias into the RowParallel GEMM (see patch_lora_parity). Model-agnostic;
+    selected automatically by --sglang-lora-merge-mode dynamic."""
+    from miles.backends.sglang_diffusion_utils.monkey_patches import patch_lora_parity
+
+    patch_lora_parity.apply()
+
+
 @register_rollout_patch_group("ltx")
 def apply_ltx2_rollout_patches() -> None:
     from miles.backends.sglang_diffusion_utils.monkey_patches import (

@@ -45,6 +45,10 @@ class TestRolloutPatchGroups:
         # The decorator ran at import time for the in-repo group.
         assert "sgld" in mp._ROLLOUT_PATCH_APPLIERS
 
+    def test_lora_parity_group_registered(self):
+        # Its applier imports sglang lazily, so registration alone stays CPU-safe.
+        assert "lora_parity" in mp._ROLLOUT_PATCH_APPLIERS
+
 
 class TestValidateRolloutPatchGroups:
     # The arg-validation entry point behind --rollout-patch-group:
@@ -54,3 +58,56 @@ class TestValidateRolloutPatchGroups:
         mp.validate_rollout_patch_groups(["sgld", "ltx"])
         with pytest.raises(ValueError, match="Unknown rollout patch group"):
             mp.validate_rollout_patch_groups(["sgld", "bogus"])
+
+
+class TestLoRAParitySelection:
+    # The parity patches only make sense for an unmerged engine, so they ride the flag
+    # that asks for one instead of a separate opt-in nobody would remember.
+    @staticmethod
+    def _parse(*extra):
+        import sys
+
+        from miles.utils.arguments import parse_args
+
+        argv = [
+            "test",
+            "--hf-checkpoint",
+            "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+            "--prompt-data",
+            "/dev/null",
+            "--rollout-batch-size",
+            "2",
+            "--n-samples-per-prompt",
+            "2",
+            "--actor-num-nodes",
+            "1",
+            "--actor-num-gpus-per-node",
+            "1",
+            "--rollout-num-gpus",
+            "1",
+            "--num-rollout",
+            "1",
+            "--use-lora",
+            "--lora-rank",
+            "8",
+            *extra,
+        ]
+        old = sys.argv
+        sys.argv = argv
+        try:
+            return parse_args()
+        finally:
+            sys.argv = old
+
+    def test_dynamic_merge_mode_selects_lora_parity(self):
+        args = self._parse("--sglang-lora-merge-mode", "dynamic")
+        assert "lora_parity" in args.rollout_patch_groups
+
+    def test_explicitly_listed_groups_survive(self):
+        args = self._parse("--sglang-lora-merge-mode", "dynamic", "--rollout-patch-group", "sgld")
+        assert args.rollout_patch_groups == ["sgld", "lora_parity"]
+
+    def test_default_merge_mode_leaves_it_out(self):
+        args = self._parse()
+        assert args.sglang_lora_merge_mode != "dynamic"
+        assert "lora_parity" not in args.rollout_patch_groups

@@ -511,6 +511,10 @@ def init_rollout_engines(args, pg, all_rollout_engines):
             "SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION": "false",
             "SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_IDLE": "false",
         }
+        if getattr(args, "sglang_lora_merge_mode", None) == "dynamic":
+            # The LoRA layers see no server args; the parity patch group reads the
+            # requested mode from here (see monkey_patches/patch_lora_parity.py).
+            env_vars["MILES_LORA_FORCE_UNMERGED"] = "1"
         if args.lora_ipc_weight_sync:
             # Merge in the train forward dtype, not fp32, to cut train/rollout consistency error.
             env_vars["SGLANG_DIFFUSION_LORA_MERGE_FP32"] = "1" if args.diffusion_forward_dtype == "fp32" else "0"
