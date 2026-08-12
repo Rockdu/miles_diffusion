@@ -15,6 +15,9 @@ class Wan2_2TrainPipelineConfig(TrainPipelineConfig):
     # High-noise expert ("transformer") handles t >= boundary, low-noise expert
     # ("transformer_2") the rest.
     boundary_ratio = 0.875
+    # Mirror the rollout DiT boundary: sglang-d feeds bf16 latents and fp32
+    # timestep/cond, so cast latents and pass the rest through.
+    input_dtype_policy = {"latents": "default", "cond": None, "timestep": None}
 
     def component_for_timestep(self, timestep: float, num_train_timesteps: int) -> str:
         if timestep >= self.boundary_ratio * num_train_timesteps:
