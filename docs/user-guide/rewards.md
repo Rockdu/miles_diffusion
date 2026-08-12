@@ -1,19 +1,21 @@
 ---
 title: Rewards
-description: Built-in reward models (PickScore, OCR), rm_hub dispatch, and custom reward hooks.
+description: Built-in reward models (PickScore, OCR), rm_hub dispatch, and prompt data format.
 ---
 Miles-diffusion scores generated images (or video frames) after each rollout
 microgroup. Reward computation lives in `miles/rollout/rm_hub/` and is invoked
 from `sglang_diffusion_rollout.generate_and_rm_microgroup`.
+
+For `--custom-rm-path`, `--custom-reward-post-process-path`, and other
+`--*-path` hooks, see [Customization](/user-guide/customization).
 
 ## 1. At a glance
 
 | Stage | Flag | Role |
 |---|---|---|
 | Reward type | `--rm-type` | Selects built-in scorer (`pickscore`, `ocr`) |
-| Custom reward | `--custom-rm-path` | Replaces the entire batched dispatch |
-| Advantage norm | `--custom-reward-post-process-path` | Replaces GRPO mean/std normalization |
 | Per-sample override | `metadata.rm_type` in JSONL | Overrides global `--rm-type` |
+| Custom reward / norm | see [Customization](/user-guide/customization) | `--custom-rm-path`, `--custom-reward-post-process-path` |
 
 ## 2. Built-in reward models
 
@@ -100,79 +102,10 @@ generate_and_rm_microgroup()
 
 After rollout, `RolloutManager._post_process_rewards` subtracts the mean and
 optionally divides by std to produce normalized advantages for training.
+Override that path with `--custom-reward-post-process-path` — see
+[Customization](/user-guide/customization) § Reward.
 
-## 4. Custom reward functions
-
-### `--custom-rm-path`
-
-Replace the built-in dispatch entirely. Signature:
-
-```python
-async def custom_rm(args, samples: list[Sample], **kwargs) -> list[float]:
-    ...
-```
-
-Wired only through `batched_async_rm` — implement per-sample routing inside
-your batched function if needed.
-
-Example registration:
-
-```bash
---custom-rm-path my_project.rewards.aesthetic_rm
-```
-
-To debug a custom RM, load saved rollout tensors and call your function directly
-in a small script — the previous `replay_reward_fn` helper was removed in the
-args refactor.
-
-### API reward service
-
-To score via an HTTP API, implement a batched custom RM. Encode images from
-`sample.generated_output` (see `_sample_to_rgb_hwc_uint8_frames` in
-`miles/rollout/rm_hub/pickscore.py` for the tensor → uint8 path):
-
-```python
-import aiohttp
-from miles.utils.types import Sample
-
-async def api_rm(args, samples: list[Sample], **kwargs) -> list[float]:
-    async with aiohttp.ClientSession() as session:
-        rewards = []
-        for sample in samples:
-            payload = {"prompt": sample.prompt, "image_b64": "<your encoding>"}
-            async with session.post(args.rm_url, json=payload) as resp:
-                rewards.append((await resp.json())["score"])
-        return rewards
-```
-
-Then launch with:
-
-```bash
---custom-rm-path my_project.rewards.api_rm \
---rm-url http://localhost:8000/score
-```
-
-(`--rm-url` is passed through `args` for your function to read; it is not used
-by built-in dispatch.)
-
-### `--custom-reward-post-process-path`
-
-Replace GRPO advantage normalization. Signature:
-
-```python
-def post_process(args, samples) -> tuple[list[float], list[float]]:
-    # Returns (raw_rewards, normalized_rewards)
-    ...
-```
-
-Default normalization (`RolloutManager._post_process_rewards`):
-
-1. Reshape rewards to `(-1, n_samples_per_prompt)`.
-2. Subtract mean (`--globalize-reward-mean` for batch-level, else per-group).
-3. Divide by std when `--grpo-std-normalization` is enabled (default True);
-   `--globalize-reward-std` uses batch-level std.
-
-## 5. Prompt data
+## 4. Prompt data
 
 ### JSONL format
 

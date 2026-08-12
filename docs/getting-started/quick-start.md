@@ -133,12 +133,18 @@ flowchart LR
 4. Push updated LoRA weights to rollout engines via `--lora-ipc-weight-sync`.
 
 This recipe uses **Flow-GRPO** (`--loss-type policy_loss`, the default) with
-LoRA-base KL (`--diffusion-kl-beta 0.04`), full-window SDE scoring
-(`--diffusion-step-strategy-path miles.rollout.step_strategy_hub.sde_window`,
-`--diffusion-num-sde-steps 10`, `--diffusion-sde-window-range 0,10`), noise
-level 0.7, and CFG 4.5. `--deterministic-mode` and `--global-batch-size 64`
-match the CI e2e recipe. Train-side dynamics go through the
-[SDE step backend](/advanced/sde-backend).
+LoRA-base KL (`--diffusion-kl-beta 0.04`), noise level 0.7, and CFG 4.5.
+`--deterministic-mode` and `--global-batch-size 64` match the CI e2e recipe.
+
+Which denoising steps enter the loss is selected by a **step strategy**
+(`--diffusion-step-strategy-path` in `miles/rollout/step_strategy_hub.py`):
+
+| Strategy | Behavior | Typical flags |
+|---|---|---|
+| `sde_window` | Random contiguous window (this recipe) | `--diffusion-num-sde-steps 10`, `--diffusion-sde-window-range 0,10` |
+| `epoch_global_random_choice` | Per-epoch random subset of candidate steps | `--diffusion-sde-candidate-steps …`, `--diffusion-num-sde-steps` |
+
+Train-side dynamics and more on these strategies: [SDE step backend](/advanced/sde-backend).
 
 **DiffusionNFT + PickScore** (3 GPUs, ODE, EMA reference) is a separate recipe
 covered in the SD3 model guide.

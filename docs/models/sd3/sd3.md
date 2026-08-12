@@ -23,10 +23,11 @@ DiT transformer with dual text-encoder conditioning (`encoder_hidden_states` +
 | SD3.5 Medium | [stabilityai/stable-diffusion-3.5-medium](https://huggingface.co/stabilityai/stable-diffusion-3.5-medium) | Default in all SD3 scripts |
 | SD3 (other sizes) | Any checkpoint whose name contains `stable-diffusion-3` or `sd3` | Auto-detected by family resolver |
 
-Override family detection:
+Override family detection when the checkpoint name does not match a registered
+pattern (e.g. a renamed local directory):
 
 ```bash
-export MILES_DIFFUSION_MODEL_FAMILY=sd3
+--diffusion-model-family sd3
 ```
 
 ## 3. Environment setup
@@ -72,9 +73,11 @@ class SD3TrainPipelineConfig(TrainPipelineConfig):
     ]
 ```
 
-Family resolution (`resolve_diffusion_model_family`) matches checkpoint names
-against `hf_ckpt_name_patterns`. Set `--diffusion-model` to the Hugging Face
-model ID used by both FSDP training and sglang-diffusion rollout.
+Family resolution (`resolve_diffusion_model_family`) matches `--hf-checkpoint`
+names against `hf_ckpt_name_patterns`. `--hf-checkpoint` is the single source
+for the HF repo / local directory used by both FSDP training and
+sglang-diffusion rollout; pass `--diffusion-model-family` only to override the
+auto-detected family.
 
 ### SD3-specific training behavior
 
@@ -252,5 +255,6 @@ Online runs: wandb project **`miles-diffusion-nft`**. Held-out
 
 - [Quick Start](/getting-started/quick-start) — SD3.5 Flow-GRPO OCR walkthrough.
 - [Rewards](/user-guide/rewards) — OCR and PickScore scoring.
+- [Customization](/user-guide/customization) — `--*-path` plug-points.
 - [SDE step backend](/advanced/sde-backend) — SDE window (GRPO) vs ODE (NFT).
 - [LoRA weight sync](/advanced/lora) — IPC merge used by both recipes.
