@@ -66,7 +66,6 @@ Registered in `miles/backends/fsdp_utils/configs/sd3.py`:
 @register_train_pipeline_config("sd3")
 class SD3TrainPipelineConfig(TrainPipelineConfig):
     hf_ckpt_name_patterns = ("stable-diffusion-3", "sd3")
-    needs_timestep_scaling = False
     lora_target_modules = [
         "attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out.0",
         "attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", "attn.to_add_out",
@@ -83,7 +82,6 @@ auto-detected family.
 
 | Property | SD3 | Notes |
 |---|---|---|
-| Timestep scaling | Off (`needs_timestep_scaling=False`) | Qwen/Wan families scale timesteps |
 | Condition inputs | `encoder_hidden_states` + `pooled_projections` | Concatenated from rollout trajectory |
 | CFG combine | `neg + scale * (pos - neg)` | Standard classifier-free guidance |
 | Weight sync target | `transformer` (single component) | Multi-component models use comma-separated names |
