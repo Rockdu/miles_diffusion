@@ -528,12 +528,7 @@ def init_rollout_engines(args, pg, all_rollout_engines):
 
 
 def _allocate_rollout_engine_addr_and_ports_normal(*, args, num_engines, rollout_engines):
-    # get ports
-    # there are 4 ports we need to allocate
-    # 1. server port
-    # 2. nccl port
-    # 3. dist_init_addr port
-    # 4. other ports for dp_attention, which is of size 4 + dp_size
+    # Beyond server/nccl/dist_init, dp_attention needs 4 + dp_size more ports.
     num_engines_per_node = max(
         1, min(args.num_gpus_per_node, args.rollout_num_gpus) // args.rollout_num_gpus_per_engine
     )

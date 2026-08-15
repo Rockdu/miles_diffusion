@@ -79,9 +79,7 @@ def add_sglang_diffusion_arguments(parser):
             # Avoid double prefixing if dest somehow already starts with sglang_
             if not original_dest.startswith("sglang_"):
                 final_kwargs["dest"] = f"sglang_{original_dest}"
-        # If 'dest' is not explicitly provided (or is None/not a string),
-        # argparse will derive 'dest' from the (now prefixed) flag names.
-        # E.g., if the first flag is "--sglang-foo-bar", argparse sets dest to "sglang_foo_bar".
+        # With no explicit dest, argparse derives it from the prefixed flag name.
 
         old_add_argument(*new_name_or_flags_list, **final_kwargs)
 

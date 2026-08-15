@@ -260,11 +260,8 @@ class DiffusionUpdateWeightFromTensor(DiffusionUpdateWeight):
         for _dtype, named_tensors in named_tensors_by_dtypes.items():
             flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=named_tensors)
             metadata = flattened_tensor_bucket.get_metadata()
-            # sglang-d WeightsUpdater expects per-module keyed dicts when
-            # load_format="flattened_bucket".
-            # Uses CUDA IPC for cross-process transfer; actor all-gathers FSDP
-            # shards into buckets before the inference engine copies them in.
-            # Requires --colocate (shared GPU visibility).
+            # load_format="flattened_bucket" wants per-module dicts; the handoff is CUDA
+            # IPC, so this path needs --colocate.
             flattened_tensor_data = {
                 target_module: {
                     "flattened_tensor": flattened_tensor_bucket.get_flattened_tensor(),
@@ -431,10 +428,8 @@ class DiffusionUpdateWeightFromTensorLoRA(DiffusionUpdateWeightFromTensor):
             f"actual={(actual or '')[:16] if isinstance(actual, str) else actual}"
         )
 
-        # Cross-engine comparison: only rank 0 does this so we don't spam.
-        # Queries ALL engines' checksums and prints them side by side — the
-        # rank-specific noise_pred drift we've seen is consistent with
-        # engines diverging silently, so this pins it down.
+        # Engines that silently diverge surface as rank-specific noise_pred drift, so
+        # rank 0 compares every engine's checksums side by side.
         if dist.get_rank() != 0:
             return
         try:
