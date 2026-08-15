@@ -34,9 +34,8 @@ class TrainRayActor(RayActor):
         os.environ["MASTER_PORT"] = str(self.master_port)
         os.environ["WORLD_SIZE"] = str(self._world_size)
         os.environ["RANK"] = str(self._rank)
-        # TODO: currently this doesn't work as ray has already set torch.cuda.device_count().
-        # os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-        # os.environ["LOCAL_RANK"] = str(ray.get_gpu_ids()[0])
+        # Ray has already frozen torch.cuda.device_count(), so the visible set is re-pinned
+        # to the single assigned GPU rather than unset.
         local_gpu_id = int(ray.get_gpu_ids()[0])
         os.environ["CUDA_VISIBLE_DEVICES"] = str(local_gpu_id)
         os.environ["LOCAL_RANK"] = "0"

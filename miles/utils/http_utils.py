@@ -88,17 +88,10 @@ def get_host_info():
     final_fallback = "127.0.0.1"
 
     if prefer_ipv6:
-        # [Strict Mode] IPv6 Only
-        # 1. Try UDP V6 Probe
-        # 2. Try Hostname Resolution (V6)
-        # If failed, fallback to V6 loopback. Never mix with V4.
+        # Never fall back across families: a mixed V4/V6 address pair breaks torch rendezvous.
         local_ip = _resolve_ip(socket.AF_INET6, "2001:4860:4860::8888")
         final_fallback = "::1"
     else:
-        # [Strict Mode] IPv4 Only (Default)
-        # 1. Try UDP V4 Probe
-        # 2. Try Hostname Resolution (V4)
-        # If failed, fallback to V4 loopback. Never mix with V6.
         local_ip = _resolve_ip(socket.AF_INET, "8.8.8.8")
         final_fallback = "127.0.0.1"
 

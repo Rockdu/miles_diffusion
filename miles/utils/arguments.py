@@ -621,9 +621,8 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "--n-samples-per-prompt", type=int, default=1, help="Number of responses for each prompt in generation"
             )
 
-            # gbs of the training, note that the gbs is of sample, not of prompts,
-            # so if you hope to train 1 step for each rollout, the global_bach_size should be set as
-            # `rollout_batch_size * n_samples_per_prompt`.
+            # Counted in samples, not prompts: one optimizer step per rollout means
+            # global_batch_size == rollout_batch_size * n_samples_per_prompt.
             reset_arg(parser, "--global-batch-size", type=int, default=None)
             parser.add_argument(
                 "--num-steps-per-rollout",
