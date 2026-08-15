@@ -109,6 +109,11 @@ def _tensor_nbytes(tensor: torch.Tensor) -> int:
     return tensor.numel() * tensor.element_size()
 
 
+def _awaited(param):
+    # Async DTensor redistribute returns a handle with `.wait()`; plain tensors arrive as-is.
+    return param.wait() if hasattr(param, "wait") else param
+
+
 def _assert_lora_ab_pair(layer_prefix: str, tensors: list[tuple[str, torch.Tensor]]) -> None:
     names = [name for name, _ in tensors]
     expected = [f"{layer_prefix}.lora_A", f"{layer_prefix}.lora_B"]
@@ -190,7 +195,7 @@ class DiffusionUpdateWeight(abc.ABC):
             del bucket
 
     def wait_and_update_bucket_weights(self, bucket, target_module: str, weight_update_mode=None):
-        bucket = [(name, param.wait()) if hasattr(param, "wait") else (name, param) for name, param in bucket]
+        bucket = [(name, _awaited(param)) for name, param in bucket]
         self.update_bucket_weights(
             bucket,
             target_module,
@@ -357,7 +362,7 @@ class DiffusionUpdateWeightFromTensorLoRA(DiffusionUpdateWeightFromTensor):
                 # tens of GB at peak — here only one delta is resident at a time.
                 A, B, s = lora_index[name]
                 delta = (self._gather_full(B.weight) @ self._gather_full(A.weight)) * s
-                param = param.wait() if hasattr(param, "wait") else param
+                param = _awaited(param)
                 param = param + delta.to(param.device, param.dtype)
                 del delta
 
@@ -385,7 +390,7 @@ class DiffusionUpdateWeightFromTensorLoRA(DiffusionUpdateWeightFromTensor):
             if verify_pairs is not None:
                 # Wait on async redistribute handle, snapshot CPU copy so the
                 # hash matches what the rollout engine stored (bytes-identical).
-                t = param.wait() if hasattr(param, "wait") else param
+                t = _awaited(param)
                 verify_pairs.append((sglang_d_param_name, t.detach().cpu().contiguous()))
 
         if bucket:

@@ -71,5 +71,5 @@ def patch_modeling_flash_attention_deterministic(modeling: Any, backend: str) ->
         backend,
         get_entrypoints(backend),
         required_label=resolve_required_flash_kernel_label(modeling, backend),
-        package_name=getattr(modeling, "__name__", "modeling"),
+        package_name=modeling.__name__,
     )

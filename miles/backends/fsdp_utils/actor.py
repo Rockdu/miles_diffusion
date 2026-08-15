@@ -365,7 +365,6 @@ class FSDPTrainRayActor(TrainRayActor):
                 "--ref-mode lora_base requires PEFT models exposing disable_adapter() after FSDP wrapping."
             )
 
-        # ------------- Rollout Scheduler Metadata -------------
         scheduler_timesteps, scheduler_sigmas = scheduler_meta_from_rollout(
             rollout_data,
             device=device,
@@ -375,7 +374,6 @@ class FSDPTrainRayActor(TrainRayActor):
         self.scheduler._step_index = None
         self.scheduler._begin_index = None
 
-        # ------------- Micro-batch schedule -------------
         num_optim_steps_per_rollout = self.args.num_steps_per_rollout
         if num_pairs % num_optim_steps_per_rollout != 0:
             raise ValueError(
@@ -412,7 +410,7 @@ class FSDPTrainRayActor(TrainRayActor):
             dp_rank=self.parallel_state.dp_rank,
         )
 
-        # ------------- Recompute old log-probs (impl-consistent PPO ratio) -------------
+        # Recompute under the training forward so the PPO ratio cancels implementation skew.
         if self.args.diffusion_recompute_old_log_prob:
             with timer("recompute_old_log_prob"), torch.no_grad():
                 # write_old_log_prob returns before recording; this is never reduced.
@@ -433,7 +431,6 @@ class FSDPTrainRayActor(TrainRayActor):
                             write_old_log_prob=True,
                         )
 
-        # ------------- Forward / Backward -------------
         with timer("actor_train"):
             microbatch_id = 0
             for optim_step_idx, microbatch_ranges in enumerate(microbatch_schedule):

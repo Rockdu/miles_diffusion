@@ -331,7 +331,7 @@ def _compute_server_args(args, host, port, nccl_port):
         "warmup_mode": "off",
     }
 
-    if getattr(args, "diffusion_flow_shift", None) is not None:
+    if args.diffusion_flow_shift is not None:
         kwargs["flow_shift"] = float(args.diffusion_flow_shift)
 
     # Forward remaining ServerArgs fields set via --sglang-* CLI (ulysses_degree, ring_degree, dp_size, etc.).
@@ -339,7 +339,7 @@ def _compute_server_args(args, host, port, nccl_port):
         if hasattr(args, f"sglang_{attr.name}") and attr.name not in kwargs:
             kwargs[attr.name] = getattr(args, f"sglang_{attr.name}")
 
-    if getattr(args, "use_lora", False) and getattr(args, "lora_ipc_weight_sync", False):
+    if args.use_lora and args.lora_ipc_weight_sync:
         kwargs["lora_target_modules"] = args.lora_target_modules
     # dit_precision / vae_precision are PipelineConfig fields, not ServerArgs, so forward them explicitly (only when changed from the class default, to avoid clobbering a subclass override).
     from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig

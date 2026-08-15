@@ -85,7 +85,7 @@ class MilesModelBackend(BaseModelBackend):
 
     def __init__(self, train_pipeline_config):
         super().__init__(train_pipeline_config)
-        pkg_path = getattr(train_pipeline_config, "model_package", None)
+        pkg_path = train_pipeline_config.model_package
         if not pkg_path:
             raise ValueError(
                 f"{type(train_pipeline_config).__name__} uses MilesModelBackend but "
