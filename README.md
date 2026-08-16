@@ -2,11 +2,13 @@
 
 # Miles Diffusion
 
-### From noise, a world takes shape — one step at a time.
+</div>
 
-*Somehow, we’re already a hundred thousand miles in.*
+> From noise, a world takes shape — one step at a time.
+>
+> Somehow, we’re already a hundred thousand miles in.
 
-<br>
+<div align="center">
 
 **Coming soon.**
 
