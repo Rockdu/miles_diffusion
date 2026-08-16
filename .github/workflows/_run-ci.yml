@@ -276,8 +276,9 @@ jobs:
             python-multipart pyzmq scipy sentencepiece setproctitle soundfile \
             tiktoken timm torchvision==0.26.0 uvicorn uvloop watchfiles xgrammar
           # sglang's memory_pool_host.py unconditionally imports sgl_kernel
-          # on non-NPU/XPU/MPS hardware. sgl_kernel is GPU-only — install a
-          # local stub so imports succeed at module load.
+          # on non-NPU/XPU/MPS hardware. sgl_kernel is GPU-only. multimodal_gen
+          # similarly hard-imports cache_dit at package load. Install local
+          # stubs so both imports succeed at module load.
           uv pip install tests/ci/cpu_stubs
 
       - name: Resolve suite plan
