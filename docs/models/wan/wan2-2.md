@@ -46,7 +46,7 @@ Registered in `miles/backends/fsdp_utils/configs/wan2_2.py`:
 
 Canonical recipe: `scripts/run_diffusion_grpo_wan22_pickscore_5gpu.py`
 
-**Status:** [○ NV — Not verified](/user-guide/recipe-verification#nv)
+**Status:** [○ NV — Not verified](../../user-guide/recipe-verification.md#nv)
 
 ```bash
 python3 scripts/run_diffusion_grpo_wan22_pickscore_5gpu.py
@@ -57,9 +57,9 @@ python3 scripts/run_diffusion_grpo_wan22_pickscore_5gpu.py
 
 Recipe: `scripts/run_diffusion_grpo_wan22_pickscore_17gpu_multinode.py`
 (full finetune, no LoRA, true on-policy). Start the
-[multi-node Ray cluster](/user-guide/launch-script#multi-node-training), then run on the head node:
+[multi-node Ray cluster](../../user-guide/launch-script.md#multi-node-training), then run on the head node:
 
-**Status:** [🧩 PG — Proxy gated](/user-guide/recipe-verification#pg)
+**Status:** [🧩 PG — Proxy gated](../../user-guide/recipe-verification.md#pg)
 
 ```bash
 MILES_SCRIPT_EXTERNAL_RAY=1 python3 scripts/run_diffusion_grpo_wan22_pickscore_17gpu_multinode.py
@@ -71,7 +71,7 @@ MILES_SCRIPT_EXTERNAL_RAY=1 python3 scripts/run_diffusion_grpo_wan22_pickscore_1
 
 Recipe: `scripts/run_diffusion_sft_wan22.py`
 
-**Status:** [○ NV — Not verified](/user-guide/recipe-verification#nv)
+**Status:** [○ NV — Not verified](../../user-guide/recipe-verification.md#nv)
 
 ```bash
 MILES_SCRIPT_DATA_JSONL=/abs/data.jsonl python3 scripts/run_diffusion_sft_wan22.py
@@ -100,8 +100,8 @@ MILES_SCRIPT_DATA_JSONL=/abs/data.jsonl python3 scripts/run_diffusion_sft_wan22.
 
 ## 6. Pairs well with
 
-- [Single-Prompt Multi-Generation](/advanced/single-prompt-multi-gen) — the microgroup mechanics behind
+- [Single-Prompt Multi-Generation](../../advanced/single-prompt-multi-gen.md) — the microgroup mechanics behind
   `--rollout-microgroup-size 8`.
-- [LoRA Training and Weight Sync](/advanced/lora) — IPC merge used by the GRPO recipe.
-- [SDE Step Backend](/advanced/sde-backend) — how the trained SDE step is scored train-side.
-- [Rewards](/user-guide/rewards) — PickScore worker pool configuration.
+- [LoRA Training and Weight Sync](../../advanced/lora.md) — IPC merge used by the GRPO recipe.
+- [SDE Step Backend](../../advanced/sde-backend.md) — how the trained SDE step is scored train-side.
+- [Rewards](../../user-guide/rewards.md) — PickScore worker pool configuration.

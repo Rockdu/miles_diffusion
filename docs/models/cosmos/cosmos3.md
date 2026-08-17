@@ -58,7 +58,7 @@ From `miles/backends/fsdp_utils/configs/cosmos3.py`:
 Canonical recipe: `scripts/run_diffusion_grpo_cosmos3_pickscore_t2i_4gpu.py` — train, rollout,
 and PickScore colocated on 4 GPUs; T2I (832×480, 1 frame).
 
-**Status:** [📈 V — Verified](/user-guide/recipe-verification#v)
+**Status:** [📈 V — Verified](../../user-guide/recipe-verification.md#v)
 
 ```bash
 export SGLANG_DISABLE_COSMOS3_GUARDRAILS=1   # RL scores raw samples; skip serving-side guardrail models
@@ -87,6 +87,6 @@ The 4-GPU colocated Cosmos3-Nano recipe raises PickScore
 
 ## 7. Pairs well with
 
-- [LoRA Training and Weight Sync](/advanced/lora) — GEN-tower LoRA sync.
-- [Rewards](/user-guide/rewards) — PickScore worker pool configuration.
+- [LoRA Training and Weight Sync](../../advanced/lora.md) — GEN-tower LoRA sync.
+- [Rewards](../../user-guide/rewards.md) — PickScore worker pool configuration.
 

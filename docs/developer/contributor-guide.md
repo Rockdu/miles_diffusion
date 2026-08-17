@@ -207,7 +207,7 @@ The body explains **why**; the diff already shows what.
 - [ ] `pre-commit run --all-files` passes.
 - [ ] `pytest tests/fast -x -q` is green.
 - [ ] `python3 train_diffusion.py --help` still parses (any argparse change).
-- [ ] A new public flag is documented in [CLI Reference](/user-guide/cli-reference).
+- [ ] A new public flag is documented in [CLI Reference](../user-guide/cli-reference.md).
 - [ ] A new model family has a page under `docs/models/`.
 - [ ] Numeric changes are called out, and e2e standards re-recorded if they moved.
 - [ ] New behaviour has a test, registered with the right suite and label.

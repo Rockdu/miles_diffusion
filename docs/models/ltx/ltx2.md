@@ -37,7 +37,7 @@ Registered in `miles/backends/fsdp_utils/configs/ltx.py`:
 | Property | Value | Why |
 |---|---|---|
 | Velocity → noise | `forward_velocity` reconstructs x0 via `ltx_core.utils.to_denoised` in fp32 and divides back out | Algebraically an identity, but the fp32 rounding path is what the e2e standards were recorded against |
-| Boundary dtypes | `latents` / `cond` cast to the forward dtype, `timestep` passthrough | Element-wise math anchors on `latents.dtype` and rollout runs bf16 — see [Dtype Control](/advanced/dtype-control) |
+| Boundary dtypes | `latents` / `cond` cast to the forward dtype, `timestep` passthrough | Element-wise math anchors on `latents.dtype` and rollout runs bf16 — see [Dtype Control](../../advanced/dtype-control.md) |
 | Precision | bf16 end to end (master, reduce, forward, engine) + math-SDPA on both sides | Matches the original bitwise E2E reference; math-SDPA is deterministic by construction |
 | SDE | CPS kernel, `sde_timestep_divisor = 1000.0` | σ comes straight from the carried rollout timesteps rather than a scheduler lookup; log-prob drops its constants |
 | LoRA targets | Attention + FFN: `to_q`, `to_k`, `to_v`, `to_out.0`, `net.0.proj`, `net.2` | |
@@ -48,7 +48,7 @@ Registered in `miles/backends/fsdp_utils/configs/ltx.py`:
 Canonical recipe: `scripts/run_diffusion_grpo_ltx23_sglang.py` — 4 colocate GPUs + 1 PickScore
 GPU, 57 frames @ 24 fps, 512×768, PickScore reward.
 
-**Status:** [🛡️ FG — Fully gated](/user-guide/recipe-verification#fg)
+**Status:** [🛡️ FG — Fully gated](../../user-guide/recipe-verification.md#fg)
 
 ```bash
 python3 scripts/run_diffusion_grpo_ltx23_sglang.py
@@ -80,6 +80,6 @@ A future LTX update will make `train/model_output_mean_abs_diff` **0.0** and swi
 
 ## 7. Pairs well with
 
-- [Dtype Control](/advanced/dtype-control) — the boundary-dtype policy is why LTX has one.
-- [Deterministic Training](/advanced/deterministic) — `sdpa_math` is the deterministic-safe
+- [Dtype Control](../../advanced/dtype-control.md) — the boundary-dtype policy is why LTX has one.
+- [Deterministic Training](../../advanced/deterministic.md) — `sdpa_math` is the deterministic-safe
   backend this recipe relies on.
