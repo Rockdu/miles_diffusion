@@ -9,7 +9,7 @@ python3 scripts/run_diffusion_grpo_pickscore_5gpu_flowgrpo_aligned.py
 ```
 
 This page explains what that command does and how to change what it runs. For the meaning of
-individual flags, see the [CLI Reference](/user-guide/cli-reference).
+individual flags, see the [CLI Reference](cli-reference.md).
 
 ## How a launch script starts a training job
 
@@ -137,7 +137,7 @@ train pairs           = samples × (number of SDE step indices)
 ```
 
 The trajectory-level knobs are locked by
-[the batch-knob invariant](/user-guide/concepts#the-batch-knob-invariant); contradictory values
+[the batch-knob invariant](concepts.md#the-batch-knob-invariant); contradictory values
 abort at parse time. `global_batch_size` counts samples and must divide by `dp_size`
 (= train world size ÷ `--sequence-parallel-size`).
 
@@ -258,6 +258,6 @@ Reward workers (`--pickscore-num-workers 4 --pickscore-num-gpus-per-worker 0.25`
 
 ## Next
 
-- [CLI Reference](/user-guide/cli-reference) — every flag, grouped.
-- [Core Concepts](/user-guide/concepts) — what one rollout iteration does, object by object.
-- [Dtype Control](/advanced/dtype-control) — what the three dtype flags actually do.
+- [CLI Reference](cli-reference.md) — every flag, grouped.
+- [Core Concepts](concepts.md) — what one rollout iteration does, object by object.
+- [Dtype Control](../advanced/dtype-control.md) — what the three dtype flags actually do.

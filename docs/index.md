@@ -17,11 +17,11 @@ reproducible.
   architectures plug in without touching the trainer.
 - **LoRA training with ipc-handle weight sync.** PEFT LoRA on the FSDP2 actor; each iteration ships only
   `lora_A`/`lora_B` pairs to the rollout engines over CUDA IPC and merges them engine-side — no full-weight transfer, no
-  separate merge or conversion step. See [LoRA Training and Weight Sync](/advanced/lora).
+  separate merge or conversion step. See [LoRA Training and Weight Sync](advanced/lora.md).
 - **Quality control on three fronts.** Deterministic mode makes runs bitwise reproducible and backs the CI e2e
   regression suite; sglang-side monkey patches manage train/rollout alignment; and an FSDP2 param-dtype patch manages
   precision — by providing per-parameter level fp32 precision control over FSDP2 under the mixed-precision policy. See
-  [Deterministic Training](/advanced/deterministic) and [Dtype Control](/advanced/dtype-control).
+  [Deterministic Training](advanced/deterministic.md) and [Dtype Control](advanced/dtype-control.md).
 - **SFT, DiffusionNFT, and Flow-GRPO under one trainer.** The loss type, training-batch preparation, rollout function,
   and reward function are all **replaceable components**, so integrating a new algorithm — or swapping in your own
   customized component — is easy.
@@ -38,17 +38,17 @@ reproducible.
 ## Supported models
 
 Each model name links to its recipe page. Every documented recipe is labeled with a
-[recipe verification level](/user-guide/recipe-verification).
+[recipe verification level](user-guide/recipe-verification.md).
 
 
 | Model                                                   | Task      | Canonical recipes                         |
 | ------------------------------------------------------- | --------- | ----------------------------------------- |
-| [Stable Diffusion 3.5](/models/sd3/sd3)                 | T2I       | Flow-GRPO + OCR, DiffusionNFT + PickScore |
-| [Qwen-Image](/models/qwen-image/qwen-image)             | T2I       | Flow-GRPO + PickScore (flow_grpo-aligned) |
-| [Wan2.2-T2V-A14B](/models/wan/wan2-2)                   | T2V       | Flow-GRPO + PickScore, LoRA SFT           |
-| [LTX-2.3](/models/ltx/ltx2)                             | T2V       | Flow-GRPO + PickScore                     |
-| [Cosmos3 (Edge / Nano / Super)](/models/cosmos/cosmos3) | T2I       | Flow-GRPO + PickScore                     |
-| [MiniMax H3](/models/h3/h3)                             | T2VA      | **Not merged** — [PR #154](https://github.com/radixark/miles_diffusion/pull/154); 2-GPU recipe; large-scale coming soon |
+| [Stable Diffusion 3.5](models/sd3/sd3.md)                 | T2I       | Flow-GRPO + OCR, DiffusionNFT + PickScore |
+| [Qwen-Image](models/qwen-image/qwen-image.md)             | T2I       | Flow-GRPO + PickScore (flow_grpo-aligned) |
+| [Wan2.2-T2V-A14B](models/wan/wan2-2.md)                   | T2V       | Flow-GRPO + PickScore, LoRA SFT           |
+| [LTX-2.3](models/ltx/ltx2.md)                             | T2V       | Flow-GRPO + PickScore                     |
+| [Cosmos3 (Edge / Nano / Super)](models/cosmos/cosmos3.md) | T2I       | Flow-GRPO + PickScore                     |
+| [MiniMax H3](models/h3/h3.md)                             | T2VA      | **Not merged** — [PR #154](https://github.com/radixark/miles_diffusion/pull/154); 2-GPU recipe; large-scale coming soon |
 
 
 
@@ -74,13 +74,12 @@ Each model name links to its recipe page. Every documented recipe is labeled wit
 
 ## Start here
 
-1. **[Installation](/getting-started/installation)** — Docker image, pinned dependency versions, bare-metal setup.
-2. **[Quick Start](/getting-started/quick-start)** — a working Flow-GRPO run on SD3.5 with 2 GPUs.
-3. **[Core Concepts](/user-guide/concepts)** — the four objects in every miles-diffusion job and the loop that connects
+1. **[Installation](getting-started/installation.md)** — Docker image, pinned dependency versions, bare-metal setup.
+2. **[Quick Start](getting-started/quick-start.md)** — a working Flow-GRPO run on SD3.5 with 2 GPUs.
+3. **[Core Concepts](user-guide/concepts.md)** — the four objects in every miles-diffusion job and the loop that connects
    them.
-4. **[Training Script Walkthrough](/user-guide/training-script-walkthrough)** — every argument group in a launch script,
-   annotated.
-5. **[Rewards](/user-guide/rewards)** — built-in reward models and custom reward hooks.
+4. **[Launch Scripts](user-guide/launch-script.md)** — every argument group in a launch script, annotated.
+5. **[Rewards](user-guide/rewards.md)** — built-in reward models and custom reward hooks.
 6. **Model guides** — per-model config and recipes, starting from the [supported models](#supported-models) table above.
 
 

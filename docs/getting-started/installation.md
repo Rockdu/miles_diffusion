@@ -167,6 +167,6 @@ so the floor is set by whichever of the two needs more memory, not by their sum.
 
 ## Next
 
-- [Launch Scripts](/user-guide/launch-script) — what a launch script does and how to override a
+- [Launch Scripts](../user-guide/launch-script.md) — what a launch script does and how to override a
   recipe.
-- [CLI Reference](/user-guide/cli-reference) — every flag.
+- [CLI Reference](../user-guide/cli-reference.md) — every flag.
