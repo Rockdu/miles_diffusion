@@ -21,7 +21,7 @@ register_e2e_ci(
     est_time=900,
     suite="stage-c-3-gpu-h200",
     script="scripts/run_diffusion_nft_sd3_pickscore.py",
-    args=["--num-rollout", "4", "--cuda-visible-devices", "0,1,2"],
+    args=["--num-rollout", "4"],
     metrics=[
         "rollout/reward/raw_num_samples",
         "rollout/reward/raw_mean",
