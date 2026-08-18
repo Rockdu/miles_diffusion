@@ -6,9 +6,12 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/radixark/miles_diffusion" alt="License"></a>
 </p>
 
-**[News](#news)** | **[Quick Start](#quick-start)** | **[Key Features](#key-features)** | **[Documentation](https://miles.radixark.com/docs/diffusion)**
-
-
+<p align="center">
+  <a href="#news"><strong>News</strong></a> |
+  <a href="#quick-start"><strong>Quick Start</strong></a> |
+  <a href="#key-features"><strong>Key Features</strong></a> |
+  <a href="https://miles.radixark.com/docs/diffusion"><strong>Documentation</strong></a>
+</p>
 
 ---
 
