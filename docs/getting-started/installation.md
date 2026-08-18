@@ -149,10 +149,9 @@ On a machine with no sglang GPU kernels installed, install the CPU stubs first, 
 
 | | |
 |---|---|
-| CI hardware | H200 |
+| Validated GPUs | H200 — what the CI runners are, and what every shipped recipe was tuned on. |
 | Minimum for a real run | 2 GPUs — SD3.5-medium LoRA GRPO colocated (`scripts/run_diffusion_grpo_sd3_ocr_sglang.py`) |
-| Dedicated reward layout | 4 train/rollout GPUs + 1 reward GPU (the Qwen-Image, Wan2.2 5-GPU, and LTX recipes) |
-| Fully colocated layout | 4 GPUs shared by train, rollout, and reward (the Cosmos3-Nano recipe) |
+| Typical | 4 train GPUs + 1 dedicated reward GPU (the Qwen-Image / Wan2.2 / LTX recipes) |
 
 Under `--colocate` the training actor and the rollout engines time-share the same GPUs,
 so the floor is set by whichever of the two needs more memory, not by their sum.
