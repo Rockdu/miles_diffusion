@@ -50,7 +50,7 @@ do not.
 | `--rollout-num-gpus` | – | GPUs for rollout-side work. Forced to the train world size under `--colocate`. |
 | `--rollout-num-gpus-per-engine` | `1` | GPUs per sglang-d engine (its TP × SP). |
 | `--num-gpus-per-node` | `8` | Total GPUs the job may use per node. **Set this when using fewer than 8.** |
-| `--colocate` | off | Time-share GPUs between trainer and engines; forces `--offload-train` and `--offload-rollout` on. The flag defaults off, but every shipped GRPO/NFT recipe enables it because the implemented RL weight-sync path uses CUDA IPC over shared GPU ids. `--debug-rollout-only` and train-only SFT can run without it. |
+| `--colocate` | off | Required: CUDA IPC weight sync currently supports only colocated trainer and rollout execution. |
 
 ### Batch sizing
 
@@ -116,7 +116,7 @@ See [Dtype Control](../advanced/dtype-control.md).
 | `--rollout-num-gpus` | int | – | For train-only SFT, unset colocates encoders with training; set it to reserve dedicated encoder GPUs. |
 | `--rollout-num-gpus-per-engine` | int | `1` | Like sglang's `tp_size`. |
 | `--num-gpus-per-node` | int | `8` | |
-| `--colocate` | flag | off | Also sets `--offload`. Shipped RL recipes enable it explicitly because weight sync uses CUDA IPC and assumes trainer and engines share GPU ids. |
+| `--colocate` | flag | off | Required: CUDA IPC weight sync currently supports only colocated trainer and rollout execution. |
 | `--offload` | flag | off | `--offload-train` + `--offload-rollout`. |
 | `--offload-train` / `--no-offload-train` | tri-state | – | Always on under `--colocate`. |
 | `--offload-rollout` / `--no-offload-rollout` | tri-state | – | Always on under `--colocate`. |
