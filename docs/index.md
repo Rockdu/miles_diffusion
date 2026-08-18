@@ -11,7 +11,7 @@ pipeline, or from a native package when a family brings its own modeling. Shippe
 ## Core features
 
 - **Verified Recipes for Latest Diffusion Models.** Launchers for Wan2.2-T2V-A14B, Qwen-Image,
-  LTX-2.3, the Cosmos3 MoT omni family, and SD3.5. `TrainPipelineConfig` allows for easy model support.
+  LTX-2.3, Cosmos3-Nano, and SD3.5. `TrainPipelineConfig` allows for easy model support.
 - **Quality control on three fronts.** Deterministic mode supports bit-for-bit comparisons for recipes covered by
   committed E2E standards; sglang-side monkey patches reduce train/rollout mismatches; and an FSDP2 param-dtype patch
   provides per-parameter fp32 control under the mixed-precision policy. See [Deterministic
@@ -34,7 +34,8 @@ pipeline, or from a native package when a family brings its own modeling. Shippe
 ## Supported models
 
 Each model name links to its recipe page. Every documented recipe is labeled with a
-[recipe verification level](user-guide/recipe-verification.md).
+[recipe verification level](user-guide/recipe-verification.md). Validated models also
+appear in the [Miles model list](https://miles.radixark.com/docs#supported-models).
 
 
 | Model                                                   | Task      | Canonical recipes                         |
@@ -43,7 +44,7 @@ Each model name links to its recipe page. Every documented recipe is labeled wit
 | [Qwen-Image](models/qwen-image/qwen-image.md)             | T2I       | Flow-GRPO + PickScore (flow_grpo-aligned) |
 | [Wan2.2-T2V-A14B](models/wan/wan2-2.md)                   | T2V       | Flow-GRPO + PickScore, LoRA SFT           |
 | [LTX-2.3](models/ltx/ltx2.md)                             | T2V       | Flow-GRPO + PickScore                     |
-| [Cosmos3 (Edge / Nano / Super)](models/cosmos/cosmos3.md) | T2I       | Flow-GRPO + PickScore                     |
+| [Cosmos3-Nano](models/cosmos/cosmos3.md)                   | T2I       | Flow-GRPO + PickScore                     |
 | [MiniMax H3](models/h3/h3.md)                             | T2VA      | **Not merged** — [PR #154](https://github.com/radixark/miles_diffusion/pull/154); 2-GPU PR-only recipe |
 
 
