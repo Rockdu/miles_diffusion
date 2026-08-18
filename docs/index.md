@@ -6,17 +6,12 @@ title: Miles-Diffusion Documentation
 models. [sglang-diffusion](https://github.com/sgl-project/sglang/tree/main/python/sglang/multimodal_gen) serves the
 rollout, and the DiT trains under **FSDP2** on a backend that co-evolves with Miles' own. Models load from a diffusers
 pipeline, or from a native package when a family brings its own modeling. Shipped recipes carry explicit
-[verification levels](user-guide/recipe-verification.md); not every recipe has a complete training run or a default CI
-gate. Custom rewards, losses, and rollout functions plug in through flags.
+[verification levels](user-guide/recipe-verification.md). Custom rewards, losses, and rollout functions plug in through flags.
 
 ## Core features
 
-- **Recipes for supported diffusion models.** Launchers for Wan2.2-T2V-A14B, Qwen-Image,
-  LTX-2.3, the Cosmos3 MoT omni family, and SD3.5. A per-family `TrainPipelineConfig` isolates model quirks so new
-  architectures plug in without touching the trainer.
-- **LoRA training with IPC-handle weight sync.** With `--lora-ipc-weight-sync`, PEFT LoRA on the FSDP2 actor ships only
-  `lora_A`/`lora_B` pairs to colocated rollout engines over CUDA IPC and merges them engine-side. See
-  [LoRA Training and Weight Sync](advanced/lora.md).
+- **Verified Recipes for Latest Diffusion Models.** Launchers for Wan2.2-T2V-A14B, Qwen-Image,
+  LTX-2.3, the Cosmos3 MoT omni family, and SD3.5. `TrainPipelineConfig` allows for easy model support.
 - **Quality control on three fronts.** Deterministic mode supports bit-for-bit comparisons for recipes covered by
   committed E2E standards; sglang-side monkey patches reduce train/rollout mismatches; and an FSDP2 param-dtype patch
   provides per-parameter fp32 control under the mixed-precision policy. See [Deterministic
@@ -30,6 +25,9 @@ gate. Custom rewards, losses, and rollout functions plug in through flags.
 - **Multiple parallelisms.** The rollout engines scale with **tensor and sequence parallelism** to support large models
   and very long contexts; training scales with **USP (Ulysses × Ring)**, built from each family's diffusers `_cp_plan` —
   or a self-written one — for agile model integration.
+- **LoRA training support.** With `--lora-ipc-weight-sync`, PEFT LoRA on the FSDP2 actor ships only
+  `lora_A`/`lora_B` pairs to colocated rollout engines over CUDA IPC and merges them engine-side. See
+  [LoRA Training and Weight Sync](advanced/lora.md).
 
 
 
