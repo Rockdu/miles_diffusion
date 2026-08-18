@@ -4,9 +4,8 @@ description: What --deterministic-mode covers, which attention backends it accep
 ---
 
 `--deterministic-mode` configures the **training actor's** forward and backward for repeatable execution with the same
-hardware, topology, software stack, and inputs. Its argument-level gate is not yet complete: it rejects known
-nondeterministic attention backends, but it cannot prove that every selected kernel or operator is deterministic. The
-committed E2E standards demonstrate bit-for-bit repeatability only for the specific recipes they cover.
+hardware, topology, software stack, and inputs. However, some argument gates are still incomplete, so configurations
+that do not support deterministic execution may still pass validation.
 
 ## What it turns on
 
