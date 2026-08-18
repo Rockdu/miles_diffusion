@@ -1,8 +1,12 @@
+<div align="center">
+
 # Miles Diffusion
 
 [![GitHub Repo](https://img.shields.io/badge/github-radixark%2Fmiles__diffusion-black?logo=github)](https://github.com/radixark/miles_diffusion)
 [![Docs](https://img.shields.io/badge/docs-miles.radixark.com-d55816)](https://miles.radixark.com/docs/diffusion)
 [![License](https://img.shields.io/github/license/radixark/miles_diffusion)](LICENSE)
+
+</div>
 
 **[News](#news)** | **[Quick Start](#quick-start)** | **[Key Features](#key-features)** | **[Documentation](https://miles.radixark.com/docs/diffusion)**
 
