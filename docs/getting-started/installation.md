@@ -149,7 +149,7 @@ On a machine with no sglang GPU kernels installed, install the CPU stubs first, 
 
 | | |
 |---|---|
-| CI hardware | H200. The default image pulls a Hopper FlashAttention-3 wheel. |
+| CI hardware | H200 |
 | Minimum for a real run | 2 GPUs — SD3.5-medium LoRA GRPO colocated (`scripts/run_diffusion_grpo_sd3_ocr_sglang.py`) |
 | Dedicated reward layout | 4 train/rollout GPUs + 1 reward GPU (the Qwen-Image, Wan2.2 5-GPU, and LTX recipes) |
 | Fully colocated layout | 4 GPUs shared by train, rollout, and reward (the Cosmos3-Nano recipe) |
