@@ -12,6 +12,7 @@ def _server_args(**overrides):
         hf_checkpoint="Qwen/Qwen-Image",
         diffusion_flow_shift=None,
         rollout_num_gpus_per_engine=1,
+        sglang_tp_size=1,
         sglang_sp_degree=None,
         sglang_enable_cfg_parallel=False,
         use_lora=True,

@@ -295,6 +295,24 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Width of the trained media: rollout output width, SFT encode center-crop width.",
             )
             parser.add_argument(
+                "--diffusion-h3-aspect-ratio",
+                type=str,
+                default="16:9",
+                help="MiniMax H3 target aspect_ratio: one of 21:9, 16:9, 4:3, 1:1, 3:4, 9:16.",
+            )
+            parser.add_argument(
+                "--diffusion-h3-duration-seconds",
+                type=float,
+                default=5.0,
+                help="MiniMax H3 target duration_seconds for rollout (4.0-15.0).",
+            )
+            parser.add_argument(
+                "--diffusion-audio-flow-shift",
+                type=float,
+                default=3.0,
+                help="MiniMax H3 audio_flow_shift for rollout.",
+            )
+            parser.add_argument(
                 "--diffusion-negative-prompt",
                 type=str,
                 default=None,

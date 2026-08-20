@@ -246,9 +246,11 @@ class DiffusersModelBackend(BaseModelBackend):
 
     @staticmethod
     def _component_class(spec):
-        if not isinstance(spec, (list, tuple)) or len(spec) != 2:
+        # Classic pipelines write ``[library, class_name]``; modular ones append a
+        # loading-spec dict (H3's MiniMaxH3ModularPipeline). Nothing else is valid.
+        if not isinstance(spec, (list, tuple)) or len(spec) not in (2, 3):
             return None
-        library, class_name = spec
+        library, class_name = spec[0], spec[1]
         if not library or not class_name:
             return None
         try:
