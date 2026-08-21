@@ -300,9 +300,13 @@ async def generate_and_rm_group(
 
     # for the rm that need the whole group, we will do the rm here
     if args.group_rm:
-        rewards = await batched_async_rm(args, group)
+        st = hooks.StageTimer()
+        with st.stage("reward"):
+            rewards = await batched_async_rm(args, group)
+        st.attach(group)
         for sample, reward in zip(group, rewards, strict=False):
             sample.reward = reward
+            hooks.record_trajectory(sample)
 
     return group
 
