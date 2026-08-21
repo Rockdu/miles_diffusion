@@ -150,6 +150,10 @@ class MilesRouter:
                 out_headers = dict(response.headers)
 
             stamps.mark("router_reply")
+            # These describe the worker->router hop, not the router->client one;
+            # forwarding them corrupts framing when the encodings differ.
+            for hop in ("content-length", "transfer-encoding", "connection", "date", "server"):
+                out_headers.pop(hop, None)
             out_headers[ROUTER_TIMING_HEADER] = stamps.to_header()
             out_headers[ROUTER_WORKER_HEADER] = worker_url
             return Response(
