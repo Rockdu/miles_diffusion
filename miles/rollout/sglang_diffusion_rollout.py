@@ -162,11 +162,17 @@ class GenerateState(metaclass=SingletonMeta):
 
 
 async def generate_microgroup(
-    args: Namespace, microgroup: list[Sample], sampling_params: dict[str, Any], *, evaluation: bool = False
+    args: Namespace,
+    microgroup: list[Sample],
+    sampling_params: dict[str, Any],
+    *,
+    evaluation: bool = False,
+    tracer: hooks.RequestTracer | None = None,
 ) -> list[Sample]:
     """Generate using traditional SGLang router with token-based workflow"""
 
     state = GenerateState(args)
+    tracer = tracer if tracer is not None else hooks.RequestTracer(hooks.current_rollout_id())
     url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/rollout/generate"
 
     # Prepare payload for sglang-diffusion server
@@ -193,10 +199,17 @@ async def generate_microgroup(
 
     st = hooks.StageTimer()
     with st.stage("generate"):
-        raw = await post(url, payload, raw=True)
+        # timed: the reply carries the router's and the engine's marks, the only
+        # way to see inside this wait
+        result = await post(url, payload, raw=True, timed=True)
+    tracer.absorb_response(result)
+    tracer.resp_bytes = len(result.body)
     with st.stage("deserialize"):
-        ref = state.next_parser().apply_raw.remote(microgroup, raw)
-        microgroup = await asyncio.to_thread(ray.get, ref)
+        tracer.mark("parser_submit")
+        ref = state.next_parser().apply_raw.remote(microgroup, result.body)
+        microgroup, parser_marks = await asyncio.to_thread(ray.get, ref)
+        tracer.marks.absorb(parser_marks)
+        tracer.mark("parser_done")
     st.attach(microgroup)
 
     # Stash the SDE/training step indices on each sample so _train_core can
@@ -223,9 +236,12 @@ async def generate_and_rm_microgroup(
 ) -> list[Sample]:
 
     state = GenerateState(args)
+    tracer = hooks.RequestTracer(hooks.current_rollout_id())
+    tracer.mark("req_start")
 
     # generate
     async with state.semaphore:
+        tracer.mark("slot_acquired")
         with state.dp_rank_context() as _:
             if args.custom_generate_function_path is not None:
                 custom_generate_func = load_function(args.custom_generate_function_path)
@@ -234,20 +250,26 @@ async def generate_and_rm_microgroup(
                 else:
                     microgroup = await custom_generate_func(args, microgroup, sampling_params)
             else:
-                microgroup = await generate_microgroup(args, microgroup, sampling_params, evaluation=evaluation)
+                microgroup = await generate_microgroup(
+                    args, microgroup, sampling_params, evaluation=evaluation, tracer=tracer
+                )
 
     # for the rm that need the whole group, we will not do the rm here
     if args.group_rm:
+        tracer.done(microgroup)
         return microgroup
 
     # calculate the reward for the microgroup
     st = hooks.StageTimer()
+    tracer.mark("reward_start")
     with st.stage("reward"):
         rewards = await batched_async_rm(args, microgroup)
+    tracer.mark("reward_end")
     st.attach(microgroup)
     for sample, reward in zip(microgroup, rewards, strict=True):
         sample.reward = reward
         hooks.record_trajectory(sample)
+    tracer.done(microgroup)
     return microgroup
 
 

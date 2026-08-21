@@ -5,6 +5,8 @@ import logging
 import os
 import random
 import socket
+import time
+from typing import Any, NamedTuple
 
 import httpx
 import msgpack
@@ -143,11 +145,31 @@ def _parse_response(response, raw=False):
         return response.text
 
 
-async def _post(client, url, payload, max_retries=60, raw=False):
+class PostResult(NamedTuple):
+    body: Any
+    headers: dict[str, str]
+    marks: dict[str, float]
+
+
+async def _send_once(client, url, payload, timed):
+    """One POST attempt. Streamed when timed: a rollout reply's first byte and
+    last byte are seconds apart, and only the sender sees both."""
+    if not timed:
+        return await client.post(url, json=payload or {}), {}
+
+    marks = {"http_send": time.time()}
+    async with client.stream("POST", url, json=payload or {}) as response:
+        marks["http_headers"] = time.time()
+        await response.aread()
+        marks["http_recv_done"] = time.time()
+    return response, marks
+
+
+async def _post(client, url, payload, max_retries=60, raw=False, timed=False):
     retry_count = 0
     while retry_count < max_retries:
         try:
-            response = await client.post(url, json=payload or {})
+            response, marks = await _send_once(client, url, payload, timed)
             response.raise_for_status()
             output = _parse_response(response, raw=raw)
         except Exception as e:
@@ -168,6 +190,8 @@ async def _post(client, url, payload, max_retries=60, raw=False):
             continue
         break
 
+    if timed:
+        return PostResult(output, dict(response.headers), marks)
     return output
 
 
@@ -218,8 +242,8 @@ def _init_ray_distributed_post(args):
                 timeout=httpx.Timeout(None),
             )
 
-        async def do_post(self, url, payload, max_retries=60, raw=False):
-            return await _post(self._client, url, payload, max_retries, raw)
+        async def do_post(self, url, payload, max_retries=60, raw=False, timed=False):
+            return await _post(self._client, url, payload, max_retries, raw, timed)
 
     # Create actors per node
     created = []
@@ -243,7 +267,9 @@ def _init_ray_distributed_post(args):
     _post_actors = created
 
 
-async def post(url, payload, max_retries=60, raw=False):
+async def post(url, payload, max_retries=60, raw=False, timed=False):
+    """POST ``payload``. With ``timed``, return a :class:`PostResult` instead of
+    just the body, carrying the reply headers and this hop's own timestamps."""
     # If distributed mode is enabled and actors exist, dispatch via Ray.
     if _distributed_post_enabled and _post_actors:
         try:
@@ -252,10 +278,10 @@ async def post(url, payload, max_retries=60, raw=False):
             actor = _next_actor()
             if actor is not None:
                 # Use a thread to avoid blocking the event loop on ray.get
-                obj_ref = actor.do_post.remote(url, payload, max_retries, raw)
+                obj_ref = actor.do_post.remote(url, payload, max_retries, raw, timed)
                 return await asyncio.to_thread(ray.get, obj_ref)
         except Exception as e:
             logger.info(f"[http_utils] Distributed POST failed, falling back to local: {e} (url={url})")
             # fall through to local
 
-    return await _post(_http_client, url, payload, max_retries, raw)
+    return await _post(_http_client, url, payload, max_retries, raw, timed)
