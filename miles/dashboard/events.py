@@ -54,6 +54,26 @@ SPAN_KINDS = {
 
 
 @dataclass
+class RequestEvent:
+    """One rollout request's wall-clock marks, keyed by miles.utils.request_timing.
+
+    The marks, not the leg durations derived from them: the reader places every
+    leg at the time it happened, and durations are a subtraction away.
+    """
+
+    rollout_id: int
+    request_id: str
+    group_index: int
+    sample_indices: list[int]
+    marks: dict[str, float]
+    worker: str
+    resp_bytes: int
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class TrajectoryEvent:
     ts: float
     kind: str

@@ -7,8 +7,8 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
-from miles.dashboard.events import PhaseEvent, TrajectoryEvent
-from miles.dashboard.store import DashboardStore, Record, Stream
+from miles.dashboard.events import PhaseEvent, RequestEvent, TrajectoryEvent
+from miles.dashboard.store import DashboardStore, Record, stream_for
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +59,12 @@ class DashboardCollector:
         for event in batch:
             self._append(event)
 
+    def push_requests(self, batch: list[RequestEvent]) -> None:
+        for event in batch:
+            self._append(event)
+
     def _append(self, record: Record) -> None:
-        stream = Stream.PHASES if isinstance(record, PhaseEvent) else Stream.TRAJECTORIES
+        stream = stream_for(record)
         with self._lock:
             if self._store.buffered_count(stream) >= self.MAX_BUFFERED_PER_STREAM:
                 self._dropped_since_flush += self._store.drop_oldest_buffered(stream)

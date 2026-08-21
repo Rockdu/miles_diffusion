@@ -13,6 +13,23 @@ from collections import defaultdict
 
 from miles.dashboard.events import SPAN_KINDS
 from miles.dashboard.store import resolve_run_dir
+from miles.utils.request_timing import CROSS, LEG_NAMES, LEGS, derive, leg_sources
+
+# one hue per process, so a waterfall reads first as "where was the request";
+# the cross-process hops stay near-neutral, distinguished by lightness alone
+_SOURCE_HUE = {"client": (212, 60), "router": (22, 62), "sgld": (158, 55), CROSS: (35, 10)}
+
+
+def _leg_colors() -> dict[str, str]:
+    sources = leg_sources()
+    seen: dict[str, int] = {}
+    colors = {}
+    for name in LEG_NAMES:
+        hue, saturation = _SOURCE_HUE[sources[name]]
+        index = seen.get(sources[name], 0)
+        seen[sources[name]] = index + 1
+        colors[name] = f"hsl({hue},{saturation - index * 3}%,{38 + min(index, 6) * 6}%)"
+    return colors
 
 
 def _read_jsonl(paths):
@@ -54,17 +71,26 @@ def _fold_trajectory(events):
     return segments
 
 
-def load_streams(workspace: str):
+def load_streams(workspace: str, max_rollouts: int = 0):
     phases = _read_jsonl(sorted(glob.glob(os.path.join(workspace, "phases", "*.jsonl"))))
     gpu = _read_jsonl(sorted(glob.glob(os.path.join(workspace, "gpu_util", "*.jsonl"))))
     traj = _read_jsonl(sorted(glob.glob(os.path.join(workspace, "trajectories", "*.jsonl"))))
-    return phases, gpu, _fold_trajectory(traj)
+    reqs = _read_jsonl(sorted(glob.glob(os.path.join(workspace, "requests", "*.jsonl"))))
+    if max_rollouts:
+        # the page embeds every record, so a long run needs a window
+        keep = sorted({r.get("rollout_id", -1) for r in reqs})[-max_rollouts:]
+        reqs = [r for r in reqs if r.get("rollout_id", -1) in keep]
+    return phases, gpu, _fold_trajectory(traj), reqs
 
 
-def _compute_data(phases, gpu, life=None) -> dict:
+def _compute_data(phases, gpu, life=None, reqs=None) -> dict:
     life = life or []
+    timings = [(r, derive(r.get("marks") or {})) for r in (reqs or [])]
+    timings = [(r, t) for r, t in timings if t.t_end > t.t_start]
     # normalize all timestamps to the earliest event across streams
-    ts_candidates = [p["t0"] for p in phases] + [g["ts"] for g in gpu] + [x["t0"] for x in life]
+    ts_candidates = (
+        [p["t0"] for p in phases] + [g["ts"] for g in gpu] + [x["t0"] for x in life] + [t.t_start for _, t in timings]
+    )
     t0 = min(ts_candidates) if ts_candidates else 0.0
     ph = [
         {
@@ -98,12 +124,35 @@ def _compute_data(phases, gpu, life=None) -> dict:
         for x in life
         if x.get("t1", 0) >= x.get("t0", 0)
     ]
-    span = max([r["e"] for r in ph] + [r["t"] for r in gp] + [r["e"] for r in lf] + [1.0])
-    return {"phases": ph, "gpu": gp, "life": lf, "span": span}
+    rq = [
+        {
+            "k": (r.get("request_id") or "?")[:12],
+            "r": r.get("rollout_id", -1),
+            "s": round(timing.t_start - t0, 3),
+            "e": round(timing.t_end - t0, 3),
+            "x": round(timing.cross_total, 4),
+            "w": r.get("worker", ""),
+            "n": len(r.get("sample_indices") or []),
+            "m": {name: round(ts - t0, 4) for name, ts in (r.get("marks") or {}).items()},
+        }
+        for r, timing in timings
+    ]
+    rq.sort(key=lambda r: r["s"])
+    span = max([r["e"] for r in ph] + [r["t"] for r in gp] + [r["e"] for r in lf] + [r["e"] for r in rq] + [1.0])
+    return {
+        "phases": ph,
+        "gpu": gp,
+        "life": lf,
+        "reqs": rq,
+        "legs": [list(leg) for leg in LEGS],
+        "legSource": leg_sources(),
+        "legColors": _leg_colors(),
+        "span": span,
+    }
 
 
-def build_html(phases, gpu, life=None, title="miles-D rollout dashboard") -> str:
-    data = json.dumps(_compute_data(phases, gpu, life), separators=(",", ":"))
+def build_html(phases, gpu, life=None, reqs=None, title="miles-D rollout dashboard") -> str:
+    data = json.dumps(_compute_data(phases, gpu, life, reqs), separators=(",", ":"))
     return _TEMPLATE.replace("__TITLE__", title).replace("__SERVE__", "false").replace("__DATA__", data)
 
 
@@ -141,6 +190,13 @@ svg{width:100%;display:block;}
 .grid{stroke:var(--border);stroke-width:1;}
 .rowlab{fill:var(--text);font:11px ui-monospace,monospace;}
 .roundline{stroke:var(--accent);stroke-width:1;stroke-dasharray:3 3;opacity:.5;}
+table.pct{border-collapse:collapse;width:100%;font-size:12px;font-family:ui-monospace,monospace;}
+table.pct th,table.pct td{text-align:right;padding:3px 8px;border-bottom:1px solid var(--border);}
+table.pct th{color:var(--muted);font-weight:600;}
+table.pct th.leg,table.pct td.leg{text-align:left;}
+.sw{width:10px;height:10px;border-radius:2px;display:inline-block;margin-right:6px;vertical-align:-1px;}
+select{background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font:inherit;font-size:12px;}
+.warn{color:var(--accent);}
 #tooltip{position:fixed;pointer-events:none;background:var(--topbar-bg);color:var(--topbar-text);border:1px solid var(--topbar-border);border-radius:4px;padding:6px 9px;font-size:12px;z-index:100;opacity:0;font-family:ui-monospace,monospace;white-space:pre;line-height:1.5;}
 </style></head><body>
 <header id="topbar">
@@ -156,6 +212,20 @@ svg{width:100%;display:block;}
   </div>
   <div class="panel"><h3>GPU utilization %</h3><svg id="gpu" role="img" aria-label="GPU utilization over time"></svg></div>
   <div class="panel"><h3>Phase timeline (cross-round)</h3><svg id="gantt" role="img" aria-label="Phase timeline"></svg></div>
+  <div id="reqpanels">
+    <div class="panel">
+      <h3>Request waterfall</h3>
+      <div class="controls">
+        <label class="hint">rollout <select id="wfroll"></select></label>
+        <span class="hint" id="wfwarn"></span>
+      </div>
+      <div class="legend" id="wflegend"></div>
+      <svg id="waterfall" role="img" aria-label="Per-request timing waterfall"></svg>
+    </div>
+    <div class="panel"><h3>Where a request's time goes (mean per request, per rollout)</h3>
+      <svg id="stack" role="img" aria-label="Mean per-leg duration per rollout"></svg></div>
+    <div class="panel"><h3>Leg latency</h3><div id="pct"></div></div>
+  </div>
   <div class="panel"><h3>Per-sample lifecycle</h3><div class="legend" id="lifelegend"></div><svg id="samples" role="img" aria-label="Per-sample lifecycle"></svg></div>
 </main>
 <div id="tooltip"></div>
@@ -180,11 +250,16 @@ function rebuild(){
     : phaseNames.includes("actor_train") ? "actor_train" : (phaseNames[0]||"");
   rounds = D.phases.filter(p=>p.name===boundaryName).map(p=>p.s).sort((a,b)=>a-b);
   if(!userZoomed){ x0=0; x1=D.span; } else if(x1>D.span){ x1=D.span; }
+  if(!D.reqs) D.reqs=[];
+  rebuildReqs();
   const lg=document.getElementById("lifelegend");
-  if(D.life.length){ lg.innerHTML=lifeStages.map(s=>`<span class="k"><span class="sw" style="background:${stageColor[s]}"></span>${s}</span>`).join(""); }
-  else{ document.getElementById("samples").closest(".panel").style.display="none"; }
+  // the waterfall is the same data per request, so the coarse panel is a fallback
+  const showLife = D.life.length && !D.reqs.length;
+  if(showLife){ lg.innerHTML=lifeStages.map(s=>`<span class="k"><span class="sw" style="background:${stageColor[s]}"></span>${s}</span>`).join(""); }
+  document.getElementById("samples").closest(".panel").style.display = showLife ? "" : "none";
   document.getElementById("runinfo").textContent =
-    `span ${D.span.toFixed(1)}s · ${D.phases.length} phases · ${gpuIds.length} GPUs · ${D.gpu.length} gpu samples · ${sampKeys.length} reqs`;
+    `span ${D.span.toFixed(1)}s · ${D.phases.length} phases · ${gpuIds.length} GPUs · ${D.gpu.length} gpu samples`
+    + ` · ${D.reqs.length ? D.reqs.length + " requests" : sampKeys.length + " reqs"}`;
   const rb=document.getElementById("rounds"); rb.innerHTML="";
   if(rounds.length){
     rb.insertAdjacentHTML("beforeend",`<span class="hint">rounds (${boundaryName}): </span>`);
@@ -200,7 +275,8 @@ function ticks(){const n=8,step=niceStep((x1-x0)/n),out=[];for(let t=Math.ceil(x
 function niceStep(r){const p=Math.pow(10,Math.floor(Math.log10(r)));const f=r/p;return (f<1.5?1:f<3?2:f<7?5:10)*p;}
 
 function draw(){
-  drawGpu(); drawGantt(); if(D.life.length)drawSamples();
+  drawGpu(); drawGantt();
+  if(D.reqs.length) drawWaterfall(); else if(D.life.length) drawSamples();
 }
 function drawSamples(){
   const svg=document.getElementById("samples"),w=W;
@@ -226,6 +302,146 @@ function drawSamples(){
   svg.querySelectorAll(".lf").forEach(el=>{
     el.addEventListener("mousemove",e=>{const a=+el.dataset.s,b=+el.dataset.e;
       tip.innerHTML=`${el.dataset.k} · ${el.dataset.st}<br>${(b-a).toFixed(2)}s (${a.toFixed(1)}→${b.toFixed(1)}s)`;
+      tip.style.opacity=1;tip.style.left=(e.clientX+12)+"px";tip.style.top=(e.clientY+12)+"px";});
+    el.addEventListener("mouseleave",()=>tip.style.opacity=0);
+  });
+}
+const WF_ROW=4, WF_GAP=1, WF_MAX=2000;
+let wfShown=[];
+
+function selectedReqs(){
+  const v=document.getElementById("wfroll").value;
+  return v==="all" ? D.reqs : D.reqs.filter(r=>String(r.r)===v);
+}
+// every leg is the span between two consecutive marks, so it draws at the time
+// it happened; a leg whose marks come from two processes carries their clock
+// offset, which is why an inverted one is flagged rather than hidden
+function legSpans(r){
+  const out=[];
+  for(const [name,a,b] of D.legs){
+    if(r.m[a]===undefined||r.m[b]===undefined) continue;
+    out.push([name,r.m[a],r.m[b]]);
+  }
+  return out;
+}
+function activeLegs(){ return D.legs.map(l=>l[0]).filter(n=>D.reqs.some(r=>r._d[n]!==undefined)); }
+function rebuildReqs(){
+  const box=document.getElementById("reqpanels");
+  box.style.display = D.reqs.length ? "" : "none";
+  if(!D.reqs.length) return;
+  D.reqs.forEach(r=>{
+    r._legs=legSpans(r);
+    r._d={};
+    r._legs.forEach(([n,a,b])=>{r._d[n]=b-a;});
+    r._skew=r._legs.some(([n,a,b])=>b<a);
+  });
+  const sel=document.getElementById("wfroll"), prev=sel.value;
+  const ids=[...new Set(D.reqs.map(r=>r.r))].sort((a,b)=>a-b);
+  sel.innerHTML=ids.map(i=>`<option value="${i}">R${i}</option>`).join("")+`<option value="all">all</option>`;
+  sel.value=[...sel.options].some(o=>o.value===prev)?prev:String(ids[ids.length-1]);
+  document.getElementById("wflegend").innerHTML=activeLegs()
+    .map(l=>`<span class="k"><span class="sw" style="background:${D.legColors[l]}"></span>${l}</span>`).join("");
+  const skew=D.reqs.filter(r=>r._skew).length;
+  document.getElementById("wfwarn").innerHTML = skew
+    ? `<span class="warn">${skew} request(s) have an inverted cross-process hop: those node clocks disagree, so a remote block is drawn shifted.</span>`
+    : "";
+}
+function reqTip(r){
+  const total=r.e-r.s;
+  const rows=Object.keys(r._d).sort((a,b)=>r._d[b]-r._d[a]).map(n=>
+    `  ${n.padEnd(22)}${(r._d[n]*1000).toFixed(0).padStart(8)}ms${(100*r._d[n]/(total||1)).toFixed(0).padStart(5)}%`
+    +(D.legSource[n]==="cross"?" †":""));
+  return [`${r.k} · R${r.r} · ${r.n} sample(s)`, r.w?`worker ${r.w}`:"",
+          `total ${total.toFixed(2)}s · cross-process ${r.x.toFixed(3)}s exact`, ...rows,
+          "  † own value carries a clock offset; only their sum is exact"]
+    .filter(Boolean).join("\n");
+}
+function drawWaterfall(){
+  const svg=document.getElementById("waterfall"),w=W;
+  wfShown=selectedReqs().slice(0,WF_MAX);
+  const bandTop=18,h=bandTop+Math.max(wfShown.length,1)*(WF_ROW+WF_GAP)+30;
+  svg.setAttribute("viewBox",`0 0 ${w} ${h}`);
+  let s=axis(svg,w,h);
+  s+=`<clipPath id="cwf"><rect x="${PADL}" y="${bandTop}" width="${w-PADL-PADR}" height="${h-24-bandTop}"/></clipPath><g clip-path="url(#cwf)">`;
+  wfShown.forEach((r,i)=>{
+    const y=bandTop+i*(WF_ROW+WF_GAP);
+    for(const [name,t0,t1] of r._legs){
+      let xa=sx(t0,w),xb=sx(t1,w);
+      if(xb<PADL||xa>w-PADR) continue;
+      xa=Math.max(xa,PADL);xb=Math.min(xb,w-PADR);
+      s+=`<rect class="wf" x="${xa.toFixed(1)}" y="${y}" width="${Math.max(xb-xa,0.5).toFixed(1)}" height="${WF_ROW}" fill="${D.legColors[name]}" data-i="${i}"/>`;
+    }
+  });
+  const more=selectedReqs().length-wfShown.length;
+  s+=`</g><text class="axlab" x="${PADL-8}" y="${bandTop+8}" text-anchor="end">${wfShown.length} req</text>`;
+  if(more>0) s+=`<text class="axlab" x="${PADL}" y="${h-10}">+${more} more not drawn</text>`;
+  svg.innerHTML=s;
+  svg.querySelectorAll(".wf").forEach(el=>{
+    el.addEventListener("mousemove",e=>{
+      tip.textContent=reqTip(wfShown[+el.dataset.i]);
+      tip.style.opacity=1;tip.style.left=(e.clientX+12)+"px";tip.style.top=(e.clientY+12)+"px";});
+    el.addEventListener("mouseleave",()=>tip.style.opacity=0);
+  });
+}
+function pctile(sorted,p){
+  if(!sorted.length) return 0;
+  return sorted[Math.min(sorted.length-1,Math.max(0,Math.ceil(p*sorted.length)-1))];
+}
+function drawPct(){
+  const rows=selectedReqs(),box=document.getElementById("pct");
+  if(!rows.length){box.innerHTML="";return;}
+  const total=rows.reduce((a,r)=>a+(r.e-r.s),0);
+  const stats=D.legs.map(([l])=>{
+    const vs=rows.map(r=>r._d[l]).filter(v=>v!==undefined).sort((a,b)=>a-b);
+    if(!vs.length) return null;
+    const sum=vs.reduce((a,b)=>a+b,0);
+    return {l,n:vs.length,p50:pctile(vs,.5),p90:pctile(vs,.9),p99:pctile(vs,.99),
+            max:vs[vs.length-1],mean:sum/vs.length,sum,share:total?sum/total:0};
+  }).filter(Boolean).sort((a,b)=>b.sum-a.sum);
+  const crossMean=rows.reduce((a,r)=>a+r.x,0)/rows.length;
+  const ms=v=>(v*1000).toFixed(v*1000<10?1:0);
+  box.innerHTML=`<table class="pct"><thead><tr><th class="leg">leg</th><th>n</th><th>p50</th><th>p90</th>`
+   +`<th>p99</th><th>max</th><th>mean</th><th>share</th></tr></thead><tbody>`
+   +stats.map(r=>`<tr><td class="leg"><span class="sw" style="background:${D.legColors[r.l]}"></span>${r.l}`
+     +`${D.legSource[r.l]==="cross"?" †":""}</td>`
+     +`<td>${r.n}</td><td>${ms(r.p50)}</td><td>${ms(r.p90)}</td><td>${ms(r.p99)}</td><td>${ms(r.max)}</td>`
+     +`<td>${ms(r.mean)}</td><td>${(100*r.share).toFixed(1)}%</td></tr>`).join("")
+   +`</tbody></table><div class="hint">ms per request · ${rows.length} requests · share = of summed request time`
+   +`<br>† each cross-process hop's own value carries the two clocks' offset; their sum is exact:`
+   +` ${(crossMean*1000).toFixed(0)}ms mean per request</div>`;
+}
+function drawStack(){
+  const svg=document.getElementById("stack"),w=W,h=210;
+  const byR={};
+  D.reqs.forEach(r=>{(byR[r.r]=byR[r.r]||[]).push(r);});
+  const ids=Object.keys(byR).map(Number).sort((a,b)=>a-b),legs=activeLegs();
+  const means=ids.map(id=>{const rs=byR[id],m={};
+    legs.forEach(l=>{m[l]=rs.reduce((a,r)=>a+Math.max(r._d[l]||0,0),0)/rs.length;});return m;});
+  const ymax=Math.max(...means.map(m=>legs.reduce((a,l)=>a+m[l],0)),0.001);
+  svg.setAttribute("viewBox",`0 0 ${w} ${h}`);
+  const plotH=h-30-8,slot=(w-PADL-PADR)/Math.max(ids.length,1),bw=Math.max(2,Math.min(48,slot*0.7));
+  let s=`<line class="grid" x1="${PADL}" y1="${h-24}" x2="${w-PADR}" y2="${h-24}"/>`;
+  for(const f of [0,0.5,1]){
+    const py=8+plotH-f*plotH;
+    s+=`<line class="grid" x1="${PADL}" y1="${py}" x2="${w-PADR}" y2="${py}"/>`
+      +`<text class="axlab" x="${PADL-6}" y="${py+3}" text-anchor="end">${(ymax*f).toFixed(1)}s</text>`;
+  }
+  ids.forEach((id,i)=>{
+    const cx=PADL+(i+0.5)*slot;
+    let acc=0;
+    legs.forEach(l=>{
+      const v=means[i][l];
+      if(!v) return;
+      const y1=8+plotH-(acc+v)/ymax*plotH,y0=8+plotH-acc/ymax*plotH;
+      acc+=v;
+      s+=`<rect class="sb" x="${(cx-bw/2).toFixed(1)}" y="${y1.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(y0-y1,0.4).toFixed(1)}" fill="${D.legColors[l]}" data-t="R${id} · ${l}\n${(v*1000).toFixed(0)}ms mean of ${byR[id].length} requests"/>`;
+    });
+    if(slot>24||i%Math.ceil(ids.length/24)===0) s+=`<text class="axlab" x="${cx}" y="${h-10}" text-anchor="middle">R${id}</text>`;
+  });
+  svg.innerHTML=s;
+  svg.querySelectorAll(".sb").forEach(el=>{
+    el.addEventListener("mousemove",e=>{
+      tip.textContent=el.dataset.t;
       tip.style.opacity=1;tip.style.left=(e.clientX+12)+"px";tip.style.top=(e.clientY+12)+"px";});
     el.addEventListener("mouseleave",()=>tip.style.opacity=0);
   });
@@ -283,18 +499,20 @@ function attachZoom(svg){
   window.addEventListener("mousemove",e=>{if(!drag)return;userZoomed=true;const w=W;const dt=(e.clientX-drag.px)/svg.clientWidth*w/(w-PADL-PADR)*(x1-x0);
     x0-=dt;x1-=dt;if(x0<0){x1-=x0;x0=0;}if(x1>D.span){x0-=x1-D.span;x1=D.span;}drag.px=e.clientX;draw();});
 }
-["gpu","gantt","samples"].forEach(id=>attachZoom(document.getElementById(id)));
+["gpu","gantt","samples","waterfall"].forEach(id=>attachZoom(document.getElementById(id)));
+document.getElementById("wfroll").onchange=()=>{drawWaterfall();drawPct();};
 document.getElementById("reset").onclick=()=>{userZoomed=false;x0=0;x1=D.span;draw();};
 async function refresh(){
   if(SERVE){ try{ D=await (await fetch("data")).json(); }catch(e){ return; } }
   rebuild(); draw();
+  if(D.reqs.length){ drawPct(); drawStack(); }
 }
 refresh();
 if(SERVE) setInterval(refresh, 3000);
 </script></body></html>"""
 
 
-def serve(workspace: str, host: str, port: int, title: str) -> None:
+def serve(workspace: str, host: str, port: int, title: str, max_rollouts: int = 0) -> None:
     """Live server: serves the page shell once and a fresh /data JSON each poll,
     so the page auto-updates a running run's data without losing the zoom view."""
     import http.server
@@ -311,7 +529,7 @@ def serve(workspace: str, host: str, port: int, title: str) -> None:
 
         def do_GET(self):
             if self.path.startswith("/data"):
-                body = json.dumps(_compute_data(*load_streams(workspace))).encode()
+                body = json.dumps(_compute_data(*load_streams(workspace, max_rollouts))).encode()
                 self._send(body, "application/json")
             else:
                 self._send(shell, "text/html; charset=utf-8")
@@ -331,19 +549,28 @@ def main():
     ap.add_argument(
         "--serve", action="store_true", help="run a live auto-updating server instead of writing a static file"
     )
+    ap.add_argument(
+        "--max-rollouts",
+        type=int,
+        default=0,
+        help="keep only the newest N rollouts of per-request timing (0 = all)",
+    )
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8000)
     args = ap.parse_args()
 
     workspace = str(resolve_run_dir(args.workspace))
     if args.serve:
-        serve(workspace, args.host, args.port, args.title)
+        serve(workspace, args.host, args.port, args.title, args.max_rollouts)
         return
-    phases, gpu, life = load_streams(workspace)
-    html = build_html(phases, gpu, life, title=args.title)
+    phases, gpu, life, reqs = load_streams(workspace, args.max_rollouts)
+    html = build_html(phases, gpu, life, reqs, title=args.title)
     with open(args.out, "w") as f:
         f.write(html)
-    print(f"wrote {args.out}: {len(phases)} phase spans, {len(gpu)} gpu samples, {len(life)} lifecycle segs")
+    print(
+        f"wrote {args.out}: {len(phases)} phase spans, {len(gpu)} gpu samples, "
+        f"{len(life)} lifecycle segs, {len(reqs)} request timings"
+    )
 
 
 if __name__ == "__main__":
