@@ -10,7 +10,17 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from miles.dashboard.events import STAGE_KINDS, PhaseEvent, TrajectoryEvent
+from miles.dashboard.events import STAGE_KINDS, PhaseEvent, RequestEvent, TrajectoryEvent
+from miles.utils.request_timing import (
+    ROUTER_TIMING_HEADER,
+    ROUTER_WIRE_KEYS,
+    ROUTER_WORKER_HEADER,
+    SGLD_TIMING_HEADER,
+    SGLD_WIRE_KEYS,
+    Marks,
+    derive,
+    parse_header,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,8 +129,83 @@ class TrajectorySink:
             logger.warning("dashboard trajectory sink flush failed; dropping events", exc_info=True)
 
 
+class RequestSink:
+    def __init__(self, handle) -> None:
+        self.handle = handle
+        self._buffer: list[RequestEvent] = []
+        self._lock = threading.Lock()
+        self._last_flush = time.monotonic()
+
+    def record(self, tracer: RequestTracer, samples) -> None:
+        try:
+            timing = derive(tracer.marks.marks)
+            sample = samples[0]
+            event = RequestEvent(
+                rollout_id=tracer.rollout_id,
+                request_id=sample.request_id or "",
+                group_index=sample.group_index if sample.group_index is not None else -1,
+                sample_indices=[s.index if s.index is not None else -1 for s in samples],
+                t_start=timing.t_start,
+                t_end=timing.t_end,
+                durations={name: round(value, 6) for name, value in timing.durations.items()},
+                net_legs={name: round(value, 6) for name, value in timing.net_legs.items()},
+                worker=tracer.worker,
+                resp_bytes=tracer.resp_bytes,
+            )
+            with self._lock:
+                self._buffer.append(event)
+                batch = self._take_batch_if_due()
+            if batch:
+                self.handle.push_requests.remote(batch)
+        except Exception:  # noqa: BLE001
+            logger.warning("dashboard request sink failed; dropping events", exc_info=True)
+
+    def _take_batch_if_due(self) -> list[RequestEvent] | None:
+        if len(self._buffer) < BATCH_MAX_EVENTS and time.monotonic() - self._last_flush < BATCH_MAX_SECONDS:
+            return None
+        batch, self._buffer = self._buffer, []
+        self._last_flush = time.monotonic()
+        return batch
+
+    def flush(self) -> None:
+        try:
+            with self._lock:
+                batch, self._buffer = self._buffer, []
+            if batch:
+                _ray_get(self.handle.push_requests.remote(batch))
+        except Exception:  # noqa: BLE001
+            logger.warning("dashboard request sink flush failed; dropping events", exc_info=True)
+
+
+class RequestTracer:
+    """Collects one rollout request's marks; ``done`` is a no-op with the
+    dashboard off, so the rollout path can carry a tracer unconditionally."""
+
+    def __init__(self, rollout_id: int) -> None:
+        self.rollout_id = rollout_id
+        self.marks = Marks()
+        self.worker = ""
+        self.resp_bytes = 0
+
+    def mark(self, name: str) -> None:
+        self.marks.mark(name)
+
+    def absorb_response(self, result) -> None:
+        """Take the sender's own marks plus the ones the reply carries back."""
+        self.marks.absorb(result.marks)
+        headers = {key.lower(): value for key, value in result.headers.items()}
+        self.marks.absorb(parse_header(headers.get(SGLD_TIMING_HEADER), SGLD_WIRE_KEYS))
+        self.marks.absorb(parse_header(headers.get(ROUTER_TIMING_HEADER), ROUTER_WIRE_KEYS))
+        self.worker = headers.get(ROUTER_WORKER_HEADER, "")
+
+    def done(self, samples) -> None:
+        if _request_sink is not None:
+            _request_sink.record(self, samples)
+
+
 _phase_sink: PhaseSink | None = None
 _trajectory_sink: TrajectorySink | None = None
+_request_sink: RequestSink | None = None
 _rollout_id = -1
 _GPU_SAMPLER: GpuUtilSampler | None = None
 
@@ -152,11 +237,16 @@ def register_rollout_manager(args) -> None:
         return
     attach_phase_sink(handle, "rollout")
     attach_trajectory_sink(handle)
+    attach_request_sink(handle)
 
 
 def set_rollout_id(rollout_id: int) -> None:
     global _rollout_id
     _rollout_id = rollout_id
+
+
+def current_rollout_id() -> int:
+    return _rollout_id
 
 
 def record_trajectory(sample) -> None:
@@ -201,8 +291,14 @@ def attach_trajectory_sink(handle) -> None:
         _trajectory_sink = TrajectorySink(handle)
 
 
+def attach_request_sink(handle) -> None:
+    global _request_sink
+    if _request_sink is None:
+        _request_sink = RequestSink(handle)
+
+
 def detach_and_flush() -> None:
-    global _phase_sink, _trajectory_sink, _GPU_SAMPLER
+    global _phase_sink, _trajectory_sink, _request_sink, _GPU_SAMPLER
     from miles.utils.timer import Timer
 
     if _phase_sink is not None:
@@ -212,6 +308,9 @@ def detach_and_flush() -> None:
     if _trajectory_sink is not None:
         _trajectory_sink.flush()
         _trajectory_sink = None
+    if _request_sink is not None:
+        _request_sink.flush()
+        _request_sink = None
     if _GPU_SAMPLER is not None:
         _GPU_SAMPLER.stop()
         _GPU_SAMPLER = None

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 
-from miles.dashboard.events import PhaseEvent, TrajectoryEvent
+from miles.dashboard.events import PhaseEvent, RequestEvent, TrajectoryEvent
 
 
 RUN_DIR_PREFIX = "run_"
@@ -17,20 +17,25 @@ RUN_DIR_PREFIX = "run_"
 class Stream(StrEnum):
     PHASES = "phases"
     TRAJECTORIES = "trajectories"
+    REQUESTS = "requests"
 
 
-Record = PhaseEvent | TrajectoryEvent
+Record = PhaseEvent | TrajectoryEvent | RequestEvent
 
 
-def _stream(record: Record) -> Stream:
+def stream_for(record: Record) -> Stream:
     if isinstance(record, PhaseEvent):
         return Stream.PHASES
+    if isinstance(record, RequestEvent):
+        return Stream.REQUESTS
     return Stream.TRAJECTORIES
 
 
 def _timestamp(record: Record) -> float:
     if isinstance(record, PhaseEvent):
         return record.t1
+    if isinstance(record, RequestEvent):
+        return record.t_end
     return record.ts
 
 
@@ -63,7 +68,7 @@ class DashboardStore:
         )
 
     def append(self, record: Record) -> None:
-        self._buffers[_stream(record)].append(record)
+        self._buffers[stream_for(record)].append(record)
 
     def buffered_count(self, stream: Stream) -> int:
         return len(self._buffers[stream])

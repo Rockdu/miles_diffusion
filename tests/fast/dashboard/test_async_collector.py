@@ -33,12 +33,14 @@ class FakeHandle:
     def __init__(self, *, fail: bool = False) -> None:
         self.push_phases = FakeRemoteMethod(fail=fail)
         self.push_trajectories = FakeRemoteMethod(fail=fail)
+        self.push_requests = FakeRemoteMethod(fail=fail)
 
 
 @pytest.fixture(autouse=True)
 def clean_hook_state(monkeypatch):
     monkeypatch.setattr(hooks, "_phase_sink", None)
     monkeypatch.setattr(hooks, "_trajectory_sink", None)
+    monkeypatch.setattr(hooks, "_request_sink", None)
     monkeypatch.setattr(hooks, "_GPU_SAMPLER", None)
     monkeypatch.setattr(hooks, "_resolve_identity", lambda: ("node-a", [2], 7))
     monkeypatch.setattr(hooks, "_ray_get", lambda ref: ref)
@@ -165,7 +167,8 @@ def test_collector_output_loads_in_existing_viewer(tmp_path):
     collector.push_trajectories([_trajectory(10.0, "gen_start"), _trajectory(12.0, "gen_end")])
     collector.flush()
 
-    phases, gpu, lifecycle = load_streams(str(workspace))
+    phases, gpu, lifecycle, requests = load_streams(str(workspace))
+    assert requests == []
     assert phases[0]["name"] == "actor_train"
     assert gpu == []
     assert lifecycle == [{"rollout_id": 5, "sample_index": 3, "stage": "gen", "t0": 10.0, "t1": 12.0}]
@@ -176,5 +179,5 @@ def test_collector_shutdown_flushes_tail(tmp_path):
     collector = DashboardCollector(CollectorConfig(workspace=str(workspace), run_name="test", start_ts=0))
     collector.push_phases([_phase(11.0)])
     collector.shutdown()
-    phases, _, _ = load_streams(str(workspace))
+    phases, *_ = load_streams(str(workspace))
     assert [phase["name"] for phase in phases] == ["actor_train"]

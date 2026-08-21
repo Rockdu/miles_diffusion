@@ -54,6 +54,29 @@ SPAN_KINDS = {
 
 
 @dataclass
+class RequestEvent:
+    """One rollout request's timing across the processes it visited.
+
+    Per-leg durations keyed by miles.utils.request_timing.LEGS, not start/end
+    pairs: unlike the stage events these marks all arrive with the response.
+    """
+
+    rollout_id: int
+    request_id: str
+    group_index: int
+    sample_indices: list[int]
+    t_start: float
+    t_end: float
+    durations: dict[str, float]
+    net_legs: dict[str, float]
+    worker: str
+    resp_bytes: int
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class TrajectoryEvent:
     ts: float
     kind: str
