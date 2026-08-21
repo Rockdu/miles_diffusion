@@ -139,10 +139,17 @@ class MilesRouter:
             response = await self.client.request(request.method, url, content=body, headers=headers)
             # Pass through raw bytes — JSON re-serialization is too expensive for large tensor payloads.
             content = await response.aread()
+            # uvicorn stamps its own date/server even when present; drop the
+            # worker's so the client does not see them twice. Everything else
+            # forwards verbatim: the relay is byte-transparent, so the worker's
+            # framing headers stay true for this hop as well.
+            out_headers = dict(response.headers)
+            for hop in ("date", "server"):
+                out_headers.pop(hop, None)
             return Response(
                 content=content,
                 status_code=response.status_code,
-                headers=dict(response.headers),
+                headers=out_headers,
             )
 
         finally:
