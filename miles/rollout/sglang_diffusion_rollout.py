@@ -200,9 +200,10 @@ async def generate_microgroup(
         i = state.next_parser_idx()
         queued = state.parser_inflight[i]
         state.parser_inflight[i] += 1
-        ref = state.response_parsers[i].apply_raw.remote(microgroup, raw)
+        # .remote() copies the ~1GB body into plasma in the calling thread; keep it off the event loop
+        parser, pending = state.response_parsers[i], microgroup
         try:
-            microgroup = await asyncio.to_thread(ray.get, ref)
+            microgroup = await asyncio.to_thread(lambda: ray.get(parser.apply_raw.remote(pending, raw)))
         finally:
             state.parser_inflight[i] -= 1
         for sample in microgroup:
