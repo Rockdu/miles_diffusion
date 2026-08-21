@@ -206,8 +206,14 @@ async def generate_microgroup(
     tracer.resp_bytes = len(result.body)
     with st.stage("deserialize"):
         tracer.mark("parser_submit")
-        ref = state.next_parser().apply_raw.remote(microgroup, result.body)
-        microgroup, parser_marks = await asyncio.to_thread(ray.get, ref)
+        # .remote() serialises the ~1GB body into plasma in the calling thread,
+        # so submitting on the loop blocks every other request's transfer for the
+        # duration of that copy. Submit and collect in the same worker thread.
+        parser, body = state.next_parser(), result.body
+        pending = microgroup
+        microgroup, parser_marks = await asyncio.to_thread(
+            lambda: ray.get(parser.apply_raw.remote(pending, body))
+        )
         tracer.marks.absorb(parser_marks)
         tracer.mark("parser_done")
     st.attach(microgroup)
