@@ -82,11 +82,16 @@ class AsyncRewardActorPool:
         return actor
 
     async def score(self, images: list, prompts: list[str]) -> list[float]:
-        refs = []
-        for start in range(0, len(images), self._batch_size):
-            end = start + self._batch_size
-            refs.append(self._next_actor().score_batch.remote(images[start:end], prompts[start:end]))
+        chunks = [
+            (self._next_actor(), images[start:start + self._batch_size], prompts[start:start + self._batch_size])
+            for start in range(0, len(images), self._batch_size)
+        ]
+
+        def submit_and_collect():
+            # .remote() copies each chunk into plasma in the calling thread, so
+            # submitting on the loop stalls every concurrent request for that copy.
+            return ray.get([actor.score_batch.remote(img, prm) for actor, img, prm in chunks])
 
         loop = asyncio.get_running_loop()
-        chunked_scores = await loop.run_in_executor(None, ray.get, refs)
+        chunked_scores = await loop.run_in_executor(None, submit_and_collect)
         return [float(score) for chunk in chunked_scores for score in chunk]
