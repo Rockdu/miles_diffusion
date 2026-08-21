@@ -8,7 +8,7 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from starlette.responses import Response
+from starlette.responses import StreamingResponse
 
 from miles.utils.request_timing import ROUTER_TIMING_HEADER, ROUTER_WIRE_KEYS, ROUTER_WORKER_HEADER, Marks
 
@@ -140,30 +140,33 @@ class MilesRouter:
 
         try:
             stamps.mark("router_dispatch")
-            # streamed so the worker's first byte is separable from its last
-            async with self.client.stream(request.method, url, content=body, headers=headers) as response:
-                stamps.mark("worker_headers")
-                # Pass through raw bytes — JSON re-serialization is too expensive for large tensor payloads.
-                content = await response.aread()
-                stamps.mark("router_body_done")
-                status_code = response.status_code
-                out_headers = dict(response.headers)
-
-            stamps.mark("router_reply")
-            # These describe the worker->router hop, not the router->client one;
-            # forwarding them corrupts framing when the encodings differ.
-            for hop in ("content-length", "transfer-encoding", "connection", "date", "server"):
-                out_headers.pop(hop, None)
-            out_headers[ROUTER_TIMING_HEADER] = stamps.to_header()
-            out_headers[ROUTER_WORKER_HEADER] = worker_url
-            return Response(
-                content=content,
-                status_code=status_code,
-                headers=out_headers,
-            )
-
-        finally:
+            upstream = self.client.build_request(request.method, url, content=body, headers=headers)
+            response = await self.client.send(upstream, stream=True)
+        except Exception:
             self._finish_url(worker_url)
+            raise
+        stamps.mark("worker_headers")
+
+        # Buffering held every in-flight body twice in router memory (the read
+        # buffer plus the transport's copy) and serialised the two hops: nothing
+        # left for the client until the worker finished sending. Chunk through
+        # instead; the body-side marks go with the buffer, since the header is
+        # on the wire before the body has passed.
+        out_headers = dict(response.headers)
+        for hop in ("content-length", "transfer-encoding", "connection", "date", "server"):
+            out_headers.pop(hop, None)
+        out_headers[ROUTER_TIMING_HEADER] = stamps.to_header()
+        out_headers[ROUTER_WORKER_HEADER] = worker_url
+
+        async def relay():
+            try:
+                async for chunk in response.aiter_raw():
+                    yield chunk
+            finally:
+                await response.aclose()
+                self._finish_url(worker_url)
+
+        return StreamingResponse(relay(), status_code=response.status_code, headers=out_headers)
 
     async def add_worker(self, request: Request):
         """Add a new worker to the router.
