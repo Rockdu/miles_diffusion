@@ -8,7 +8,7 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from starlette.responses import Response
+from starlette.responses import StreamingResponse
 
 
 logger = logging.getLogger(__name__)
@@ -136,24 +136,27 @@ class MilesRouter:
         headers = dict(request.headers)
 
         try:
-            response = await self.client.request(request.method, url, content=body, headers=headers)
-            # Pass through raw bytes — JSON re-serialization is too expensive for large tensor payloads.
-            content = await response.aread()
-            # uvicorn stamps its own date/server even when present; drop the
-            # worker's so the client does not see them twice. Everything else
-            # forwards verbatim: the relay is byte-transparent, so the worker's
-            # framing headers stay true for this hop as well.
-            out_headers = dict(response.headers)
-            for hop in ("date", "server"):
-                out_headers.pop(hop, None)
-            return Response(
-                content=content,
-                status_code=response.status_code,
-                headers=out_headers,
-            )
-
-        finally:
+            upstream = self.client.build_request(request.method, url, content=body, headers=headers)
+            response = await self.client.send(upstream, stream=True)
+        except Exception:
             self._finish_url(worker_url)
+            raise
+
+        # The relay is byte-transparent, so the worker's headers stay true here;
+        # drop only date/server, which uvicorn re-stamps.
+        out_headers = dict(response.headers)
+        for hop in ("date", "server"):
+            out_headers.pop(hop, None)
+
+        async def relay():
+            try:
+                async for chunk in response.aiter_raw():
+                    yield chunk
+            finally:
+                await response.aclose()
+                self._finish_url(worker_url)
+
+        return StreamingResponse(relay(), status_code=response.status_code, headers=out_headers)
 
     async def add_worker(self, request: Request):
         """Add a new worker to the router.
@@ -214,18 +217,12 @@ class MilesRouter:
         return {"urls": list(self.worker_request_counts.keys())}
 
     def _use_url(self):
-        """Select worker URL with minimal active requests."""
-
-        if not self.dead_workers:
-            # Healthy path: select from all workers
-            url = min(self.worker_request_counts, key=self.worker_request_counts.get)
-        else:
-            # Degraded path: select from workers not in dead_workers
-            valid_workers = (w for w in self.worker_request_counts if w not in self.dead_workers)
-            try:
-                url = min(valid_workers, key=self.worker_request_counts.get)
-            except ValueError:
-                raise RuntimeError("No healthy workers available in the pool") from None
+        """Select the worker URL with the fewest active requests."""
+        candidates = (w for w in self.worker_request_counts if w not in self.dead_workers)
+        try:
+            url = min(candidates, key=self.worker_request_counts.get)
+        except ValueError:
+            raise RuntimeError("No healthy workers available in the pool") from None
 
         self.worker_request_counts[url] += 1
         return url
