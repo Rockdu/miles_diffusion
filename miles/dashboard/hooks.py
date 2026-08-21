@@ -15,10 +15,12 @@ from miles.utils.request_timing import (
     ROUTER_TIMING_HEADER,
     ROUTER_WIRE_KEYS,
     ROUTER_WORKER_HEADER,
+    SGLD_STAGES_HEADER,
     SGLD_TIMING_HEADER,
     SGLD_WIRE_KEYS,
     Marks,
     parse_header,
+    parse_stages,
 )
 
 logger = logging.getLogger(__name__)
@@ -144,6 +146,7 @@ class RequestSink:
                 group_index=sample.group_index if sample.group_index is not None else -1,
                 sample_indices=[s.index if s.index is not None else -1 for s in samples],
                 marks={name: round(ts, 6) for name, ts in tracer.marks.marks.items()},
+                engine_stages=tracer.engine_stages,
                 worker=tracer.worker,
                 resp_bytes=tracer.resp_bytes,
             )
@@ -179,6 +182,7 @@ class RequestTracer:
     def __init__(self, rollout_id: int) -> None:
         self.rollout_id = rollout_id
         self.marks = Marks()
+        self.engine_stages: dict[str, float] = {}
         self.worker = ""
         self.resp_bytes = 0
 
@@ -191,6 +195,7 @@ class RequestTracer:
         headers = {key.lower(): value for key, value in result.headers.items()}
         self.marks.absorb(parse_header(headers.get(SGLD_TIMING_HEADER), SGLD_WIRE_KEYS))
         self.marks.absorb(parse_header(headers.get(ROUTER_TIMING_HEADER), ROUTER_WIRE_KEYS))
+        self.engine_stages = parse_stages(headers.get(SGLD_STAGES_HEADER))
         self.worker = headers.get(ROUTER_WORKER_HEADER, "")
 
     def done(self, samples) -> None:

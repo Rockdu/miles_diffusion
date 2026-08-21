@@ -134,6 +134,7 @@ def _compute_data(phases, gpu, life=None, reqs=None) -> dict:
             "w": r.get("worker", ""),
             "n": len(r.get("sample_indices") or []),
             "m": {name: round(ts - t0, 4) for name, ts in (r.get("marks") or {}).items()},
+            "g": {name: round(sec, 4) for name, sec in (r.get("engine_stages") or {}).items()},
         }
         for r, timing in timings
     ]
@@ -224,7 +225,8 @@ select{background:var(--bg);color:var(--text);border:1px solid var(--border);bor
     </div>
     <div class="panel"><h3>Where a request's time goes (mean per request, per rollout)</h3>
       <svg id="stack" role="img" aria-label="Mean per-leg duration per rollout"></svg></div>
-    <div class="panel"><h3>Leg latency</h3><div id="pct"></div></div>
+    <div class="panel"><h3>Leg latency</h3><div id="pct"></div>
+      <h3 style="margin-top:14px">Engine stages inside sgld_forward</h3><div id="pctengine"></div></div>
   </div>
   <div class="panel"><h3>Per-sample lifecycle</h3><div class="legend" id="lifelegend"></div><svg id="samples" role="img" aria-label="Per-sample lifecycle"></svg></div>
 </main>
@@ -387,28 +389,44 @@ function pctile(sorted,p){
   if(!sorted.length) return 0;
   return sorted[Math.min(sorted.length-1,Math.max(0,Math.ceil(p*sorted.length)-1))];
 }
+function statTable(keys,valueOf,total,colorOf,label,note){
+  const ms=v=>(v*1000).toFixed(v*1000<10?1:0);
+  const stats=keys.map(k=>{
+    const vs=valueOf(k).sort((a,b)=>a-b);
+    if(!vs.length) return null;
+    const sum=vs.reduce((a,b)=>a+b,0);
+    return {k,n:vs.length,p50:pctile(vs,.5),p90:pctile(vs,.9),p99:pctile(vs,.99),
+            max:vs[vs.length-1],mean:sum/vs.length,sum,share:total?sum/total:0};
+  }).filter(Boolean).sort((a,b)=>b.sum-a.sum);
+  if(!stats.length) return "";
+  return `<table class="pct"><thead><tr><th class="leg">${label}</th><th>n</th><th>p50</th><th>p90</th>`
+   +`<th>p99</th><th>max</th><th>mean</th><th>share</th></tr></thead><tbody>`
+   +stats.map(r=>`<tr><td class="leg"><span class="sw" style="background:${colorOf(r.k)}"></span>${r.k}</td>`
+     +`<td>${r.n}</td><td>${ms(r.p50)}</td><td>${ms(r.p90)}</td><td>${ms(r.p99)}</td><td>${ms(r.max)}</td>`
+     +`<td>${ms(r.mean)}</td><td>${(100*r.share).toFixed(1)}%</td></tr>`).join("")
+   +`</tbody></table><div class="hint">${note}</div>`;
+}
 function drawPct(){
   const rows=selectedReqs(),box=document.getElementById("pct");
   if(!rows.length){box.innerHTML="";return;}
   const total=rows.reduce((a,r)=>a+(r.e-r.s),0);
-  const stats=D.legs.map(([l])=>{
-    const vs=rows.map(r=>r._d[l]).filter(v=>v!==undefined).sort((a,b)=>a-b);
-    if(!vs.length) return null;
-    const sum=vs.reduce((a,b)=>a+b,0);
-    return {l,n:vs.length,p50:pctile(vs,.5),p90:pctile(vs,.9),p99:pctile(vs,.99),
-            max:vs[vs.length-1],mean:sum/vs.length,sum,share:total?sum/total:0};
-  }).filter(Boolean).sort((a,b)=>b.sum-a.sum);
   const crossMean=rows.reduce((a,r)=>a+r.x,0)/rows.length;
-  const ms=v=>(v*1000).toFixed(v*1000<10?1:0);
-  box.innerHTML=`<table class="pct"><thead><tr><th class="leg">leg</th><th>n</th><th>p50</th><th>p90</th>`
-   +`<th>p99</th><th>max</th><th>mean</th><th>share</th></tr></thead><tbody>`
-   +stats.map(r=>`<tr><td class="leg"><span class="sw" style="background:${D.legColors[r.l]}"></span>${r.l}`
-     +`${D.legSource[r.l]==="cross"?" †":""}</td>`
-     +`<td>${r.n}</td><td>${ms(r.p50)}</td><td>${ms(r.p90)}</td><td>${ms(r.p99)}</td><td>${ms(r.max)}</td>`
-     +`<td>${ms(r.mean)}</td><td>${(100*r.share).toFixed(1)}%</td></tr>`).join("")
-   +`</tbody></table><div class="hint">ms per request · ${rows.length} requests · share = of summed request time`
-   +`<br>† each cross-process hop's own value carries the two clocks' offset; their sum is exact:`
-   +` ${(crossMean*1000).toFixed(0)}ms mean per request</div>`;
+  box.innerHTML=statTable(
+    D.legs.map(l=>l[0]+(D.legSource[l[0]]==="cross"?" †":"")),
+    k=>rows.map(r=>r._d[k.replace(" †","")]).filter(v=>v!==undefined),
+    total, k=>D.legColors[k.replace(" †","")], "leg",
+    `ms per request · ${rows.length} requests · share = of summed request time`
+    +`<br>† each cross-process hop's own value carries the two clocks' offset; their sum is exact:`
+    +` ${(crossMean*1000).toFixed(0)}ms mean per request`);
+
+  // The engine's own breakdown of sgld_forward, which the client otherwise
+  // sees as one number. Durations only: they have no marks to place them by.
+  const stageKeys=[...new Set(rows.flatMap(r=>Object.keys(r.g)))];
+  const forward=rows.reduce((a,r)=>a+(r._d.sgld_forward||0),0);
+  document.getElementById("pctengine").innerHTML=statTable(
+    stageKeys, k=>rows.map(r=>r.g[k]).filter(v=>v!==undefined),
+    forward, ()=>D.legColors.sgld_forward, "engine stage",
+    `ms per request · share = of summed sgld_forward · reported by the engine, not placed on the axis`);
 }
 function drawStack(){
   const svg=document.getElementById("stack"),w=W,h=210;

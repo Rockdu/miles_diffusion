@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 # Keep in sync with sglang.multimodal_gen.runtime.entrypoints.post_training.timing;
 # duplicated rather than imported so an older sglang-diffusion still works.
 SGLD_TIMING_HEADER = "x-sgld-timing"
+SGLD_STAGES_HEADER = "x-sgld-stages"
 ROUTER_TIMING_HEADER = "x-miles-router-timing"
 ROUTER_WORKER_HEADER = "x-miles-router-worker"
 
@@ -139,6 +140,13 @@ def parse_header(value: str | None, wire_keys: dict[str, str]) -> dict[str, floa
         return {}
     raw = json.loads(value)
     return {name: float(raw[key]) for key, name in wire_keys.items() if key in raw}
+
+
+def parse_stages(value: str | None) -> dict[str, float]:
+    """Engine stage seconds, from the milliseconds the header carries."""
+    if not value:
+        return {}
+    return {name: float(ms) / 1000.0 for name, ms in json.loads(value).items()}
 
 
 @dataclass

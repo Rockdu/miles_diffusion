@@ -13,10 +13,14 @@ boundary, which are named individually rather than merged.
            ╰── ╲ ╱ = cross-process leg: its own value carries the two clocks'
                     offset, only the sum of the four is exact (`cross_total`)
 
+The engine additionally reports its own breakdown of `sgld_forward`, the one leg
+it owns and the client cannot see into; those are durations with no marks, so
+they are tabulated rather than placed on the axis.
+
 Covered here: the legs tile exactly (1), `cross_total` survives a clock offset
 while the individual hops do not (2), a peer without headers degrades instead of
-failing (3), the header round trip (4-5), and the marks reaching their own
-stream unaltered (6-7).
+failing (3), the header round trips, marks and engine stages alike (4-6), and
+the record reaching its own stream unaltered (7-8).
 """
 
 from tests.ci.ci_register import register_cpu_ci
@@ -41,6 +45,7 @@ from miles.utils.request_timing import (
     derive,
     leg_sources,
     parse_header,
+    parse_stages,
 )
 
 # one plausible request as a gap per leg; the cross-process gaps are the small
@@ -132,12 +137,21 @@ def test_an_absent_header_yields_no_marks():
     assert parse_header(None, ROUTER_WIRE_KEYS) == {}
 
 
+def test_engine_stages_arrive_as_seconds():
+    # the engine reports milliseconds; everything downstream is seconds
+    assert parse_stages('{"decoding":8123.5,"text_encoding":91.2}') == pytest.approx(
+        {"decoding": 8.1235, "text_encoding": 0.0912}, abs=1e-9
+    )
+    assert parse_stages(None) == {}
+
+
 def test_sink_records_the_marks_one_event_per_request():
     handle = SimpleNamespace(push_requests=SimpleNamespace(remote=lambda batch: batch))
     sink = RequestSink(handle)
     tracer = _tracer()
     tracer.worker = "http://worker:30000"
     tracer.resp_bytes = 7
+    tracer.engine_stages = {"decoding": 8.1}
 
     sink.record(tracer, _samples())
     (event,) = sink._buffer
@@ -146,6 +160,7 @@ def test_sink_records_the_marks_one_event_per_request():
     assert event.sample_indices == [0, 1]
     assert event.marks == pytest.approx(tracer.marks.marks, abs=1e-6)
     assert (event.worker, event.resp_bytes) == ("http://worker:30000", 7)
+    assert event.engine_stages == {"decoding": 8.1}
 
 
 def test_request_events_reach_their_own_stream(tmp_path, monkeypatch):

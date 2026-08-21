@@ -59,6 +59,7 @@ class RequestEvent:
 
     The marks, not the leg durations derived from them: the reader places every
     leg at the time it happened, and durations are a subtraction away.
+    ``engine_stages`` is the engine's own breakdown of the one leg it owns.
     """
 
     rollout_id: int
@@ -66,6 +67,7 @@ class RequestEvent:
     group_index: int
     sample_indices: list[int]
     marks: dict[str, float]
+    engine_stages: dict[str, float]
     worker: str
     resp_bytes: int
 
