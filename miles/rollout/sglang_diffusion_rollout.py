@@ -195,8 +195,9 @@ async def generate_microgroup(
     with st.stage("generate"):
         raw = await post(url, payload, raw=True)
     with st.stage("deserialize"):
-        ref = state.next_parser().apply_raw.remote(microgroup, raw)
-        microgroup = await asyncio.to_thread(ray.get, ref)
+        # .remote() copies the ~1GB body into plasma in the calling thread; keep it off the event loop
+        parser, pending = state.next_parser(), microgroup
+        microgroup = await asyncio.to_thread(lambda: ray.get(parser.apply_raw.remote(pending, raw)))
     st.attach(microgroup)
 
     # Stash the SDE/training step indices on each sample so _train_core can
