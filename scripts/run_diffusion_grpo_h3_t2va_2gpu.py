@@ -16,6 +16,10 @@ Aligned with verl: LoRA 64/128, lr 1e-4, weight_decay 1e-4, adam_eps 1e-15,
 noise_level 0.7, 10 inference steps, SDE window size 2, flow_shift 12.0 /
 audio_flow_shift 3.0, PickScore over 8 frames.
 
+Engine concurrency is 2, not 1: at 1 the engine idles through the encode and handoff
+of a finished sample before the next denoise starts, and 2 overlaps them. Higher does not
+help -- the extra requests queue inside the engine and only stretch per-sample latency.
+
 The router health-check window is widened well past its 30s x 3 default: H3 denoising
 blocks the engine's uvicorn event loop for ~43s per sample, so /health cannot answer
 while a request runs. A 16-sample eval keeps the loop busy for ~800s straight, which
@@ -156,7 +160,7 @@ def execute(args: ScriptArgs, prompt_dir: str) -> None:
 
     sglang_args = (
         "--use-miles-router "
-        "--sglang-server-concurrency 1 "
+        "--sglang-server-concurrency 2 "
         "--sglang-tp-size 2 "
         "--sglang-sp-degree 1 "
         "--sglang-ulysses-degree 1 "
