@@ -8,7 +8,7 @@ import torch
 from PIL import Image
 
 from miles.utils.misc import SingletonMeta
-from miles.utils.processing_utils import cfhw_to_fhwc, image_or_video_to_uint8
+from miles.utils.processing_utils import cfhw_to_fhwc
 from miles.utils.types import Sample
 
 from .core import AsyncRewardActorPool
@@ -39,9 +39,17 @@ def _sample_to_rgb_hwc_uint8_frames(sample: Sample, num_frames: int | None) -> l
     if cfhw is None:
         raise ValueError("generated_output is None")
 
-    fhwc = image_or_video_to_uint8(cfhw_to_fhwc(cfhw.detach().cpu()))
-    indices = sample_frame_indices(fhwc.shape[0], num_frames)
-    return [np.ascontiguousarray(fhwc[i].numpy()) for i in indices]
+    # Convert only the frames that survive: a 107-frame clip yields 8 here, and
+    # converting the whole clip first costs several full-size float32 copies of
+    # it. The unit-scale decision still comes from the whole clip, so selecting
+    # first cannot change how a frame is quantised.
+    indices = sample_frame_indices(cfhw.shape[1], num_frames)
+    unit_scale = float(cfhw.max()) <= 1.0 + 1e-3
+    selected = cfhw[:, indices].detach().cpu().float()
+    if unit_scale:
+        selected = selected * 255.0
+    fhwc = cfhw_to_fhwc(selected.clamp(0, 255).to(torch.uint8))
+    return [np.ascontiguousarray(fhwc[i].numpy()) for i in range(len(indices))]
 
 
 class PickScoreScorer(torch.nn.Module):
