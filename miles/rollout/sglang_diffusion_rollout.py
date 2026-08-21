@@ -60,6 +60,7 @@ def build_rollout_sampling_params(
                 "rollout_noise_level": args.diffusion_noise_level,
                 "rollout_log_prob_no_const": args.diffusion_log_prob_no_const,
                 "rollout_debug_mode": args.diffusion_debug_mode,
+                "rollout_video_dtype": args.rollout_video_dtype,
                 "rollout_return_denoising_env": True,
                 "rollout_return_dit_trajectory": True,
             }
