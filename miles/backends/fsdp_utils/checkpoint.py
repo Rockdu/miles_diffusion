@@ -85,13 +85,25 @@ class ModelState(Stateful):
 
     def load_state_dict(self, state_dict):
         options = StateDictOptions(strict=False) if self.lora_only else None
-        set_state_dict(
+        incompatible = set_state_dict(
             self.model,
             optimizers=[],
             model_state_dict=state_dict["model"],
             optim_state_dict=None,
             options=options,
         )
+        # strict=False swallows mismatches, so a checkpoint whose keys match
+        # nothing "loads" as a silent no-op. In lora_only mode missing base keys
+        # are expected; unclaimed checkpoint keys or unfilled LoRA params are not.
+        unclaimed = list(incompatible.unexpected_keys)
+        unfilled = [k for k in incompatible.missing_keys if not self.lora_only or _is_lora_param_name(k)]
+        if unclaimed or unfilled:
+            logger.error(
+                f"[FSDP] Checkpoint mismatch: {len(unclaimed)} unclaimed checkpoint keys, "
+                f"{len(unfilled)} unfilled model params (e.g. {(unclaimed + unfilled)[:3]})"
+            )
+        else:
+            logger.info(f"[FSDP] Applied {len(state_dict['model'])} params from the checkpoint")
 
 
 class OptimizerState(Stateful):
