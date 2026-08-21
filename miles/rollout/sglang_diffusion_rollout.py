@@ -1,4 +1,5 @@
 import asyncio
+import random
 import copy
 import inspect
 import logging
@@ -246,6 +247,8 @@ async def generate_and_rm_microgroup(
     tracer.mark("req_start")
 
     # generate
+    if args.rollout_request_stagger > 0:
+        await asyncio.sleep(random.uniform(0, args.rollout_request_stagger))
     async with state.semaphore:
         tracer.mark("slot_acquired")
         with state.dp_rank_context() as _:

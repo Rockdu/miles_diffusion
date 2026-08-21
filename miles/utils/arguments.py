@@ -253,6 +253,18 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Samples per prompt sent in one rollout request (sub-batch of the group).",
             )
             parser.add_argument(
+                "--rollout-request-stagger",
+                type=float,
+                default=0.0,
+                help=(
+                    "Max uniform random delay (s) before a request first tries to acquire a "
+                    "concurrency slot. Requests admitted together stay in phase for the whole "
+                    "rollout because generation time is near-constant, so their response bodies "
+                    "land on the transfer path simultaneously; a one-shot jitter breaks that. "
+                    "Applied before the acquire, so it never idles a held slot. 0 disables."
+                ),
+            )
+            parser.add_argument(
                 "--diffusion-fps",
                 type=float,
                 default=None,
@@ -1481,6 +1493,9 @@ def miles_validate_args(args):
 
     if args.wandb_log_image_interval < 1:
         raise ValueError(f"wandb_log_image_interval must be >= 1, got {args.wandb_log_image_interval}")
+
+    if args.rollout_request_stagger < 0:
+        raise ValueError(f"--rollout-request-stagger must be non-negative, got {args.rollout_request_stagger}")
 
     args.rollout_patch_groups = [name for name in (args.rollout_patch_group or "").split(",") if name]
 
