@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -215,6 +216,9 @@ def apply_rollout_image_response(
 
 @ray.remote(num_cpus=1)
 class RolloutImageResponseParserActor:
-    def apply_raw(self, samples: list[Sample], raw: bytes) -> list[Sample]:
+    def apply_raw(self, samples: list[Sample], raw: bytes) -> tuple[list[Sample], dict[str, float]]:
+        """Fill ``samples``, and report when this actor picked the work up so the
+        caller can split its ray round trip into queueing and real work."""
+        marks = {"parser_start": time.time()}
         bodies = msgpack.unpackb(raw, raw=False)
-        return [apply_rollout_image_response(s, b) for s, b in zip(samples, bodies, strict=True)]
+        return [apply_rollout_image_response(s, b) for s, b in zip(samples, bodies, strict=True)], marks

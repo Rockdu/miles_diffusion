@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.responses import Response
 
+from miles.utils.request_timing import ROUTER_TIMING_HEADER, ROUTER_WIRE_KEYS, ROUTER_WORKER_HEADER, Marks
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,8 @@ class MilesRouter:
 
     async def proxy(self, request: Request, path: str):
         """Proxy all other requests to the SGLang router"""
+        stamps = Marks(ROUTER_WIRE_KEYS)
+        stamps.mark("router_recv")
         # Forward all other paths to SGLang router
         worker_url = self._use_url()
         url = f"{worker_url}/{path}"
@@ -135,13 +138,23 @@ class MilesRouter:
         headers = dict(request.headers)
 
         try:
-            response = await self.client.request(request.method, url, content=body, headers=headers)
-            # Pass through raw bytes — JSON re-serialization is too expensive for large tensor payloads.
-            content = await response.aread()
+            stamps.mark("router_dispatch")
+            # streamed so the worker's first byte is separable from its last
+            async with self.client.stream(request.method, url, content=body, headers=headers) as response:
+                stamps.mark("worker_headers")
+                # Pass through raw bytes — JSON re-serialization is too expensive for large tensor payloads.
+                content = await response.aread()
+                stamps.mark("router_body_done")
+                status_code = response.status_code
+                out_headers = dict(response.headers)
+
+            stamps.mark("router_reply")
+            out_headers[ROUTER_TIMING_HEADER] = stamps.to_header()
+            out_headers[ROUTER_WORKER_HEADER] = worker_url
             return Response(
                 content=content,
-                status_code=response.status_code,
-                headers=dict(response.headers),
+                status_code=status_code,
+                headers=out_headers,
             )
 
         finally:
