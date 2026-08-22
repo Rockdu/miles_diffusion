@@ -17,7 +17,8 @@ def _clean_x0_from_sample(sample: Sample) -> torch.Tensor:
             f"sample {sample.index} missing dit_trajectory.latents; "
             "NFT needs the final clean latent x0 from rollout"
         )
-    return traj.latents[-1].detach().cpu().float()
+    # Engine dtype (bf16) ships as-is; the loss batch prep upcasts exactly.
+    return traj.latents[-1].detach().cpu()
 
 
 def resolve_nft_sigmas(
