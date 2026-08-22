@@ -207,8 +207,13 @@ async def generate_microgroup(
         with st.stage("generate"):
             tracer.mark("parser_submit")
             parser, pending = state.next_parser(), microgroup
+            if args.rollout_direct_engine:
+                fetch_url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+            else:
+                fetch_url = url
+            direct = args.rollout_direct_engine
             microgroup, actor_marks, headers, resp_bytes = await asyncio.to_thread(
-                lambda: ray.get(parser.fetch_and_apply.remote(pending, url, payload))
+                lambda: ray.get(parser.fetch_and_apply.remote(pending, fetch_url, payload, direct=direct))
             )
             tracer.absorb_response(PostResult(None, headers, actor_marks))
             tracer.resp_bytes = resp_bytes

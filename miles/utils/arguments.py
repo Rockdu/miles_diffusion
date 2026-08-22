@@ -277,6 +277,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--rollout-direct-engine",
+                action="store_true",
+                default=False,
+                help=(
+                    "Parser actors ask the router /pick_worker for a load-balanced engine and "
+                    "fetch from it directly, so response bodies skip the router's data plane "
+                    "entirely. The router keeps registration, health and load counts. "
+                    "Requires --rollout-fetch-in-parser."
+                ),
+            )
+            parser.add_argument(
                 "--rollout-request-stagger",
                 type=float,
                 default=0.0,
@@ -1520,6 +1531,9 @@ def miles_validate_args(args):
 
     if args.rollout_request_stagger < 0:
         raise ValueError(f"--rollout-request-stagger must be non-negative, got {args.rollout_request_stagger}")
+
+    if args.rollout_direct_engine and not args.rollout_fetch_in_parser:
+        raise ValueError("--rollout-direct-engine requires --rollout-fetch-in-parser")
 
     if args.rollout_fetch_in_parser and args.rollout_num_gpus:
         slots = args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine

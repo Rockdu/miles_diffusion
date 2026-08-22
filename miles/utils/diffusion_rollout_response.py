@@ -224,25 +224,45 @@ class RolloutImageResponseParserActor:
         return [apply_rollout_image_response(s, b) for s, b in zip(samples, bodies, strict=True)], marks
 
     def fetch_and_apply(
-        self, samples: list[Sample], url: str, payload: dict, max_retries: int = 60
+        self, samples: list[Sample], url: str, payload: dict, max_retries: int = 60, direct: bool = False
     ) -> tuple[list[Sample], dict[str, float], dict[str, str], int]:
         """POST the rollout request and parse the reply in this process, so the
         response body never enters the manager. Keep-alive is off: this actor
         idles between dispatches, and a pooled connection reused just as the
-        server's 5 s keep-alive timeout closes it dies with a read error."""
+        server's 5 s keep-alive timeout closes it dies with a read error.
+
+        ``direct``: ``url`` is the router base. Ask /pick_worker for a
+        load-balanced engine, fetch from it so the body skips the router's
+        data plane, and ack /finish_worker in a finally so the in-flight
+        count returns on success, failure and every retry alike. Only actor
+        process death leaks a count, and the router's counts reset with each
+        run. Each retry re-picks, so failures re-balance."""
         import httpx
 
         if not hasattr(self, "_client"):
             self._client = httpx.Client(limits=httpx.Limits(max_keepalive_connections=0), timeout=httpx.Timeout(None))
         marks: dict[str, float] = {}
+        worker = ""
         for attempt in range(max_retries):
             try:
-                marks["http_send"] = time.time()
-                with self._client.stream("POST", url, json=payload) as response:
-                    marks["http_headers"] = time.time()
-                    response.read()
-                    marks["http_recv_done"] = time.time()
-                response.raise_for_status()
+                if direct:
+                    picked = self._client.get(f"{url}/pick_worker")
+                    picked.raise_for_status()
+                    worker = picked.json()["url"]
+                try:
+                    marks["http_send"] = time.time()
+                    target = f"{worker}/rollout/generate" if direct else url
+                    with self._client.stream("POST", target, json=payload) as response:
+                        marks["http_headers"] = time.time()
+                        response.read()
+                        marks["http_recv_done"] = time.time()
+                    response.raise_for_status()
+                finally:
+                    if direct and worker:
+                        try:
+                            self._client.post(f"{url}/finish_worker", params={"url": worker})
+                        except Exception:
+                            pass  # a lost ack costs one count; failing the request costs the sample
                 break
             except Exception:
                 if attempt + 1 >= max_retries:
@@ -252,4 +272,9 @@ class RolloutImageResponseParserActor:
         bodies = msgpack.unpackb(response.content, raw=False)
         applied = [apply_rollout_image_response(s, b) for s, b in zip(samples, bodies, strict=True)]
         marks["parser_done"] = time.time()
-        return applied, marks, dict(response.headers), len(response.content)
+        headers = dict(response.headers)
+        if worker:
+            # worker identity normally rides the router's header; off the data
+            # plane the actor supplies it under the same key
+            headers["x-miles-router-worker"] = worker
+        return applied, marks, headers, len(response.content)
