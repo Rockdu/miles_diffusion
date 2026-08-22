@@ -265,6 +265,18 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--rollout-fetch-in-parser",
+                action="store_true",
+                default=False,
+                help=(
+                    "Parser actors POST the rollout request and parse the reply themselves, "
+                    "so response bodies never pass through the rollout manager's event loop "
+                    "and ingest scales with the actor pool. Requires at least as many parser "
+                    "workers as concurrency slots, since a fetch occupies its actor for the "
+                    "whole generation."
+                ),
+            )
+            parser.add_argument(
                 "--rollout-request-stagger",
                 type=float,
                 default=0.0,
@@ -1508,6 +1520,14 @@ def miles_validate_args(args):
 
     if args.rollout_request_stagger < 0:
         raise ValueError(f"--rollout-request-stagger must be non-negative, got {args.rollout_request_stagger}")
+
+    if args.rollout_fetch_in_parser and args.rollout_num_gpus:
+        slots = args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
+        if args.rollout_parser_num_workers < slots:
+            raise ValueError(
+                f"--rollout-fetch-in-parser needs --rollout-parser-num-workers >= the "
+                f"{slots} concurrency slots, got {args.rollout_parser_num_workers}"
+            )
 
     args.rollout_patch_groups = [name for name in (args.rollout_patch_group or "").split(",") if name]
 

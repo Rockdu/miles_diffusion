@@ -1,8 +1,8 @@
 import asyncio
-import random
 import copy
 import inspect
 import logging
+import random
 from argparse import Namespace
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -20,7 +20,7 @@ from miles.utils.async_utils import run
 from miles.utils.diffusion_data import Dataset as DiffusionDataset
 from miles.utils.diffusion_rollout_response import RolloutImageResponseParserActor
 from miles.utils.eval_config import EvalDatasetConfig
-from miles.utils.http_utils import post
+from miles.utils.http_utils import PostResult, post
 from miles.utils.misc import SingletonMeta, load_function
 from miles.utils.types import Sample
 
@@ -200,24 +200,37 @@ async def generate_microgroup(
     )
 
     st = hooks.StageTimer()
-    with st.stage("generate"):
-        # timed: the reply carries the router's and the engine's marks, the only
-        # way to see inside this wait
-        result = await post(url, payload, raw=True, timed=True)
-    tracer.absorb_response(result)
-    tracer.resp_bytes = len(result.body)
-    with st.stage("deserialize"):
-        tracer.mark("parser_submit")
-        # .remote() serialises the ~1GB body into plasma in the calling thread,
-        # so submitting on the loop blocks every other request's transfer for the
-        # duration of that copy. Submit and collect in the same worker thread.
-        parser, body = state.next_parser(), result.body
-        pending = microgroup
-        microgroup, parser_marks = await asyncio.to_thread(
-            lambda: ray.get(parser.apply_raw.remote(pending, body))
-        )
-        tracer.marks.absorb(parser_marks)
-        tracer.mark("parser_done")
+    if args.rollout_fetch_in_parser:
+        # The actor is the HTTP client: the body flows engine -> router -> actor
+        # and is parsed where it lands, so the manager never holds it. Ingest
+        # scales with the actor pool instead of this one event loop.
+        with st.stage("generate"):
+            tracer.mark("parser_submit")
+            parser, pending = state.next_parser(), microgroup
+            microgroup, actor_marks, headers, resp_bytes = await asyncio.to_thread(
+                lambda: ray.get(parser.fetch_and_apply.remote(pending, url, payload))
+            )
+            tracer.absorb_response(PostResult(None, headers, actor_marks))
+            tracer.resp_bytes = resp_bytes
+        with st.stage("deserialize"):
+            tracer.mark("parser_done")
+    else:
+        with st.stage("generate"):
+            # timed: the reply carries the router's and the engine's marks, the only
+            # way to see inside this wait
+            result = await post(url, payload, raw=True, timed=True)
+        tracer.absorb_response(result)
+        tracer.resp_bytes = len(result.body)
+        with st.stage("deserialize"):
+            tracer.mark("parser_submit")
+            # .remote() serialises the ~1GB body into plasma in the calling thread,
+            # so submitting on the loop blocks every other request's transfer for the
+            # duration of that copy. Submit and collect in the same worker thread.
+            parser, body = state.next_parser(), result.body
+            pending = microgroup
+            microgroup, parser_marks = await asyncio.to_thread(lambda: ray.get(parser.apply_raw.remote(pending, body)))
+            tracer.marks.absorb(parser_marks)
+            tracer.mark("parser_done")
     st.attach(microgroup)
 
     # Stash the SDE/training step indices on each sample so _train_core can

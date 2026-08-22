@@ -222,3 +222,34 @@ class RolloutImageResponseParserActor:
         marks = {"parser_start": time.time()}
         bodies = msgpack.unpackb(raw, raw=False)
         return [apply_rollout_image_response(s, b) for s, b in zip(samples, bodies, strict=True)], marks
+
+    def fetch_and_apply(
+        self, samples: list[Sample], url: str, payload: dict, max_retries: int = 60
+    ) -> tuple[list[Sample], dict[str, float], dict[str, str], int]:
+        """POST the rollout request and parse the reply in this process, so the
+        response body never enters the manager. Keep-alive is off: this actor
+        idles between dispatches, and a pooled connection reused just as the
+        server's 5 s keep-alive timeout closes it dies with a read error."""
+        import httpx
+
+        if not hasattr(self, "_client"):
+            self._client = httpx.Client(limits=httpx.Limits(max_keepalive_connections=0), timeout=httpx.Timeout(None))
+        marks: dict[str, float] = {}
+        for attempt in range(max_retries):
+            try:
+                marks["http_send"] = time.time()
+                with self._client.stream("POST", url, json=payload) as response:
+                    marks["http_headers"] = time.time()
+                    response.read()
+                    marks["http_recv_done"] = time.time()
+                response.raise_for_status()
+                break
+            except Exception:
+                if attempt + 1 >= max_retries:
+                    raise
+                time.sleep(1)
+        marks["parser_start"] = time.time()
+        bodies = msgpack.unpackb(response.content, raw=False)
+        applied = [apply_rollout_image_response(s, b) for s, b in zip(samples, bodies, strict=True)]
+        marks["parser_done"] = time.time()
+        return applied, marks, dict(response.headers), len(response.content)
