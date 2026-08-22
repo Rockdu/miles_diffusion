@@ -281,7 +281,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 action="store_true",
                 default=False,
                 help=(
-                    "Parser actors ask the router /pick_worker for a load-balanced engine and "
+                    "Parser actors ask the router /pick_worker_for_request for a load-balanced engine and "
                     "fetch from it directly, so response bodies skip the router's data plane "
                     "entirely. The router keeps registration, health and load counts. "
                     "Requires --rollout-fetch-in-parser."

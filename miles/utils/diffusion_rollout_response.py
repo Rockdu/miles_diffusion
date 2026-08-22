@@ -231,9 +231,9 @@ class RolloutImageResponseParserActor:
         idles between dispatches, and a pooled connection reused just as the
         server's 5 s keep-alive timeout closes it dies with a read error.
 
-        ``direct``: ``url`` is the router base. Ask /pick_worker for a
+        ``direct``: ``url`` is the router base. Ask /pick_worker_for_request for a
         load-balanced engine, fetch from it so the body skips the router's
-        data plane, and ack /finish_worker in a finally so the in-flight
+        data plane, and ack /worker_finish_request in a finally so the in-flight
         count returns on success, failure and every retry alike. Only actor
         process death leaks a count, and the router's counts reset with each
         run. Each retry re-picks, so failures re-balance."""
@@ -246,7 +246,7 @@ class RolloutImageResponseParserActor:
         for attempt in range(max_retries):
             try:
                 if direct:
-                    picked = self._client.get(f"{url}/pick_worker")
+                    picked = self._client.get(f"{url}/pick_worker_for_request")
                     picked.raise_for_status()
                     worker = picked.json()["url"]
                 try:
@@ -260,7 +260,7 @@ class RolloutImageResponseParserActor:
                 finally:
                     if direct and worker:
                         try:
-                            self._client.post(f"{url}/finish_worker", params={"url": worker})
+                            self._client.post(f"{url}/worker_finish_request", params={"url": worker})
                         except Exception:
                             pass  # a lost ack costs one count; failing the request costs the sample
                 break
