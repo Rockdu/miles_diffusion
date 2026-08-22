@@ -101,7 +101,10 @@ def _build_per_timestep_features(
     device: torch.device,
 ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
     """Fields with one row per selected denoising step."""
-    all_latents = traj.latents.to(device, dtype=torch.float32)
+    # Ship latents in the engine's dtype (bf16 on H3): the upcast to fp32 is
+    # exact and the loss does it anyway, so converting here only doubled the
+    # trajectory copy and the train-shard bytes.
+    all_latents = traj.latents.to(device)
     latents = all_latents[:-1]
     next_latents = all_latents[1:]
     timesteps = traj.timesteps.to(device, dtype=torch.float32)
