@@ -15,30 +15,12 @@ import json
 import time
 from dataclasses import dataclass, field
 
-# Keep in sync with sglang.multimodal_gen.runtime.entrypoints.post_training.timing;
+# Header names match sglang.multimodal_gen.runtime.entrypoints.post_training.timing;
 # duplicated rather than imported so an older sglang-diffusion still works.
 SGLD_TIMING_HEADER = "x-sgld-timing"
 SGLD_STAGES_HEADER = "x-sgld-stages"
 ROUTER_TIMING_HEADER = "x-miles-router-timing"
 ROUTER_WORKER_HEADER = "x-miles-router-worker"
-
-# wire key -> mark name; abbreviated because a whole map travels in one header
-SGLD_WIRE_KEYS = {
-    "rc": "srv_recv",
-    "fs": "forward_start",
-    "fe": "forward_end",
-    "bs": "build_start",
-    "be": "build_end",
-    "de": "dump_end",
-    "me": "msgpack_end",
-}
-ROUTER_WIRE_KEYS = {
-    "rr": "router_recv",
-    "rd": "router_dispatch",
-    "wh": "worker_headers",
-    "bd": "router_body_done",
-    "rp": "router_reply",
-}
 
 CLIENT = "client"
 ROUTER = "router"
@@ -114,11 +96,10 @@ def _source(mark_a: str, mark_b: str) -> str:
 class Marks:
     """Absolute wall-clock marks taken by one process."""
 
-    __slots__ = ("marks", "_wire")
+    __slots__ = ("marks",)
 
-    def __init__(self, wire_keys: dict[str, str] | None = None) -> None:
+    def __init__(self) -> None:
         self.marks: dict[str, float] = {}
-        self._wire = {name: key for key, name in (wire_keys or {}).items()}
 
     def mark(self, name: str) -> None:
         assert name in MARK_SOURCE, f"unknown timing mark {name!r}"
@@ -129,17 +110,17 @@ class Marks:
 
     def to_header(self) -> str:
         return json.dumps(
-            {self._wire[name]: round(t, 6) for name, t in self.marks.items() if name in self._wire},
+            {name: round(t, 6) for name, t in self.marks.items()},
             separators=(",", ":"),
         )
 
 
-def parse_header(value: str | None, wire_keys: dict[str, str]) -> dict[str, float]:
-    """Decode one timing header; no header means a peer that predates it."""
+def parse_header(value: str | None) -> dict[str, float]:
+    """Decode one timing header; no header means a peer that predates it.
+    Non-mark keys (e.g. the engine's request_id) are dropped."""
     if not value:
         return {}
-    raw = json.loads(value)
-    return {name: float(raw[key]) for key, name in wire_keys.items() if key in raw}
+    return {name: float(t) for name, t in json.loads(value).items() if name in MARK_SOURCE}
 
 
 def parse_stages(value: str | None) -> dict[str, float]:

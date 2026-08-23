@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.responses import StreamingResponse
 
-from miles.utils.request_timing import ROUTER_TIMING_HEADER, ROUTER_WIRE_KEYS, ROUTER_WORKER_HEADER, Marks
+from miles.utils.request_timing import ROUTER_TIMING_HEADER, ROUTER_WORKER_HEADER, Marks
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,7 @@ class MilesRouter:
 
     async def proxy(self, request: Request, path: str):
         """Proxy all other requests to the SGLang router"""
-        stamps = Marks(ROUTER_WIRE_KEYS)
+        stamps = Marks()
         stamps.mark("router_recv")
         # Forward all other paths to SGLang router
         worker_url = self._use_url()

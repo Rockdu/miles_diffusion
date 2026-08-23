@@ -13,11 +13,9 @@ from pathlib import Path
 from miles.dashboard.events import STAGE_KINDS, PhaseEvent, RequestEvent, TrajectoryEvent
 from miles.utils.request_timing import (
     ROUTER_TIMING_HEADER,
-    ROUTER_WIRE_KEYS,
     ROUTER_WORKER_HEADER,
     SGLD_STAGES_HEADER,
     SGLD_TIMING_HEADER,
-    SGLD_WIRE_KEYS,
     Marks,
     parse_header,
     parse_stages,
@@ -193,8 +191,8 @@ class RequestTracer:
         """Take the sender's own marks plus the ones the reply carries back."""
         self.marks.absorb(result.marks)
         headers = {key.lower(): value for key, value in result.headers.items()}
-        self.marks.absorb(parse_header(headers.get(SGLD_TIMING_HEADER), SGLD_WIRE_KEYS))
-        self.marks.absorb(parse_header(headers.get(ROUTER_TIMING_HEADER), ROUTER_WIRE_KEYS))
+        self.marks.absorb(parse_header(headers.get(SGLD_TIMING_HEADER)))
+        self.marks.absorb(parse_header(headers.get(ROUTER_TIMING_HEADER)))
         self.engine_stages = parse_stages(headers.get(SGLD_STAGES_HEADER))
         self.worker = headers.get(ROUTER_WORKER_HEADER, "")
 

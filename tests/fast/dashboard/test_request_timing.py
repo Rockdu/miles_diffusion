@@ -40,7 +40,7 @@ from miles.utils.request_timing import (
     CROSS,
     LEGS,
     MARK_SOURCE,
-    ROUTER_WIRE_KEYS,
+    ROUTER,
     Marks,
     derive,
     leg_sources,
@@ -124,17 +124,20 @@ def test_a_peer_without_timing_headers_degrades_to_client_legs():
 
 
 def test_marks_round_trip_through_a_header():
-    marks = Marks(ROUTER_WIRE_KEYS)
-    for name in ROUTER_WIRE_KEYS.values():
-        marks.mark(name)
-    decoded = parse_header(marks.to_header(), ROUTER_WIRE_KEYS)
+    marks = Marks()
+    for name, source in MARK_SOURCE.items():
+        if source == ROUTER:
+            marks.mark(name)
+    decoded = parse_header(marks.to_header())
     assert decoded.keys() == marks.marks.keys()
     for name, value in decoded.items():
         assert value == pytest.approx(marks.marks[name], abs=1e-6)
 
 
-def test_an_absent_header_yields_no_marks():
-    assert parse_header(None, ROUTER_WIRE_KEYS) == {}
+def test_an_absent_header_yields_no_marks_and_foreign_keys_drop():
+    assert parse_header(None) == {}
+    # the engine's request_id shares the header; it is not a mark
+    assert parse_header('{"build_end":12.5,"request_id":"req-1"}') == {"build_end": 12.5}
 
 
 def test_engine_stages_arrive_as_seconds():
