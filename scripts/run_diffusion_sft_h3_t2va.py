@@ -17,7 +17,8 @@ Per rollout step: 64 samples, num_steps_per_rollout=4, so 16 samples per optimiz
 step over 8 dp ranks is 2 samples per rank at mbs=1.
 
 Usage:
-    MILES_SCRIPT_DATA_JSONL=/abs/data.jsonl python3 scripts/run_diffusion_sft_h3_t2va.py
+    python3 scripts/run_diffusion_sft_h3_t2va.py   # downloads DATASET on first run
+    # custom data: append --prompt-data /abs/train.jsonl via --extra-args (last flag wins)
 """
 
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ import typer
 import miles.utils.external_utils.command_utils as U
 
 MODEL = "MiniMaxAI/MiniMax-H3"
+DATASET = "rockdu/WISA-80K-Practical-Dynamics-254"
 WANDB_PROJECT = "miles-diffusion-sft"
 
 # H3 DiT LoRA targets: packed self-attn and FFN (miles-side diffusers module names).
@@ -35,16 +37,18 @@ LORA_TARGET_MODULES = "attn.to_q attn.to_k attn.to_v attn.to_out.0 ff.net.0.proj
 
 @dataclass
 class ScriptArgs(U.ExecuteTrainConfig):
-    data_jsonl: str = ""
+    data_dir: str = "/root/datasets"
     resume_ckpt: str = ""
     start_rollout: int = -1
     num_epoch: int = 3
     extra_args: str = ""
 
 
+def prepare(args: ScriptArgs):
+    U.hf_download_dataset(DATASET, data_dir=args.data_dir)
+
+
 def execute(args: ScriptArgs) -> None:
-    if not args.data_jsonl:
-        raise SystemExit("set --data-jsonl (or MILES_SCRIPT_DATA_JSONL) to a jsonl with prompt + metadata.video")
     run_name = f"diffusion_sft_h3_t2va_{U.create_run_id()}"
 
     ckpt_args = (
@@ -58,7 +62,7 @@ def execute(args: ScriptArgs) -> None:
 
     rollout_args = (
         "--rollout-function-path miles.rollout.sft_rollout.generate_rollout "
-        f"--prompt-data {args.data_jsonl} "
+        f"--prompt-data {args.data_dir}/{DATASET.split('/')[1]}/train.jsonl "
         "--input-key prompt "
         "--rollout-batch-size 64 "
         f"--num-epoch {args.num_epoch} "
@@ -120,6 +124,7 @@ def execute(args: ScriptArgs) -> None:
 
 @U.dataclass_cli
 def main(args: ScriptArgs) -> None:
+    prepare(args)
     execute(args)
 
 
