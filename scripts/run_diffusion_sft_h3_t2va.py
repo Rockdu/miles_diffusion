@@ -13,8 +13,9 @@ Videos must already sit on H3's serving grid: short_edge=768 canvas, 24 fps, and
 17n+5 frame count (the default spec is 1344x768 / 107 frames, ~4.46 s). See
 scripts/prepare_wisa_h3_lighting.py for a dataset pipeline that produces this format.
 
-Per rollout step: 64 samples, num_steps_per_rollout=4, so 16 samples per optimizer
-step over 8 dp ranks is 2 samples per rank at mbs=1.
+Per rollout step: 32 samples, num_steps_per_rollout=4, so 8 samples per optimizer
+step over 8 dp ranks is 1 sample per rank at mbs=1 (the batch size the reference
+lr/wd defaults were validated with).
 
 Usage:
     python3 scripts/run_diffusion_sft_h3_t2va.py   # downloads DATASET on first run
@@ -64,7 +65,7 @@ def execute(args: ScriptArgs) -> None:
         "--rollout-function-path miles.rollout.sft_rollout.generate_rollout "
         f"--prompt-data {args.data_dir}/{DATASET.split('/')[1]}/train.jsonl "
         "--input-key prompt "
-        "--rollout-batch-size 64 "
+        "--rollout-batch-size 32 "
         f"--num-epoch {args.num_epoch} "
         "--num-steps-per-rollout 4 "
         # H3 serving grid: 16:9 canvas at short_edge=768, 24 fps, 17n+5 frames.
