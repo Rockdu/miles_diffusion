@@ -64,6 +64,8 @@ class MilesRouter:
         """Setup all the HTTP routes"""
         # sglang-router api
         self.app.post("/add_worker")(self.add_worker)
+        self.app.get("/pick_worker_for_request")(self.pick_worker_for_request)
+        self.app.post("/worker_finish_request")(self.worker_finish_request)
         self.app.get("/list_workers")(self.list_workers)
         # Catch-all route for proxying to SGLang - must be registered LAST
         self.app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])(self.proxy)
@@ -156,6 +158,24 @@ class MilesRouter:
                 self._finish_url(worker_url)
 
         return StreamingResponse(relay(), status_code=response.status_code, headers=out_headers)
+
+    async def pick_worker_for_request(self, request: Request):
+        """Least-loaded engine URL; the pick counts in-flight until /worker_finish_request acks it.
+
+        A client that dies without acking leaks one count -- acceptable until crashes exist.
+        """
+        try:
+            url = self._use_url()
+        except RuntimeError as e:
+            return JSONResponse(status_code=503, content={"error": str(e)})
+        return {"url": url}
+
+    async def worker_finish_request(self, request: Request):
+        worker_url = request.query_params.get("url")
+        if not worker_url or worker_url not in self.worker_request_counts:
+            return JSONResponse(status_code=400, content={"error": f"unknown worker url {worker_url!r}"})
+        self._finish_url(worker_url)
+        return {"status": "success"}
 
     async def add_worker(self, request: Request):
         """Add a new worker to the router.

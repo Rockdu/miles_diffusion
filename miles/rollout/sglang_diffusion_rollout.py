@@ -192,12 +192,20 @@ async def generate_microgroup(
     )
 
     st = hooks.StageTimer()
-    with st.stage("generate"):
-        raw = await post(url, payload, raw=True)
-    with st.stage("deserialize"):
-        # .remote() copies the ~1GB body into plasma in the calling thread; keep it off the event loop
-        parser, pending = state.next_parser(), microgroup
-        microgroup = await asyncio.to_thread(lambda: ray.get(parser.apply_raw.remote(pending, raw)))
+    if args.rollout_fetch_in_parser:
+        with st.stage("generate"):
+            router_url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+            parser, pending = state.next_parser(), microgroup
+            microgroup = await asyncio.to_thread(
+                lambda: ray.get(parser.fetch_and_apply.remote(pending, router_url, payload))
+            )
+    else:
+        with st.stage("generate"):
+            raw = await post(url, payload, raw=True)
+        with st.stage("deserialize"):
+            # .remote() copies the ~1GB body into plasma in the calling thread; keep it off the event loop
+            parser, pending = state.next_parser(), microgroup
+            microgroup = await asyncio.to_thread(lambda: ray.get(parser.apply_raw.remote(pending, raw)))
     st.attach(microgroup)
 
     # Stash the SDE/training step indices on each sample so _train_core can
