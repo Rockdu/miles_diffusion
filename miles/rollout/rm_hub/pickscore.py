@@ -144,7 +144,9 @@ async def pickscore_rm(args, samples: Sequence[Sample]) -> list[float]:
         prompts.extend([sample.prompt] * len(frames))
         frame_counts.append(len(frames))
 
-    flat_scores = await pool.score(images, prompts)
+    flat_scores, max_queue_depth = await pool.score(images, prompts)
+    for sample in samples:
+        sample.reward_max_queue_depth = float(max_queue_depth)
     scores: list[float] = []
     offset = 0
     for count in frame_counts:
