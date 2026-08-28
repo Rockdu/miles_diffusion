@@ -20,6 +20,7 @@ from miles.utils.diffusion_data import Dataset as DiffusionDataset
 from miles.utils.diffusion_rollout_response import RolloutImageResponseParserActor
 from miles.utils.eval_config import EvalDatasetConfig
 from miles.utils.http_utils import post
+from miles.utils import pool_stats
 from miles.utils.misc import SingletonMeta, load_function
 from miles.utils.types import Sample
 
@@ -115,6 +116,7 @@ class GenerateState(metaclass=SingletonMeta):
         self.dp_counts = [0] * args.sglang_dp_size
         self.dp_rank = 0
         self.node_id = ray.get_runtime_context().get_node_id()
+        self.parser_inflight = [0] * args.rollout_parser_num_workers
         self.response_parsers = [
             RolloutImageResponseParserActor.options(
                 scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=self.node_id, soft=False)
@@ -126,9 +128,14 @@ class GenerateState(metaclass=SingletonMeta):
         self.reset()
 
     def next_parser(self):
-        parser = self.response_parsers[self._parser_rr % len(self.response_parsers)]
+        i = self._parser_rr % len(self.response_parsers)
         self._parser_rr += 1
-        return parser
+        pool_stats.observe("parser", self.parser_inflight[i])
+        self.parser_inflight[i] += 1
+        return i, self.response_parsers[i]
+
+    def parser_done(self, i: int) -> None:
+        self.parser_inflight[i] -= 1
 
     @contextmanager
     def dp_rank_context(self):
@@ -196,17 +203,23 @@ async def generate_microgroup(
     if args.rollout_fetch_in_parser:
         with st.stage("generate"):
             router_url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
-            parser, pending = state.next_parser(), microgroup
-            microgroup = await asyncio.to_thread(
-                lambda: ray.get(parser.fetch_and_apply.remote(pending, router_url, payload))
-            )
+            (parser_i, parser), pending = state.next_parser(), microgroup
+            try:
+                microgroup = await asyncio.to_thread(
+                    lambda: ray.get(parser.fetch_and_apply.remote(pending, router_url, payload))
+                )
+            finally:
+                state.parser_done(parser_i)
     else:
         with st.stage("generate"):
             raw = await post(url, payload, raw=True)
         with st.stage("deserialize"):
             # .remote() copies the ~1GB body into plasma in the calling thread; keep it off the event loop
-            parser, pending = state.next_parser(), microgroup
-            microgroup = await asyncio.to_thread(lambda: ray.get(parser.apply_raw.remote(pending, raw)))
+            (parser_i, parser), pending = state.next_parser(), microgroup
+            try:
+                microgroup = await asyncio.to_thread(lambda: ray.get(parser.apply_raw.remote(pending, raw)))
+            finally:
+                state.parser_done(parser_i)
     st.attach(microgroup)
 
     # Stash the SDE/training step indices on each sample so _train_core can
