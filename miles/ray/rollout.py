@@ -1,6 +1,7 @@
 import itertools
 import logging
 import multiprocessing
+import threading
 import random
 import time
 from pathlib import Path
@@ -208,7 +209,7 @@ class RolloutManager:
         metrics = _log_eval_rollout_data(rollout_id, self.args, data, result.metrics)
         max_images = self.args.wandb_log_num_images
         if max_images > 0:
-            self._log_images(
+            self._log_images_async(
                 {
                     f"eval_media/{name}_images": payload["samples"]
                     for name, payload in data.items()
@@ -400,7 +401,7 @@ class RolloutManager:
         max_images = self.args.wandb_log_num_images
         interval = self.args.wandb_log_image_interval
         if max_images > 0 and self.rollout_id % interval == 0:
-            self._log_images(
+            self._log_images_async(
                 {"rollout_media/sample_images": samples},
                 max_images=max_images,
                 step_key="rollout/step",
@@ -411,6 +412,10 @@ class RolloutManager:
         if self.custom_expand_samples_to_train_pairs_func is not None:
             return self.custom_expand_samples_to_train_pairs_func(self.args, samples, rewards, raw_rewards)
         return flow_grpo_expand_samples_to_train_pairs(self.args, samples, rewards, raw_rewards)
+
+    def _log_images_async(self, *args, **kwargs) -> None:
+        # mp4 encode + wandb upload take ~1min per log round; keep them off the train barrier
+        threading.Thread(target=self._log_images, args=args, kwargs=kwargs, daemon=True).start()
 
     def _log_images(
         self,
