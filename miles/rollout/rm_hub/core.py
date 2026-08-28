@@ -8,6 +8,8 @@ import logging
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+from miles.utils import pool_stats
+
 _manager_placement_group = None
 logger = logging.getLogger(__name__)
 
@@ -68,6 +70,7 @@ class AsyncRewardActorPool:
         ]
         self._batch_size = batch_size
         self._round_robin_index = 0
+        self._inflight = [0] * num_workers
         logger.info(
             "Initialized %s actor pool with %d workers, %.3f GPUs/worker, batch_size=%d.",
             name,
@@ -77,21 +80,27 @@ class AsyncRewardActorPool:
         )
 
     def _next_actor(self):
-        actor = self._actors[self._round_robin_index % len(self._actors)]
+        i = self._round_robin_index % len(self._actors)
         self._round_robin_index += 1
-        return actor
+        pool_stats.observe("reward", self._inflight[i])
+        self._inflight[i] += 1
+        return i, self._actors[i]
 
     async def score(self, images: list, prompts: list[str]) -> list[float]:
         chunks = [
-            (self._next_actor(), images[start:start + self._batch_size], prompts[start:start + self._batch_size])
+            (*self._next_actor(), images[start:start + self._batch_size], prompts[start:start + self._batch_size])
             for start in range(0, len(images), self._batch_size)
         ]
 
         def submit_and_collect():
             # .remote() copies each chunk into plasma in the calling thread, so
             # submitting on the loop stalls every concurrent request for that copy.
-            return ray.get([actor.score_batch.remote(img, prm) for actor, img, prm in chunks])
+            return ray.get([actor.score_batch.remote(img, prm) for _, actor, img, prm in chunks])
 
         loop = asyncio.get_running_loop()
-        chunked_scores = await loop.run_in_executor(None, submit_and_collect)
+        try:
+            chunked_scores = await loop.run_in_executor(None, submit_and_collect)
+        finally:
+            for i, *_ in chunks:
+                self._inflight[i] -= 1
         return [float(score) for chunk in chunked_scores for score in chunk]

@@ -26,6 +26,7 @@ from miles.utils.iter_utils import group_by
 from miles.utils.logging_utils import configure_logger
 from miles.utils.metric_checker import MetricChecker
 from miles.utils.metric_utils import compute_rollout_step, compute_statistics, dict_add_prefix
+from miles.utils import pool_stats
 from miles.utils.misc import load_function
 from miles.utils.ray_utils import Box
 from miles.utils.timer import timer
@@ -395,6 +396,7 @@ class RolloutManager:
             flush=True,
         )
 
+        reward_stats.update(pool_stats.drain())
         reward_stats["rollout/step"] = compute_rollout_step(self.args, self.rollout_id)
         tracking_utils.log(self.args, reward_stats, step_key="rollout/step")
 
