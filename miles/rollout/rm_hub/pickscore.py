@@ -39,11 +39,9 @@ def _sample_to_rgb_hwc_uint8_frames(sample: Sample, num_frames: int | None) -> l
     if cfhw is None:
         raise ValueError("generated_output is None")
 
-    # Convert only the frames that survive: a 107-frame clip yields 8 here, and
-    # converting the whole clip first cost several full-size float32 copies of it
-    indices = sample_frame_indices(cfhw.shape[1], num_frames)
-    fhwc = cfhw_to_fhwc(image_or_video_to_uint8(cfhw[:, indices].detach().cpu()))
-    return [np.ascontiguousarray(fhwc[i].numpy()) for i in range(len(indices))]
+    fhwc = image_or_video_to_uint8(cfhw_to_fhwc(cfhw.detach().cpu()))
+    indices = sample_frame_indices(fhwc.shape[0], num_frames)
+    return [np.ascontiguousarray(fhwc[i].numpy()) for i in indices]
 
 
 class PickScoreScorer(torch.nn.Module):
