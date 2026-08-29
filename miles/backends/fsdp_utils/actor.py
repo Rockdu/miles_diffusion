@@ -32,6 +32,7 @@ from .diffusion_update_weight_utils import (
     DiffusionUpdateWeightFromTensor,
     DiffusionUpdateWeightFromTensorLoRA,
     DiffusionUpdateWeightFromTensorLoRAIPC,
+    DiffusionUpdateWeightFromTensorMapped,
 )
 from .ema import EmaShadow
 from .input_dtype_policy import apply_input_dtype_policy
@@ -229,7 +230,13 @@ class FSDPTrainRayActor(TrainRayActor):
         elif self.args.use_lora:
             self.weight_updater = DiffusionUpdateWeightFromTensorLoRA(self.args, self.models)
         else:
-            self.weight_updater = DiffusionUpdateWeightFromTensor(self.args, self.models)
+            from miles.utils.misc import load_function
+
+            cfg_cls = load_function(self.args.train_pipeline_config_path)
+            if cfg_cls.full_weight_group_collector_path is not None:
+                self.weight_updater = DiffusionUpdateWeightFromTensorMapped(self.args, self.models)
+            else:
+                self.weight_updater = DiffusionUpdateWeightFromTensor(self.args, self.models)
 
         checkpoint.finalize_load(self, checkpoint_payload)
 

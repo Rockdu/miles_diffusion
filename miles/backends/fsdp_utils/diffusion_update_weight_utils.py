@@ -302,6 +302,94 @@ class DiffusionUpdateWeightFromTensor(DiffusionUpdateWeight):
                 ray.get(ref)
 
 
+
+    def _verify_weight_sync(self, pairs: list[tuple[str, torch.Tensor]], target_module: str) -> None:
+        """Compare our expected merged-transformer SHA-256 against the live
+        rollout engine's checksum. Both sides run sgl-d's own
+        ``compute_weights_checksum``, so the algorithms cannot drift apart."""
+        if dist.get_rank() != self._ipc_gather_src:
+            return
+
+        if compute_weights_checksum is None:
+            logger.warning(
+                "[weight_sync verify] installed sglang does not expose "
+                "compute_weights_checksum (%s); skipping checksum verification",
+                _checksum_import_error,
+            )
+            return
+
+        expected = compute_weights_checksum(pairs)
+
+        try:
+            remote = ray.get(self._ipc_engine.get_weights_checksum.remote([target_module]))
+        except Exception as e:
+            logger.error(f"[weight_sync verify] failed to fetch remote checksum: {e}")
+            return
+
+        actual = (remote or {}).get(target_module)
+        match = expected == actual
+        logger.warning(
+            f"[weight_sync verify v{self.weight_version}] rank={dist.get_rank()} "
+            f"paired_engine_match={match} "
+            f"expected={expected[:16] if expected else None} "
+            f"actual={(actual or '')[:16] if isinstance(actual, str) else actual}"
+        )
+
+        # Cross-engine comparison: only rank 0 does this so we don't spam.
+        # Queries ALL engines' checksums and prints them side by side — the
+        # rank-specific noise_pred drift we've seen is consistent with
+        # engines diverging silently, so this pins it down.
+        if dist.get_rank() != 0:
+            return
+        try:
+            per_engine = ray.get([e.get_weights_checksum.remote([target_module]) for e in self.rollout_engines])
+        except Exception as e:
+            logger.error(f"[weight_sync verify cross-engine] failed: {e}")
+            return
+        engine_sums = [(idx, (r or {}).get(target_module)) for idx, r in enumerate(per_engine)]
+        first_sum = engine_sums[0][1]
+        all_equal = all(s == first_sum for _, s in engine_sums)
+        pretty = "  ".join(f"eng{idx}={s[:16] if isinstance(s, str) else s}" for idx, s in engine_sums)
+        logger.warning(f"[weight_sync verify v{self.weight_version} cross-engine] " f"all_equal={all_equal}  {pretty}")
+
+
+class DiffusionUpdateWeightFromTensorMapped(DiffusionUpdateWeightFromTensor):
+    """Full-weight updater for families whose rollout DiT renames modules or fuses
+    projections: the family's collector rewrites trainer tensors into rollout layout."""
+
+    def __init__(self, args: Namespace, models: dict[str, torch.nn.Module]) -> None:
+        super().__init__(args, models)
+        from miles.utils.misc import load_function
+
+        cfg_cls = load_function(args.train_pipeline_config_path)
+        self._collector = load_function(cfg_cls.full_weight_group_collector_path)
+
+    def _prepare_full_param(self, param: torch.Tensor) -> torch.Tensor:
+        param = param.cuda()
+        if isinstance(param, DTensor):
+            # Sync gather: fused projections concatenate several params, so each
+            # member must be materialized before the collector combines them.
+            param = param.redistribute(placements=[Replicate()] * param.device_mesh.ndim).to_local()
+        return param
+
+    def _update_component_weights(self, target_module: str, model: torch.nn.Module) -> None:
+        verify = os.environ.get("MILES_VERIFY_WEIGHT_SYNC", "").lower() in ("1", "true", "yes")
+        verify_pairs: list[tuple[str, torch.Tensor]] = [] if verify else None
+        bucket, bucket_size = [], 0
+        for name, tensor in self._collector(model.state_dict(), self._prepare_full_param):
+            size = _tensor_nbytes(tensor)
+            if bucket and bucket_size + size >= self.args.update_weight_buffer_size:
+                self.wait_and_update_bucket_weights(bucket, target_module)
+                bucket, bucket_size = [], 0
+            bucket.append((name, tensor))
+            bucket_size += size
+            if verify_pairs is not None:
+                verify_pairs.append((name, tensor.detach().cpu().contiguous()))
+        if bucket:
+            self.wait_and_update_bucket_weights(bucket, target_module)
+        if verify_pairs is not None:
+            self._verify_weight_sync(verify_pairs, target_module)
+
 # TODO: update weights only for sgl-d LoRA params
 class DiffusionUpdateWeightFromTensorLoRA(DiffusionUpdateWeightFromTensor):
     """LoRA-aware updater: merges adapters into base before pushing to rollout.
@@ -393,55 +481,6 @@ class DiffusionUpdateWeightFromTensorLoRA(DiffusionUpdateWeightFromTensor):
 
         if verify_pairs is not None:
             self._verify_weight_sync(verify_pairs, target_module)
-
-    def _verify_weight_sync(self, pairs: list[tuple[str, torch.Tensor]], target_module: str) -> None:
-        """Compare our expected merged-transformer SHA-256 against the live
-        rollout engine's checksum. Both sides run sgl-d's own
-        ``compute_weights_checksum``, so the algorithms cannot drift apart."""
-        if dist.get_rank() != self._ipc_gather_src:
-            return
-
-        if compute_weights_checksum is None:
-            logger.warning(
-                "[weight_sync verify] installed sglang does not expose "
-                "compute_weights_checksum (%s); skipping checksum verification",
-                _checksum_import_error,
-            )
-            return
-
-        expected = compute_weights_checksum(pairs)
-
-        try:
-            remote = ray.get(self._ipc_engine.get_weights_checksum.remote([target_module]))
-        except Exception as e:
-            logger.error(f"[weight_sync verify] failed to fetch remote checksum: {e}")
-            return
-
-        actual = (remote or {}).get(target_module)
-        match = expected == actual
-        logger.warning(
-            f"[weight_sync verify v{self.weight_version}] rank={dist.get_rank()} "
-            f"paired_engine_match={match} "
-            f"expected={expected[:16] if expected else None} "
-            f"actual={(actual or '')[:16] if isinstance(actual, str) else actual}"
-        )
-
-        # Cross-engine comparison: only rank 0 does this so we don't spam.
-        # Queries ALL engines' checksums and prints them side by side — the
-        # rank-specific noise_pred drift we've seen is consistent with
-        # engines diverging silently, so this pins it down.
-        if dist.get_rank() != 0:
-            return
-        try:
-            per_engine = ray.get([e.get_weights_checksum.remote([target_module]) for e in self.rollout_engines])
-        except Exception as e:
-            logger.error(f"[weight_sync verify cross-engine] failed: {e}")
-            return
-        engine_sums = [(idx, (r or {}).get(target_module)) for idx, r in enumerate(per_engine)]
-        first_sum = engine_sums[0][1]
-        all_equal = all(s == first_sum for _, s in engine_sums)
-        pretty = "  ".join(f"eng{idx}={s[:16] if isinstance(s, str) else s}" for idx, s in engine_sums)
-        logger.warning(f"[weight_sync verify v{self.weight_version} cross-engine] " f"all_equal={all_equal}  {pretty}")
 
 
 class DiffusionUpdateWeightFromTensorLoRAIPC(DiffusionUpdateWeightFromTensor):

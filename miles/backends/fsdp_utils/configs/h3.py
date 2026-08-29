@@ -22,6 +22,7 @@ class H3TrainPipelineConfig(TrainPipelineConfig):
     sde_timestep_divisor = 1000.0
     optimizer_state_allowed_missing = ["audio"]
     lora_layer_group_collector_path = "miles.backends.fsdp_utils.h3_weight_key_mapper.collect_h3_lora_layer_groups"
+    full_weight_group_collector_path = "miles.backends.fsdp_utils.h3_weight_key_mapper.collect_h3_full_weight_tensors"
 
     lora_target_modules = [
         "attn.to_q",
@@ -34,12 +35,13 @@ class H3TrainPipelineConfig(TrainPipelineConfig):
 
     @classmethod
     def validate_args(cls, args: Namespace) -> None:
-        # sglang's H3 DiT renames modules and fuses Q/K/V, so weights only reach the
-        # rollout through the LoRA IPC path's layer grouper; any other sync mode would
-        # push names the engine drops with a warning, silently training nothing.
+        # sglang's H3 DiT renames modules and fuses Q/K/V, so weights reach the
+        # rollout through a layer mapper: the LoRA IPC grouper for LoRA runs, the
+        # full-weight collector for full finetunes. The LoRA merge path ships
+        # trainer names the engine drops with a warning, silently training nothing.
         # SFT (--train-only) has no rollout engine and therefore no sync constraint.
-        if not args.train_only and not (args.use_lora and args.lora_ipc_weight_sync):
-            raise ValueError("H3 training requires --use-lora with --lora-ipc-weight-sync")
+        if not args.train_only and args.use_lora and not args.lora_ipc_weight_sync:
+            raise ValueError("H3 LoRA training requires --lora-ipc-weight-sync")
 
     @classmethod
     def apply_rollout_sampling_params(
