@@ -52,9 +52,7 @@ def _sample(sde=SDE) -> Sample:
 
 def _build(traj, sde=SDE):
     log_probs = torch.linspace(-1.0, -2.0, T)
-    return _build_per_timestep_features(
-        _sample(sde), traj=traj, rollout_log_probs=log_probs, device=torch.device("cpu")
-    )
+    return _build_per_timestep_features(_sample(sde), traj=traj, rollout_log_probs=log_probs)
 
 
 def test_windowed_matches_full_bitwise():

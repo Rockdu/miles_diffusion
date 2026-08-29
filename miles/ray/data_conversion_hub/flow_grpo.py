@@ -24,7 +24,6 @@ def _expand_samples_to_train_pairs(
     raw_rewards: list[float],
 ) -> tuple[list[dict[str, Any]], dict[str, torch.Tensor]]:
     """Flat train pairs in sample-major order (all pairs for sample 0, then sample 1, ...)."""
-    device = torch.device("cpu")
     train_data: list[dict[str, Any]] = []
     scheduler_meta = scheduler_meta_from_samples(samples)
 
@@ -40,7 +39,6 @@ def _expand_samples_to_train_pairs(
             sample,
             traj=traj,
             rollout_log_probs=rollout_log_probs,
-            device=device,
         )
         pair_debug_steps = None
         if sample.rollout_debug_tensors is not None:
@@ -98,7 +96,6 @@ def _build_per_timestep_features(
     *,
     traj,
     rollout_log_probs: torch.Tensor,
-    device: torch.device,
 ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
     """Fields with one row per selected denoising step.
 
@@ -111,8 +108,8 @@ def _build_per_timestep_features(
     sde_idx = (sample.train_metadata or {}).get("sde_step_indices")
     assert sde_idx is not None, "SDE step indices are required for training"
     # Keep producer dtype: the train actor casts on consumption (loss_hub _stack_pair_field).
-    all_latents = traj.latents.to(device)
-    timesteps = traj.timesteps.to(device)
+    all_latents = traj.latents
+    timesteps = traj.timesteps
 
     if traj.latent_step_indices is None:
         position = {step: step for step in range(int(all_latents.shape[0]))}
