@@ -27,6 +27,42 @@ def hf_download_dataset(full_name: str, include: str | None = None, data_dir: st
     return local_dir
 
 
+def ssh_start_ray_workers(
+    master_addr: str,
+    num_gpus_per_node: int,
+    hostfile: str = "/root/h3_hostfile",
+    head_host: str | None = None,
+    ssh_port: int = 2222,
+) -> None:
+    """Join every host in a hostfile to the ray cluster over ssh, in parallel.
+
+    Ray itself cannot bring up the workers: the head is already running locally
+    and the workers have no agent yet. Pass this as
+    ``execute_train(before_ray_job_submit=...)`` so the cluster is complete
+    before the job is submitted; the placement group's ``ready()`` then blocks
+    until every worker has joined.
+
+    A hostfile line is ``ip [num_gpus]``; the optional second column covers
+    heterogeneous nodes (e.g. a 2-GPU reward node). Every worker is killed
+    clean (sglang, sgl_diffusion, miles, its raylet) before rejoining — a stale
+    raylet is how engine/trainer GPU pairing drifts apart. The devbox pods
+    share the node's network namespace, so sshd listens on ``ssh_port``
+    (port 22 belongs to the host machine).
+    """
+    head_host = head_host or master_addr
+    exec_command(
+        f"while read -r worker_ip worker_gpus _; do "
+        f'[ -z "$worker_ip" ] && continue; '
+        f'if [ "$worker_ip" = {shlex.quote(head_host)} ]; then continue; fi; '
+        f'echo "Starting Ray worker on $worker_ip"; '
+        f'ssh -p {ssh_port} -o StrictHostKeyChecking=no root@"$worker_ip" '
+        f'"pkill -9 sglang ; pkill -9 sgl_diffusion ; ray stop --force ; pkill -9 miles ; pkill -9 ray ; '
+        f"ray start --address={master_addr}:6379 --num-gpus ${{worker_gpus:-{num_gpus_per_node}}} "
+        f'--node-ip-address $worker_ip --disable-usage-stats" & '
+        f"done < {shlex.quote(hostfile)}; wait"
+    )
+
+
 # This class can be extended by concrete scripts
 @dataclass
 class ExecuteTrainConfig:
