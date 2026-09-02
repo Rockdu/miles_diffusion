@@ -11,6 +11,9 @@ signal differs:
   * One optimizer step per rollout: NFT has no importance-ratio clipping to keep a second
     inner step on-policy.
 
+The NFT knobs follow UniRL's own MiniMax-H3 recipe (beta, lr, grad clip, EMA ramp, and the
+full sigma grid), not the SD3 one. Resolution and batch stay this repo's.
+
 Usage (on the head node):
 
     MASTER_ADDR=<head_ip> python3 scripts/run_diffusion_nft_h3_t2va_34gpu.py
@@ -114,26 +117,29 @@ def execute(args: ScriptArgs, prompt_dir: str) -> None:
             "--diffusion-eval-num-steps 20 "
         )
 
+    # beta and the full sigma grid are H3's own, not SD3's: UniRL runs beta 1.0 on SD3 and
+    # Qwen-Image but 0.1 here, and keeps every transition. At fraction 0.99 the one sigma
+    # dropped is the smallest, which on H3's shift-12 grid is the only mid-range point.
     nft_args = (
         "--loss-type nft "
-        "--diffusion-nft-beta 1.0 "
-        "--diffusion-nft-timestep-fraction 0.99 "
+        "--diffusion-nft-beta 0.1 "
+        "--diffusion-nft-timestep-fraction 1.0 "
         "--advantage-estimator grpo --globalize-reward-std "
     )
 
-    # The reference model NFT needs, and the pi_old the rollout samples under; schedule
-    # copied from the SD3 PickScore NFT recipe.
+    # The reference model NFT needs, and the pi_old the rollout samples under. Decay 0 for
+    # the first 75 refreshes makes the shadow a hard copy, then it ramps.
     ema_args = (
         "--ref-mode ema "
         "--use-ema "
         "--ema-rollout-policy ema "
-        "--ema-decay-init 0.001 "
-        "--ema-decay-ramp 0.001 "
-        "--ema-decay-max 0.5 "
-        "--ema-decay-flat-steps 0 "
+        "--ema-decay-init 0.0 "
+        "--ema-decay-ramp 0.0075 "
+        "--ema-decay-max 0.999 "
+        "--ema-decay-flat-steps 75 "
     )
 
-    optimizer_args = "--lr 1e-4 --weight-decay 1e-4 "
+    optimizer_args = "--lr 3e-4 --weight-decay 1e-4 --clip-grad 1.0 "
 
     # H3's rollout DiT renames modules and fuses Q/K/V, so weights only reach the engine
     # through the LoRA IPC path's layer grouper; the family rejects any other sync mode.
