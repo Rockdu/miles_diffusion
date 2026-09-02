@@ -120,6 +120,13 @@ class TrainPipelineConfig(abc.ABC):
     def configure(self, args) -> None:  # noqa: B027  optional no-op hook, not abstract
         """Bind the request constants a family needs at train time; default binds none."""
 
+    @classmethod
+    def final_trajectory_step_index(cls, num_inference_steps: int) -> int:
+        """The trajectory step index carrying the clean x0. The generic rollout appends it at
+        ``step_index=num_inference_steps``; a family whose engine builds a different-sized
+        sigma grid takes a different number of transitions and overrides this."""
+        return num_inference_steps
+
     def process_timestep_as_input(self, timesteps: torch.Tensor) -> torch.Tensor:
         """The trajectory timestep as this family's DiT takes it, rescaled the way its own
         sglang-d DiT rescales it -- the arithmetic has to match, not just the value."""

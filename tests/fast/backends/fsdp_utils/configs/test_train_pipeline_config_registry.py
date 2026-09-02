@@ -124,6 +124,17 @@ class _RangelessScheduler:
         pass
 
 
+class TestFinalTrajectoryStepIndex:
+    # Where the engine puts x0. Asking for the wrong index returns no latent at all, which
+    # only surfaces as an empty torch.stack after the whole denoise has run.
+    @pytest.mark.parametrize("config_cls", [SD3TrainPipelineConfig, Wan2_2TrainPipelineConfig])
+    def test_generic_families_end_at_num_inference_steps(self, config_cls):
+        assert config_cls.final_trajectory_step_index(10) == 10
+
+    def test_h3_ends_one_step_earlier(self):
+        assert H3TrainPipelineConfig.final_trajectory_step_index(10) == 9
+
+
 class TestProcessSigmaAsTimestepsInput:
     # The NFT counterpart: each family rescales the opposite way from above.
     NUM_TRAIN_TIMESTEPS = 1000

@@ -78,6 +78,12 @@ class H3TrainPipelineConfig(TrainPipelineConfig):
         ):
             sampling_params.pop(key, None)
 
+    @classmethod
+    def final_trajectory_step_index(cls, num_inference_steps: int) -> int:
+        # sgl-d builds H3's grid as linspace(1, 0, num_steps), one point short of every other
+        # family, so H3 takes num_steps - 1 transitions and x0 lands one index earlier.
+        return num_inference_steps - 1
+
     def process_sigma_as_timesteps_input(self, sigmas, *, scheduler):
         # sgl-d builds the H3 trajectory as sigma * this divisor; H3's scheduler config
         # declares only shift, so there is no range to read.
