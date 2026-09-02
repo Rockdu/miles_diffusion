@@ -184,14 +184,16 @@ class TestPrepareNftBatch:
         seen = {}
 
         class _Recording(_StubConfig):
-            def process_sigma_as_timesteps_input(self, sigmas, *, num_train_timesteps):
+            def process_sigma_as_timesteps_input(self, sigmas, *, scheduler):
                 seen["sigmas"] = sigmas.clone()
-                seen["num_train_timesteps"] = num_train_timesteps
+                seen["scheduler"] = scheduler
                 return sigmas
 
-        prepare_nft_batch(self._ctx(_Recording()), self._batch())
+        ctx = self._ctx(_Recording())
+        prepare_nft_batch(ctx, self._batch())
         assert torch.equal(seen["sigmas"], torch.tensor(self.SIGMAS))
-        assert seen["num_train_timesteps"] == self.NUM_TRAIN_TIMESTEPS
+        # The scheduler itself, so a family whose config declares no range can ignore it.
+        assert seen["scheduler"] is ctx.scheduler
 
     def test_sd3_style_family_gets_the_scheduler_range(self):
         prepared = prepare_nft_batch(self._ctx(_Sd3StyleConfig()), self._batch())

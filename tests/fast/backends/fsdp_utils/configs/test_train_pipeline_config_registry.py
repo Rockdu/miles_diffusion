@@ -5,6 +5,7 @@ register_cpu_ci(est_time=30, suite="stage-a-cpu", labels=[])
 import pytest
 import torch
 
+from miles.backends.fsdp_utils.configs.h3 import H3TrainPipelineConfig
 from miles.backends.fsdp_utils.configs.qwen_image import QwenImageTrainPipelineConfig
 from miles.backends.fsdp_utils.configs.sd3 import SD3TrainPipelineConfig
 from miles.backends.fsdp_utils.configs.train_pipeline_config import TrainPipelineConfig, resolve_diffusion_model_family
@@ -109,6 +110,20 @@ class TestProcessTimestepAsInput:
         assert torch.equal(out, self.TIMESTEPS / 1000.0)
 
 
+class _Scheduler:
+    """Declares a range, as every family's scheduler but H3's does."""
+
+    class config:
+        num_train_timesteps = 1000
+
+
+class _RangelessScheduler:
+    """H3's: its scheduler_config.json carries shift alone."""
+
+    class config:
+        pass
+
+
 class TestProcessSigmaAsTimestepsInput:
     # The NFT counterpart: each family rescales the opposite way from above.
     NUM_TRAIN_TIMESTEPS = 1000
@@ -117,14 +132,12 @@ class TestProcessSigmaAsTimestepsInput:
 
     @pytest.mark.parametrize("config_cls", [SD3TrainPipelineConfig, Wan2_2TrainPipelineConfig])
     def test_scales_up_to_the_scheduler_range(self, config_cls):
-        out = config_cls.process_sigma_as_timesteps_input(
-            config_cls, self.SIGMAS, num_train_timesteps=self.NUM_TRAIN_TIMESTEPS
-        )
+        out = config_cls.process_sigma_as_timesteps_input(config_cls, self.SIGMAS, scheduler=_Scheduler)
         assert torch.equal(out, self.SIGMAS * float(self.NUM_TRAIN_TIMESTEPS))
 
     def test_qwen_image_passes_the_sigma_through(self):
         out = QwenImageTrainPipelineConfig.process_sigma_as_timesteps_input(
-            QwenImageTrainPipelineConfig, self.SIGMAS, num_train_timesteps=self.NUM_TRAIN_TIMESTEPS
+            QwenImageTrainPipelineConfig, self.SIGMAS, scheduler=_Scheduler
         )
         assert torch.equal(out, self.SIGMAS)
         # Asserted so the equal() above keeps its teeth.
@@ -132,3 +145,9 @@ class TestProcessSigmaAsTimestepsInput:
             QwenImageTrainPipelineConfig, self.SIGMAS * float(self.NUM_TRAIN_TIMESTEPS)
         )
         assert not torch.equal(round_tripped, self.SIGMAS)
+
+    def test_h3_scales_by_its_own_divisor(self):
+        out = H3TrainPipelineConfig.process_sigma_as_timesteps_input(
+            H3TrainPipelineConfig, self.SIGMAS, scheduler=_RangelessScheduler
+        )
+        assert torch.equal(out, self.SIGMAS * H3TrainPipelineConfig.sde_timestep_divisor)

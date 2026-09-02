@@ -78,6 +78,11 @@ class H3TrainPipelineConfig(TrainPipelineConfig):
         ):
             sampling_params.pop(key, None)
 
+    def process_sigma_as_timesteps_input(self, sigmas, *, scheduler):
+        # sgl-d builds the H3 trajectory as sigma * this divisor; H3's scheduler config
+        # declares only shift, so there is no range to read.
+        return sigmas * float(self.sde_timestep_divisor)
+
     def prepare_cond_kwargs(self, cond: CondKwargs | None, device: torch.device) -> dict:
         if cond is None:
             return {}

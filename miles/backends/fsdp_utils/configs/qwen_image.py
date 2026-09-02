@@ -64,7 +64,7 @@ class QwenImageTrainPipelineConfig(TrainPipelineConfig):
     def process_timestep_as_input(self, timesteps):
         return timesteps / 1000.0
 
-    def process_sigma_as_timesteps_input(self, sigmas, *, num_train_timesteps):
+    def process_sigma_as_timesteps_input(self, sigmas, *, scheduler):
         # Identity only while the scheduler range equals the 1000 above; else sigma * N / 1000.
         return sigmas
 
