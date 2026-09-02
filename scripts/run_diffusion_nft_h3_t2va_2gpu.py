@@ -3,6 +3,7 @@
 Same topology and H3 settings as the Flow-GRPO 2-GPU recipe; the training signal is what
 differs. NFT learns from the clean x0 at resampled sigmas, so the rollout runs as ODE with
 no noise injection and no SDE window, and the engine returns x0 alone instead of a trajectory.
+The reference model is the EMA copy, which also serves as the rollout policy.
 
 H3's packed forward takes one sample at a time, so micro-batch-size-sample stays 1 and the
 K (x0, t) pairs NFT expands per sample are trained one by one.
@@ -100,6 +101,18 @@ def execute(args: ScriptArgs, prompt_dir: str) -> None:
         "--advantage-estimator grpo --globalize-reward-std "
     )
 
+    # The reference model NFT needs, and the pi_old the rollout samples under; schedule
+    # copied from the SD3 PickScore NFT recipe.
+    ema_args = (
+        "--ref-mode ema "
+        "--use-ema "
+        "--ema-rollout-policy ema "
+        "--ema-decay-init 0.001 "
+        "--ema-decay-ramp 0.001 "
+        "--ema-decay-max 0.5 "
+        "--ema-decay-flat-steps 0 "
+    )
+
     optimizer_args = "--lr 1e-4 --weight-decay 1e-4 --adam-eps 1e-15 "
 
     # H3's rollout DiT renames modules and fuses Q/K/V, so weights only reach the engine
@@ -154,7 +167,7 @@ def execute(args: ScriptArgs, prompt_dir: str) -> None:
 
     U.execute_train(
         train_args=(
-            f"{ckpt_args} {rollout_args} {diffusion_args} {eval_args} {nft_args} {optimizer_args} "
+            f"{ckpt_args} {rollout_args} {diffusion_args} {eval_args} {nft_args} {ema_args} {optimizer_args} "
             f"{lora_args} {reward_args} {wandb_args} {sglang_args} {train_backend_args} {perf_args} "
             f"{misc_args} {args.extra_args}"
         ),
