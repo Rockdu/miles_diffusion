@@ -113,7 +113,7 @@ See [Dtype Control](../advanced/dtype-control.md).
 |---|---|---|---|
 | `--actor-num-nodes` | int | `1` | |
 | `--actor-num-gpus-per-node` | int | `8` | |
-| `--rollout-num-gpus` | int | – | For train-only SFT, unset colocates encoders with training; set it to reserve dedicated encoder GPUs. |
+| `--rollout-num-gpus` | int | – | For train-only SFT, unset colocates encoders with training; set it to reserve dedicated encoder GPUs, which also lets encoding overlap training. |
 | `--rollout-num-gpus-per-engine` | int | `1` | Like sglang's `tp_size`. |
 | `--num-gpus-per-node` | int | `8` | |
 | `--colocate` | flag | off | Required: CUDA IPC weight sync currently supports only colocated trainer and rollout execution. |

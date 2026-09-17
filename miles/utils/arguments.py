@@ -56,8 +56,8 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=(
                     "Number of GPUs for rollout-side work. For train-only SFT, leave unset to colocate encoders "
-                    "with training or set it to reserve dedicated encoder GPUs. Under --colocate this is overridden "
-                    "to actor_num_gpus_per_node * actor_num_nodes."
+                    "with training or set it to reserve dedicated encoder GPUs, which also lets encoding overlap "
+                    "training. Under --colocate this is overridden to actor_num_gpus_per_node * actor_num_nodes."
                 ),
             )
             parser.add_argument(
