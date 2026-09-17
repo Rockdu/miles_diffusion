@@ -157,28 +157,37 @@ the start.
 
 ## 7. Shape of the contribution
 
-Following llama3 (minimal) and flux (bespoke pipeline):
+**Superseded by the decision recorded in section 9.1**: the draft targets
+`MilesModelBackend`'s `ModelPackage` contract, not `ModelSpec`. What follows is
+the layout that landed.
 
 ```text
-pi05/
-  __init__.py            # flavor dict + model_registry(flavor) -> ModelSpec
-  model.py               # Pi05Model(BaseModel) + nested Config
-  layers.py              # DualExpertBlock, AdaRMSModulation, action in/out projections
-  parallelize.py         # parallelize_pi05(): AC -> compile -> apply_fsdp
-  sharding.py
-  state_dict_adapter.py  # to_hf() / from_hf() against pi05_base
-  trainer.py             # flow-matching step; Pi0.5 has no next-token path
-  config_registry.py
+miles/backends/fsdp_utils/models/pi05/
+  __init__.py
+  layers.py         DualExpertBlock, ExpertStream, AdaRMSModulation, GemmaRMSNorm
+  model.py          Pi05Model, Pi05Config
+  loading.py        load_component(), checkpoint resolution
+  modeling.py       load_scheduler() -- flow-matching timesteps; grad checkpointing
+  parallel_plan.py  FSDP_PARALLEL_PLAN, sequence_parallel_plan
+  attention.py      set_attention_backend
+miles/backends/fsdp_utils/configs/pi05.py   the registered TrainPipelineConfig
 ```
 
-`parallelize_pi05` only needs to fill the `dp_shard` axis for the first cut — one
-`apply_fsdp` call, per-block wrapping as flux does it. TP/PP get added later without touching
-`model.py`, which is the whole point of section 1.
+Wrapping stays where this repo already puts it: `parallel_plan` declares
+`no_split_modules=("DualExpertBlock",)` and `actor.apply_fsdp2` performs the
+`fully_shard` calls. torchtitan inverts that -- the model ships a
+`parallelize_fn` that wraps itself -- which is the single largest difference
+between the two contracts and the reason a `ModelSpec` draft could not run here.
 
-A bespoke `trainer.py` is required rather than chosen: `BaseModel.preprocess_inputs` raises
-`NotImplementedError` by design, and its docstring names Flux as the precedent for models whose
-pipeline never calls it. Subclass `Trainer` and override `forward_backward_step` and
-`batch_generator`.
+Every module still takes one frozen config dataclass and holds no parallelism
+logic, so the port later is a base-class swap (`nn.Module` for torchtitan's
+`Module`, dataclasses expanded into nested `Config`s) rather than a rewrite.
+
+A bespoke trainer is still owed. torchtitan would need it because
+`BaseModel.preprocess_inputs` raises by design for models with their own
+pipeline; here the equivalent gap is that `TrainPipelineConfig`'s abstract
+surface assumes a denoising trajectory replayed from a rollout engine, which
+pi0.5 SFT does not have.
 
 ## 8. Replicate deliberately: `pi05_libero` drops robot state
 
@@ -200,9 +209,11 @@ AdamW with gradient-norm clipping at 1.0, EMA decay 0.999.
 
 ## 9. Open questions for review
 
-1. **Where does this live?** There is no torchtitan fork under `Rockdu` today, so this proposal
-   assumes miles_diffusion. If the migration lands first, `torchtitan/experiments/pi05/` is the
-   more natural home and the layout in section 7 transfers unchanged.
+1. ~~**Where does this live?**~~ **Settled**: `miles/backends/fsdp_utils/models/pi05/`, against
+   the `ModelPackage` contract. Targeting `ModelSpec` first was the wrong call -- it collides with
+   `TrainPipelineConfig` as a second registry, with `actor.apply_fsdp2` over who owns FSDP
+   wrapping, and with `loading.load_component` over weight loading, and nothing in this repo
+   calls a `ModelSpec`, so it could not be run or tested. Section 7 records what landed.
 2. **One `DualExpertBlock` or two configured streams?** Flux hardcodes `img_*` / `txt_*` attribute
    pairs. A `list[ExpertStream.Config]` generalizes to pi0's three-group case and to any future
    third expert, at the cost of diverging from the in-tree precedent.
@@ -224,3 +235,5 @@ AdamW with gradient-norm clipping at 1.0, EMA decay 0.999.
   offscreen rendering of two camera views for hundreds of steps per trial does, and that stack is
   a separate piece of work from training support.
 - **The `transformers_replace` mechanism.** Rejected in section 4; we implement the layers instead.
+- **Classifier-free guidance.** `Pi05TrainPipelineConfig.cfg_combine` raises. pi0.5 trains without
+  guidance, so the hook the diffusion families rely on is unreachable here, not merely unused.
