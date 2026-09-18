@@ -120,6 +120,7 @@ See [Dtype Control](../advanced/dtype-control.md).
 | `--offload` | flag | off | `--offload-train` + `--offload-rollout`. |
 | `--offload-train` / `--no-offload-train` | tri-state | – | Always on under `--colocate`. |
 | `--offload-rollout` / `--no-offload-rollout` | tri-state | – | Always on under `--colocate`. |
+| `--skip-train-actor-gc-collect` | flag | off | The train actor's `clear_memory` after each rollout's training skips `gc.collect()` and only releases the CUDA cache; saves 0.2-0.5 s per rollout on a large actor process. |
 | `--distributed-backend` | str | `nccl` | |
 | `--distributed-timeout-minutes` | int | `10` | |
 

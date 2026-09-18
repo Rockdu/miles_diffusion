@@ -106,6 +106,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "This will always be true when --colocate is set."
                 ),
             )
+            parser.add_argument(
+                "--skip-train-actor-gc-collect",
+                action="store_true",
+                help=(
+                    "Skip gc.collect() in the train actor's clear_memory after each rollout's training; "
+                    "torch.cuda.empty_cache() still runs. A full collection over a large actor process costs "
+                    "0.2-0.5 s per rollout and frees no GPU memory."
+                ),
+            )
 
             reset_arg(parser, "--distributed-backend", type=str, default="nccl")
             reset_arg(parser, "--distributed-timeout-minutes", type=int, default=10)
