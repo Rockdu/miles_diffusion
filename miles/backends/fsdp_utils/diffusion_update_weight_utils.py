@@ -142,6 +142,44 @@ def collect_lora_layer_groups(
     return layer_groups, unmapped_keys, num_lora_keys
 
 
+def _component_state_dict(
+    target_module: str,
+    model: torch.nn.Module,
+    weight_overrides: Mapping[str, torch.Tensor] | None,
+) -> dict[str, torch.Tensor]:
+    """Overlay component-qualified local snapshots without changing live weights or devices."""
+    state_dict = model.state_dict()
+    if weight_overrides is None:
+        return state_dict
+    parameters = dict(model.named_parameters(remove_duplicate=False))
+    parameter_overrides = {}
+    for name, parameter in parameters.items():
+        snapshot = weight_overrides.get(f"{target_module}.{name}")
+        if snapshot is not None:
+            parameter_overrides.setdefault(id(parameter), snapshot)
+    for name, parameter in state_dict.items():
+        # A canonical snapshot must replace every state-dict alias of a tied Parameter.
+        snapshot = (
+            parameter_overrides.get(id(parameters[name]))
+            if name in parameters
+            else weight_overrides.get(f"{target_module}.{name}")
+        )
+        if snapshot is None:
+            continue
+        local_parameter = parameter.to_local() if isinstance(parameter, DTensor) else parameter
+        if (
+            isinstance(snapshot, DTensor)
+            or snapshot.shape != local_parameter.shape
+            or snapshot.dtype != parameter.dtype
+        ):
+            raise ValueError(f"Weight override must match the local tensor schema: {target_module}.{name}")
+        if isinstance(parameter, DTensor):
+            # from_local() would eagerly move CPU snapshots to the CUDA mesh device.
+            snapshot = DTensor(snapshot, parameter._spec, requires_grad=False)
+        state_dict[name] = snapshot
+    return state_dict
+
+
 class DiffusionUpdateWeight(abc.ABC):
     """Base updater used by diffusion training actors."""
 
@@ -158,13 +196,18 @@ class DiffusionUpdateWeight(abc.ABC):
     ) -> None:
         pass
 
-    def update_weights(self) -> None:
+    def update_weights(self, *, weight_overrides: Mapping[str, torch.Tensor] | None = None) -> None:
         self.weight_version += 1
         for target_module, model in self.models.items():
-            self._update_component_weights(target_module, model)
+            self._update_component_weights(target_module, model, weight_overrides)
 
-    def _update_component_weights(self, target_module: str, model: torch.nn.Module) -> None:
-        state_dict = model.state_dict()
+    def _update_component_weights(
+        self,
+        target_module: str,
+        model: torch.nn.Module,
+        weight_overrides: Mapping[str, torch.Tensor] | None = None,
+    ) -> None:
+        state_dict = _component_state_dict(target_module, model, weight_overrides)
         bucket = []
         bucket_size = 0
         for name, param in state_dict.items():
@@ -313,7 +356,7 @@ class DiffusionUpdateWeightFromTensorLoRA(DiffusionUpdateWeightFromTensor):
 
     def __init__(self, args, models):
         super().__init__(args, models)
-        # Per-component LoRA index: component -> {param name -> (A, B, scaling)}.
+        # Per-component index: base weight name -> (A weight name, B weight name, scaling).
         self._lora_index: dict[str, dict[str, tuple]] = {}
         for component, model in self.models.items():
             index: dict[str, tuple] = {}
@@ -321,8 +364,8 @@ class DiffusionUpdateWeightFromTensorLoRA(DiffusionUpdateWeightFromTensor):
                 if hasattr(module, "lora_A") and hasattr(module, "lora_B"):
                     for adapter in module.lora_A:
                         index[name + ".base_layer.weight"] = (
-                            module.lora_A[adapter],
-                            module.lora_B[adapter],
+                            f"{name}.lora_A.{adapter}.weight",
+                            f"{name}.lora_B.{adapter}.weight",
                             module.scaling[adapter],
                         )
             self._lora_index[component] = index
@@ -334,13 +377,19 @@ class DiffusionUpdateWeightFromTensorLoRA(DiffusionUpdateWeightFromTensor):
             return t.redistribute(placements=[Replicate()] * t.device_mesh.ndim).to_local()
         return t
 
-    def _update_component_weights(self, target_module: str, model: torch.nn.Module) -> None:
+    def _update_component_weights(
+        self,
+        target_module: str,
+        model: torch.nn.Module,
+        weight_overrides: Mapping[str, torch.Tensor] | None = None,
+    ) -> None:
         verify = os.environ.get("MILES_VERIFY_WEIGHT_SYNC", "").lower() in ("1", "true", "yes")
         verify_pairs: list[tuple[str, torch.Tensor]] = [] if verify else None
         lora_index = self._lora_index[target_module]
+        state_dict = _component_state_dict(target_module, model, weight_overrides)
 
         bucket, bucket_size = [], 0
-        for name, param in model.state_dict().items():
+        for name, param in state_dict.items():
             if "lora_" in name:
                 continue
 
@@ -355,8 +404,8 @@ class DiffusionUpdateWeightFromTensorLoRA(DiffusionUpdateWeightFromTensor):
                 # Merge LoRA for this layer on the fly instead of pre-computing
                 # all 720 deltas up front: Qwen-Image's MLP + attn deltas total
                 # tens of GB at peak — here only one delta is resident at a time.
-                A, B, s = lora_index[name]
-                delta = (self._gather_full(B.weight) @ self._gather_full(A.weight)) * s
+                a_name, b_name, scaling = lora_index[name]
+                delta = (self._gather_full(state_dict[b_name]) @ self._gather_full(state_dict[a_name])) * scaling
                 param = param.wait() if hasattr(param, "wait") else param
                 param = param + delta.to(param.device, param.dtype)
                 del delta
@@ -457,22 +506,27 @@ class DiffusionUpdateWeightFromTensorLoRAIPC(DiffusionUpdateWeightFromTensor):
         return param
 
     def _collect_layer_groups(
-        self, model: torch.nn.Module
+        self,
+        model: torch.nn.Module,
+        *,
+        target_module: str,
+        weight_overrides: Mapping[str, torch.Tensor] | None = None,
     ) -> tuple[list[list[tuple[str, torch.Tensor]]], list[str], int]:
         """Group this model's LoRA tensors into rollout layer names, per model family."""
-        from miles.utils.misc import load_function
-
         collector_path = None
         if self.args.train_pipeline_config_path:
+            from miles.utils.misc import load_function
+
             collector_path = load_function(self.args.train_pipeline_config_path).lora_layer_group_collector_path
+        state_dict = _component_state_dict(target_module, model, weight_overrides)
         if collector_path is None:
-            return collect_lora_layer_groups(model.state_dict())
+            return collect_lora_layer_groups(state_dict)
 
         # A family whose rollout fuses several projections into one layer (H3's
         # qkv_proj) combines adapters here, so DTensor shards must resolve first.
         lora_state = {
             name: self._prepare_lora_param(param)
-            for name, param in model.state_dict().items()
+            for name, param in state_dict.items()
             if PeftLoRAKeyMapper.is_lora_key(name)
         }
         layer_groups, unmapped_keys, num_lora_keys = load_function(collector_path)(lora_state)
@@ -485,10 +539,12 @@ class DiffusionUpdateWeightFromTensorLoRAIPC(DiffusionUpdateWeightFromTensor):
             )
         return layer_groups, unmapped_keys, num_lora_keys
 
-    def update_weights(self) -> None:
+    def update_weights(self, *, weight_overrides: Mapping[str, torch.Tensor] | None = None) -> None:
         self.weight_version += 1
         for target_module, model in self.models.items():
-            layer_groups, unmapped_keys, num_lora_keys = self._collect_layer_groups(model)
+            layer_groups, unmapped_keys, num_lora_keys = self._collect_layer_groups(
+                model, target_module=target_module, weight_overrides=weight_overrides
+            )
             bucket: list[tuple[str, torch.Tensor]] = []
             bucket_size = 0
             num_buckets = 0
