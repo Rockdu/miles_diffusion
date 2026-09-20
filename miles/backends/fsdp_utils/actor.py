@@ -1,11 +1,13 @@
 import logging
 import warnings
 from argparse import Namespace
+from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 
 import ray
 import torch
 import torch.distributed as dist
+from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 
 import miles.backends.fsdp_utils.configs.krea2  # noqa: F401 — register pipeline config
@@ -19,6 +21,7 @@ from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.memory_utils import clear_memory, print_memory
 from miles.utils.metric_buffer import MetricBuffer
 from miles.utils.metric_utils import compute_rollout_step
+from miles.utils.tensor_backper import TensorBackuper
 from miles.utils.timer import Timer, inverse_timer, timer
 from miles.utils.tracking_utils import init_tracking
 from miles.utils.train_data_utils import (
@@ -34,7 +37,6 @@ from .diffusion_update_weight_utils import (
     DiffusionUpdateWeightFromTensorLoRA,
     DiffusionUpdateWeightFromTensorLoRAIPC,
 )
-from .ema import EmaShadow
 from .input_dtype_policy import apply_input_dtype_policy
 from .loss_hub import DiffusionLossContext, flow_grpo_loss_formula, prepare_flow_grpo_batch
 from .lr_scheduler import get_lr_scheduler
@@ -212,15 +214,7 @@ class FSDPTrainRayActor(TrainRayActor):
 
         checkpoint_payload = checkpoint.load(self)
 
-        self.ema_shadow = None
-        if self.args.use_ema:
-            self.ema_shadow = EmaShadow(
-                (p for m in self.models.values() for p in m.parameters()),
-                decay=self.args.ema_decay_init,
-                uprate=self.args.ema_decay_ramp,
-                uphold=self.args.ema_decay_max,
-                flat_steps=self.args.ema_decay_flat_steps,
-            )
+        self._init_weight_backups()
 
         # sglang-d now supports /update_weights_from_tensor (PR #20464).
         if self.args.train_only:
@@ -238,6 +232,57 @@ class FSDPTrainRayActor(TrainRayActor):
             self.sleep()
 
         return self.args.start_rollout_id
+
+    def _init_weight_backups(self):
+        self._asleep = False
+        self.tensor_backuper = None
+        if not (self.args.use_ema or self.args.offload_train):
+            return
+        self._weight_parameters = {}
+        groups = {}
+        for component, model in self.models.items():
+            prefix = f"{component}." if component else ""
+            groups[f"{prefix}base"] = []
+            groups[f"{prefix}lora"] = []
+            for name, parameter in model.named_parameters():
+                qualified_name = f"{prefix}{name}"
+                self._weight_parameters[qualified_name] = parameter
+                group = "lora" if ".lora_A." in f".{name}" or ".lora_B." in f".{name}" else "base"
+                groups[f"{prefix}{group}"].append(qualified_name)
+        self._trainable_weight_names = tuple(
+            name for name, parameter in self._weight_parameters.items() if parameter.requires_grad
+        )
+        trainable_names = set(self._trainable_weight_names)
+        self._trainable_weight_groups = {
+            group: names for group, names in groups.items() if trainable_names.intersection(names)
+        }
+        self._fixed_weight_groups = tuple(group for group in groups if group not in self._trainable_weight_groups)
+        self.tensor_backuper = TensorBackuper.create(self._get_weight_tensors, groups=groups)
+        self.tensor_backuper.backup(
+            "actor", device="cpu", pin_memory=torch.cuda.is_available(), fixed_groups=self._fixed_weight_groups
+        )
+        if self.args.use_ema:
+            self.tensor_backuper.backup(
+                "ema",
+                device="cpu" if self.args.ema_offload else "cuda",
+                pin_memory=self.args.ema_offload and torch.cuda.is_available(),
+                reuse={group: "actor" for group in self._fixed_weight_groups},
+                fixed_groups=self._fixed_weight_groups,
+            )
+            self.tensor_backuper.configure_ema(
+                "ema",
+                tensor_names=self._trainable_weight_names,
+                initial_decay=self.args.ema_decay_init,
+                decay_ramp=self.args.ema_decay_ramp,
+                max_decay=self.args.ema_decay_max,
+                flat_steps=self.args.ema_decay_flat_steps,
+            )
+
+    def _get_weight_tensors(self, names):
+        # Fresh .data views preserve version counters for pending actor backward.
+        selected = self._weight_parameters if names is None else names
+        tensors = {name: self._weight_parameters[name].data for name in selected}
+        return {name: tensor.to_local() if isinstance(tensor, DTensor) else tensor for name, tensor in tensors.items()}
 
     @contextmanager
     def _model_init_context(self, *, materialize_weights: bool):
@@ -259,24 +304,30 @@ class FSDPTrainRayActor(TrainRayActor):
 
     @timer
     def sleep(self) -> None:
-        if not self.args.offload_train:
+        if not self.args.offload_train or self._asleep:
             return
-
         print_memory("before offload DiT")
-
-        self.model.cpu()
+        weights = self.tensor_backuper.get("actor")
+        bind_fsdp_model_to_cpu_snapshot(
+            self.model,
+            {id(parameter): weights[name] for name, parameter in self._weight_parameters.items()},
+            pin_memory=torch.cuda.is_available(),
+        )
+        self.tensor_backuper.share_live_storage("actor")
         move_torch_optimizer(self.optimizer, "cpu")
+        self._asleep = True
         clear_memory()
         dist.barrier(group=get_gloo_group())
         print_memory("after sleep DiT")
 
     @timer
     def wake_up(self) -> None:
-        if not self.args.offload_train:
+        if not self.args.offload_train or not self._asleep:
             return
-
+        print_memory("before wake_up DiT")
         self.model.cuda()
         move_torch_optimizer(self.optimizer, "cuda")
+        self._asleep = False
         dist.barrier(group=get_gloo_group())
         print_memory("after wake_up DiT")
 
@@ -284,6 +335,34 @@ class FSDPTrainRayActor(TrainRayActor):
         if self.args.save is None:
             return
         checkpoint.save(self, iteration=rollout_id)
+
+    def _switch_model(self, target_tag: str) -> None:
+        if self.args.fsdp_cpu_offload:
+            # CPU shards may still be read by asynchronous FSDP H2D copies.
+            torch.cuda.synchronize()
+        self.tensor_backuper.restore(target_tag)
+        for module in self.model.modules():
+            if isinstance(module, FSDPModule):
+                module.reshard()
+        if target_tag == "actor":
+            # PEFT may re-enable gathered parameters while leaving their shards frozen.
+            trainable_names = set(self._trainable_weight_names)
+            for name, parameter in self._weight_parameters.items():
+                parameter.requires_grad_(name in trainable_names)
+
+    @timer
+    def update_ema(self) -> None:
+        if self.args.debug_rollout_only:
+            return
+        backuper = self.tensor_backuper
+        if backuper is None:
+            return
+        for model_tag, ema_state in backuper.ema_states.items():
+            decay = backuper.update_ema(model_tag)
+            if dist.get_rank() == 0:
+                logger.info(
+                    "EMA updated (tag=%s decay=%.4f update_count=%d)", model_tag, decay, ema_state.update_count
+                )
 
     @timer
     def update_weights(self) -> None:  # type: ignore[override]
@@ -303,15 +382,13 @@ class FSDPTrainRayActor(TrainRayActor):
             if dist.get_rank() == 0:
                 ray.get(self.rollout_manager.clear_num_new_engines.remote())
 
-        ema_shadow = self.ema_shadow
-        if ema_shadow is not None:
-            delta = ema_shadow.update()
-            if dist.get_rank() == 0:
-                logger.info("EMA shadow updated (decay=%.4f step=%d)", delta, ema_shadow.step)
-        rollout_weight_context = (
-            ema_shadow.swap_in() if ema_shadow is not None and self.args.ema_rollout_policy == "ema" else nullcontext()
-        )
-        with rollout_weight_context:
+        backuper = self.tensor_backuper
+        if backuper is not None and self.args.ema_rollout_policy == "ema":
+            ema_weights = backuper.get("ema")
+            self.weight_updater.update_weights(
+                weight_overrides={name: ema_weights[name] for name in backuper.ema_states["ema"].tensor_names}
+            )
+        else:
             self.weight_updater.update_weights()
         clear_memory()
 
@@ -343,6 +420,7 @@ class FSDPTrainRayActor(TrainRayActor):
             if self.args.debug_rollout_only:
                 return
             self._train_core(rollout_id=rollout_id, rollout_data=rollout_data)
+            self.update_ema()
 
         train_metric_utils.log_perf_data_raw(
             rollout_id=rollout_id,
@@ -485,6 +563,18 @@ class FSDPTrainRayActor(TrainRayActor):
                     metrics.emit_replicated("grad_norm", grad_norm)
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
+                    if self.tensor_backuper is not None:
+                        self.tensor_backuper.mark_weights_updated(
+                            group
+                            for group, names in self._trainable_weight_groups.items()
+                            if any(self._weight_parameters[name].grad is not None for name in names)
+                        )
+                        self.tensor_backuper.backup(
+                            "actor",
+                            device="cpu",
+                            pin_memory=torch.cuda.is_available(),
+                            fixed_groups=self._fixed_weight_groups,
+                        )
                     self.lr_scheduler.step()
                 else:
                     self.optimizer.zero_grad(set_to_none=True)
@@ -555,11 +645,14 @@ class FSDPTrainRayActor(TrainRayActor):
         ref_mode = self.args.ref_mode
         if ref_mode != "none":
             if ref_mode == "ema":
-                ref_ctx = self.ema_shadow.swap_in()
-            else:
-                ref_ctx = prepared.model.disable_adapter()
-            with torch.no_grad(), ref_ctx:
-                ref_pred = _compute_noise_pred().detach()
+                self._switch_model("ema")
+            try:
+                ref_ctx = nullcontext() if ref_mode == "ema" else prepared.model.disable_adapter()
+                with torch.no_grad(), ref_ctx:
+                    ref_pred = _compute_noise_pred().detach()
+            finally:
+                if ref_mode == "ema":
+                    self._switch_model("actor")
 
         if self.custom_loss_formula_func is not None:
             return self.custom_loss_formula_func(
@@ -582,22 +675,6 @@ class FSDPTrainRayActor(TrainRayActor):
             write_old_log_prob=write_old_log_prob,
             old_log_prob_from_new=old_log_prob_from_new,
         )
-
-
-@torch.no_grad()
-def move_torch_optimizer(optimizer, device):
-    """ref: https://github.com/volcengine/verl/blob/main/verl/utils/fsdp_utils.py"""
-    if not optimizer.state:
-        return
-
-    for param_group in optimizer.param_groups:
-        for param in param_group["params"]:
-            state = optimizer.state[param]
-            for key, value in state.items():
-                if isinstance(value, torch.Tensor):
-                    state[key] = value.to(device, non_blocking=True)
-
-    torch.cuda.synchronize()
 
 
 def apply_lora(model: torch.nn.Module, args: Namespace, train_pipeline_config) -> torch.nn.Module:
@@ -706,3 +783,57 @@ def apply_fsdp2(
     )
 
     return model
+
+
+def bind_fsdp_model_to_cpu_snapshot(
+    model: torch.nn.Module,
+    weights_by_parameter_id: Mapping[int, torch.Tensor],
+    *,
+    pin_memory: bool,
+) -> None:
+    """Preserve Parameter bindings while moving their storage to CPU weights.
+
+    Call only between completed training steps. FSDP can replace uneven shard
+    storage while padding it; the caller must adopt the resulting local tensors.
+    """
+    fsdp_parameters = []
+    for module in model.modules():
+        if isinstance(module, FSDPModule):
+            group = module._get_fsdp_state()._fsdp_param_group
+            if group is not None:
+                fsdp_parameters.extend(group.fsdp_params)
+
+    def bind(tensor: torch.Tensor) -> torch.Tensor:
+        weights = weights_by_parameter_id.get(id(tensor))
+        if weights is None:
+            return tensor.cpu()
+        if isinstance(tensor, DTensor):
+            # from_local would move CPU weights back to the CUDA mesh device.
+            return DTensor(weights, tensor._spec, requires_grad=tensor.requires_grad)
+        return weights
+
+    previous_pin_memory = [parameter.pin_memory for parameter in fsdp_parameters]
+    try:
+        # Let FSDP pin any storage it allocates while padding uneven shards.
+        for parameter in fsdp_parameters:
+            parameter.pin_memory = pin_memory
+        model._apply(bind)
+    finally:
+        for parameter, previous in zip(fsdp_parameters, previous_pin_memory, strict=True):
+            parameter.pin_memory = previous
+
+
+@torch.no_grad()
+def move_torch_optimizer(optimizer, device):
+    """ref: https://github.com/volcengine/verl/blob/main/verl/utils/fsdp_utils.py"""
+    if not optimizer.state:
+        return
+
+    for param_group in optimizer.param_groups:
+        for param in param_group["params"]:
+            state = optimizer.state[param]
+            for key, value in state.items():
+                if isinstance(value, torch.Tensor):
+                    state[key] = value.to(device, non_blocking=True)
+
+    torch.cuda.synchronize()

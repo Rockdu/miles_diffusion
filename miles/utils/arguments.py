@@ -13,6 +13,7 @@ the prefix until the CLIs merge; stripping it early leaves two names for one ide
 import argparse
 import json
 import logging
+import math
 import os
 from typing import Any
 
@@ -1077,6 +1078,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--ema-offload",
+                action="store_true",
+                default=False,
+                help=(
+                    "Keep EMA trainable weights in pinned CPU memory instead of GPU. With CUDA actor weights, "
+                    "update one EMA tensor at a time on GPU and copy it back to CPU. Independent of "
+                    "--offload-train and --fsdp-cpu-offload. Requires --use-ema."
+                ),
+            )
+            parser.add_argument(
                 "--ema-rollout-policy",
                 type=str,
                 choices=["live", "ema"],
@@ -1649,12 +1660,14 @@ def miles_validate_args(args):
 
     if not 0.0 <= args.ema_decay_init <= 1.0:
         raise ValueError(f"--ema-decay-init must be in [0, 1], got {args.ema_decay_init}")
-    if args.ema_decay_ramp < 0.0:
-        raise ValueError(f"--ema-decay-ramp must be non-negative, got {args.ema_decay_ramp}")
+    if not math.isfinite(args.ema_decay_ramp) or args.ema_decay_ramp < 0.0:
+        raise ValueError(f"--ema-decay-ramp must be finite and non-negative, got {args.ema_decay_ramp}")
     if not 0.0 <= args.ema_decay_max <= 1.0:
         raise ValueError(f"--ema-decay-max must be in [0, 1], got {args.ema_decay_max}")
     if args.ema_decay_flat_steps < 0:
         raise ValueError(f"--ema-decay-flat-steps must be non-negative, got {args.ema_decay_flat_steps}")
+    if args.ema_offload and not args.use_ema:
+        raise ValueError("--ema-offload requires --use-ema")
     if args.use_ema and args.ref_mode != "ema" and args.ema_rollout_policy != "ema":
         raise ValueError("--use-ema has no consumer; set --ref-mode ema or --ema-rollout-policy ema")
     if args.ema_rollout_policy == "ema" and not args.use_ema:
@@ -1702,7 +1715,7 @@ def miles_validate_args(args):
         if args.ref_mode != "none":
             raise ValueError("--loss-type sft_loss does not use a reference model; drop --ref-mode")
         if args.use_ema:
-            raise ValueError("--loss-type sft_loss does not support --use-ema (EMA updates run in weight sync)")
+            raise ValueError("--loss-type sft_loss does not support --use-ema")
 
     is_nft = args.loss_type == "nft"
     if is_nft:
