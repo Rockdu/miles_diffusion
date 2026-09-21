@@ -69,7 +69,11 @@ class TensorBackuper:
                 model_tensor_groups[group_name].append(qualified_name)
             for buffer_name, _ in component_model.named_buffers(remove_duplicate=False):
                 qualified_name = f"{component_prefix}{buffer_name}"
-                self._active_model_buffers[qualified_name] = (component_model, buffer_name)
+                module_path, _, local_buffer_name = buffer_name.rpartition(".")
+                self._active_model_buffers[qualified_name] = (
+                    component_model.get_submodule(module_path),
+                    local_buffer_name,
+                )
                 model_tensor_groups.setdefault(f"{component_prefix}buffers", []).append(qualified_name)
         self._tensor_groups = {
             group_name: tuple(tensor_names)
@@ -275,35 +279,36 @@ class TensorBackuper:
             parameter.requires_grad_(name in trainable_parameter_names)
         if not groups_to_restore:
             return ()
-        tensor_names_to_restore = tuple(
-            tensor_name for group_name in groups_to_restore for tensor_name in self._tensor_groups[group_name]
-        )
-        active_model_buffers = {
-            name: owner.get_buffer(buffer_name) for name, (owner, buffer_name) in self._active_model_buffers.items()
+        tensors_to_restore = {
+            tensor_name: snapshot_tensor
+            for group_name in groups_to_restore
+            for tensor_name, snapshot_tensor in target_snapshot_groups[group_name].tensors.items()
         }
-        restored_buffers = {}
-        # Rebind buffers so reference forward cannot mutate tensors saved for backward.
-        for name in tensor_names_to_restore:
-            if name in active_model_buffers:
-                buffer = active_model_buffers[name]
-                if id(buffer) not in restored_buffers:
-                    restored_buffers[id(buffer)] = torch.empty_like(buffer, pin_memory=buffer.is_pinned())
-        for name, buffer in active_model_buffers.items():
-            if id(buffer) in restored_buffers:
-                owner, buffer_name = self._active_model_buffers[name]
-                module_path, _, local_buffer_name = buffer_name.rpartition(".")
-                setattr(owner.get_submodule(module_path), local_buffer_name, restored_buffers[id(buffer)])
-        active_model_tensors = self._get_active_model_local_tensors(tensor_names_to_restore)
+        active_model_tensors = self._get_active_model_local_tensors(tensors_to_restore)
+        buffer_replacements = {}
         self.mark_weights_updated(groups_to_restore)
-        if restored_buffers:
-            self.mark_buffers_updated()
         try:
-            for group_name in groups_to_restore:
-                for tensor_name, snapshot_tensor in target_snapshot_groups[group_name].tensors.items():
-                    active_model_tensors[tensor_name].copy_(snapshot_tensor, non_blocking=True)
+            for tensor_name, snapshot_tensor in tensors_to_restore.items():
+                destination = active_model_tensors[tensor_name]
+                if tensor_name in self._active_model_buffers:
+                    owner, buffer_name = self._active_model_buffers[tensor_name]
+                    buffer = owner.get_buffer(buffer_name)
+                    if buffer in buffer_replacements:
+                        continue
+                    replacement = torch.empty_like(buffer, pin_memory=buffer.is_pinned())
+                    buffer_replacements[buffer] = replacement
+                    destination = replacement.to_local() if isinstance(replacement, DTensor) else replacement
+                destination.copy_(snapshot_tensor, non_blocking=True)
         finally:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
+        # Replace all aliases together; pending backward keeps the original buffers.
+        for owner, buffer_name in self._active_model_buffers.values():
+            buffer = owner.get_buffer(buffer_name)
+            if buffer in buffer_replacements:
+                setattr(owner, buffer_name, buffer_replacements[buffer])
+        if buffer_replacements:
+            self.mark_buffers_updated()
         self._active_model_group_versions.update(
             {group_name: target_snapshot_groups[group_name].version for group_name in groups_to_restore}
         )

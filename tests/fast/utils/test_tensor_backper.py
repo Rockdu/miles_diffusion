@@ -13,7 +13,8 @@
                     explicit split / default / all-tensor selection obey the same rule
     Buffer tests:   selected live backups bypass stale snapshots; copies isolate buffers
                     default restore copies only the target snapshot's groups
-                    buffer rebinding preserves aliases, snapshots, and pending backward
+                    buffer replacement preserves aliases, even when only one is snapshotted
+                    snapshots and pending backward retain their original buffers
                     equal snapshot versions still isolate mutable buffer storage
                     no-op parameter restore also restores the initial trainable mask
     Binding tests:  model registration infers per-component base/LoRA/buffer groups
@@ -283,12 +284,13 @@ def test_ema_tags_keep_independent_schedules_and_parameter_domains():
         backuper.configure_ema("fixed")
 
 
-def test_buffer_restore_preserves_pending_backward_aliases_and_parameter_versions():
+@pytest.mark.parametrize("buffer_names", [["running"], ["running", "alias.running"]], ids=["one-alias", "all-aliases"])
+def test_buffer_restore_preserves_pending_backward_aliases_and_parameter_versions(buffer_names):
     model = nn.Linear(2, 2)
     model.register_buffer("running", torch.tensor([2.0]))
     model.alias = nn.Module()
-    model.alias.register_buffer("running", model.running)
-    groups = {"parameters": list(dict(model.named_parameters())), "buffers": ["running", "alias.running"]}
+    model.alias.register_buffer("running", model.running, persistent=False)
+    groups = {"parameters": list(dict(model.named_parameters())), "buffers": buffer_names}
     backuper = TensorBackuper({"": model}, groups=groups)
     backuper.backup("actor", device="cpu")
     parameter_version = backuper._active_model_group_versions["parameters"]
@@ -302,7 +304,7 @@ def test_buffer_restore_preserves_pending_backward_aliases_and_parameter_version
     backuper.mark_weights_updated(["buffers"])
     backuper.backup("reference", groups=["buffers"])
     reference = backuper.get("reference")
-    assert set(reference) == {"running", "alias.running"}
+    assert set(reference) == set(buffer_names)
     assert reference["running"].item() == 7.0
     assert reference["running"].data_ptr() != model.running.data_ptr()
     assert backuper.get("actor")["running"].item() == 2.0
@@ -323,6 +325,7 @@ def test_buffer_restore_preserves_pending_backward_aliases_and_parameter_version
     assert backuper.restore("actor", groups=["buffers"]) == ("buffers",)
     assert model.running is model.alias.running
     assert model.running.item() == 2.0
+    assert "running" not in model.alias.state_dict()
     assert original_buffer.item() == 9.0
     model.weight.requires_grad_(False)
     assert backuper.restore("actor", groups=["parameters"]) == ()
