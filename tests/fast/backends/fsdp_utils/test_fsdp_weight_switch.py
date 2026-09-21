@@ -28,8 +28,9 @@ group exercises real local FSDP cache behavior; it does not prove GPU collective
 or DMA completion. Mocked CUDA synchronization checks that both reference entry
 and normal/error exit wait before writing CPU shards. Cache refresh failures
 must be retried even when the weight versions already match the requested tag.
-The production _use_model scope owns buffer isolation and restores original buffer
-objects and actor weights on normal exit, reference failure, or entry failure.
+Each restore binds independent buffers while the pending graph retains its originals.
+The production _use_model scope restores actor values on normal exit, reference failure,
+or entry failure; old buffer objects remain untouched throughout.
 The original error still propagates. Direct switch retries must refresh the FSDP cache again.
 """
 
@@ -152,6 +153,7 @@ def test_reference_switch_clears_fsdp_cache_and_preserves_training(
 
     actual = actor(inputs)
     actor_buffers = dict(actor.named_buffers())
+    actor_buffer_values = {name: buffer.clone() for name, buffer in actor_buffers.items()}
     with torch.autocast("cpu", dtype=param_dtype) if param_dtype else nullcontext():
         expected = control(control_inputs)
         with torch.no_grad():
@@ -187,7 +189,8 @@ def test_reference_switch_clears_fsdp_cache_and_preserves_training(
         for name in parameters.keys() - trainable_parameters.keys():
             assert actor_snapshot[name] is ema_snapshot[name]
     for name, buffer in actor.named_buffers():
-        assert buffer is actor_buffers[name]
+        assert buffer is not actor_buffers[name]
+        torch.testing.assert_close(actor_buffers[name], actor_buffer_values[name], rtol=0, atol=0)
         torch.testing.assert_close(buffer, control.get_buffer(name), rtol=0, atol=0)
     for name, parameter in parameters.items():
         torch.testing.assert_close(_local(parameter), control_parameters[name], rtol=0, atol=0)
@@ -258,7 +261,8 @@ def test_failed_cache_refresh_retries_same_tag(cpu_mesh, monkeypatch, reference_
     assert refresh_calls == expected_calls
     if reference_context:
         for name, buffer in actor.named_buffers():
-            assert buffer is actor_buffers[name]
+            assert buffer is not actor_buffers[name]
+            torch.testing.assert_close(buffer, actor_buffers[name], rtol=0, atol=0)
             torch.testing.assert_close(buffer, harness.tensor_backuper.get("actor")[name], rtol=0, atol=0)
         for name, parameter in actor.named_parameters():
             torch.testing.assert_close(_local(parameter), harness.tensor_backuper.get("actor")[name], rtol=0, atol=0)

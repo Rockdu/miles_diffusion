@@ -13,6 +13,9 @@
                     explicit split / default / all-tensor selection obey the same rule
     Buffer tests:   selected live backups bypass stale snapshots; copies isolate buffers
                     default restore copies only the target snapshot's groups
+                    buffer rebinding preserves aliases, snapshots, and pending backward
+                    equal snapshot versions still isolate mutable buffer storage
+                    no-op parameter restore also restores the initial trainable mask
     Binding tests:  model registration infers per-component base/LoRA/buffer groups
                     component names resolve changed parameter storage and buffer objects
     Model oracle:   switched dense/TinyLoRA == independent actor/reference + AdamW
@@ -280,20 +283,26 @@ def test_ema_tags_keep_independent_schedules_and_parameter_domains():
         backuper.configure_ema("fixed")
 
 
-def test_selected_backup_reads_live_buffers_and_preserves_parameter_versions():
+def test_buffer_restore_preserves_pending_backward_aliases_and_parameter_versions():
     model = nn.Linear(2, 2)
     model.register_buffer("running", torch.tensor([2.0]))
-    groups = {"parameters": list(dict(model.named_parameters())), "buffers": ["running"]}
+    model.alias = nn.Module()
+    model.alias.register_buffer("running", model.running)
+    groups = {"parameters": list(dict(model.named_parameters())), "buffers": ["running", "alias.running"]}
     backuper = TensorBackuper({"": model}, groups=groups)
     backuper.backup("actor", device="cpu")
     parameter_version = backuper._active_model_group_versions["parameters"]
+    original_buffer = model.running
+    assert backuper.restore("actor", groups=["buffers"]) == ("buffers",)
+    assert model.running is model.alias.running
+    assert model.running is not original_buffer
 
     # The actor snapshot is stale; reference must capture the live buffer instead.
     model.running.fill_(7.0)
     backuper.mark_weights_updated(["buffers"])
     backuper.backup("reference", groups=["buffers"])
     reference = backuper.get("reference")
-    assert set(reference) == {"running"}
+    assert set(reference) == {"running", "alias.running"}
     assert reference["running"].item() == 7.0
     assert reference["running"].data_ptr() != model.running.data_ptr()
     assert backuper.get("actor")["running"].item() == 2.0
@@ -302,9 +311,25 @@ def test_selected_backup_reads_live_buffers_and_preserves_parameter_versions():
     model.running.fill_(9.0)
     backuper.mark_weights_updated(["buffers"])
     assert reference["running"].item() == 7.0
+    original_buffer = model.running
+    pending_loss = (model(torch.ones(1, 2)) * model.running).sum()
     assert backuper.restore("reference") == ("buffers",)
+    assert model.running is model.alias.running
+    assert model.running is not original_buffer
     assert model.running.item() == 7.0
+    model.running.add_(10.0)
+    assert original_buffer.item() == 9.0
+    assert reference["running"].item() == 7.0
+    assert backuper.restore("actor", groups=["buffers"]) == ("buffers",)
+    assert model.running is model.alias.running
+    assert model.running.item() == 2.0
+    assert original_buffer.item() == 9.0
+    model.weight.requires_grad_(False)
     assert backuper.restore("actor", groups=["parameters"]) == ()
+    assert model.weight.requires_grad
+    pending_loss.backward()
+    torch.testing.assert_close(model.weight.grad, torch.full_like(model.weight, 9.0))
+    torch.testing.assert_close(model.bias.grad, torch.full_like(model.bias, 9.0))
 
 
 @pytest.mark.parametrize("ema_selection", ["explicit-split", "default", "all-tensors"])
@@ -345,12 +370,12 @@ def test_ema_copies_buffer_values_and_selective_snapshots_keep_reference_state(e
     for step in range(1, 3):
         versions = {group: snapshot.version for group, snapshot in backuper._snapshots["ema"].items()}
         live["weight"].add_(4)
-        live["running"].fill_(2 + 10 * step)
-        live["count"].fill_(step)
-        live["enabled"].fill_(step % 2 == 1)
+        model.running.fill_(2 + 10 * step)
+        model.count.fill_(step)
+        model.enabled.fill_(step % 2 == 1)
         backuper.mark_weights_updated()
         expected_weight.mul_(0.5).add_(live["weight"], alpha=0.5)
-        expected = _clone_tensor_mapping(live)
+        expected = _clone_tensor_mapping(model.state_dict())
         expected["weight"] = expected_weight.clone()
 
         backuper.update_ema("ema")
@@ -360,13 +385,13 @@ def test_ema_copies_buffer_values_and_selective_snapshots_keep_reference_state(e
         assert {name: tensor.data_ptr() for name, tensor in backuper.get("ema").items()} == pointers
         assert all(backuper._snapshots["ema"][group].version != version for group, version in versions.items())
 
-        for name in groups["buffers"]:
-            live[name].zero_()
+        for buffer in model.buffers():
+            buffer.zero_()
         backuper.mark_weights_updated(["buffers"])
         assert backuper.restore("ema", groups=["buffers"]) == ("buffers",)
-        _assert_tensor_mapping(_select_tensors(live, groups["buffers"]), _select_tensors(expected, groups["buffers"]))
+        _assert_tensor_mapping(dict(model.named_buffers()), _select_tensors(expected, groups["buffers"]))
         assert backuper.restore("buffer_reference", groups=["buffers"]) == ("buffers",)
-        _assert_tensor_mapping(_select_tensors(live, groups["buffers"]), _select_tensors(initial, groups["buffers"]))
+        _assert_tensor_mapping(dict(model.named_buffers()), _select_tensors(initial, groups["buffers"]))
         torch.testing.assert_close(live["weight"], initial["weight"] + 4 * step, rtol=0, atol=0)
 
 

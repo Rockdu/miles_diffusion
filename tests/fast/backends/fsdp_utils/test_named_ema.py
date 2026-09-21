@@ -23,9 +23,9 @@
     float / integer / nonpersistent buffers --> actor forward --> snapshot
                      reference mutation --> restore actor --> pending backward
                      checkpoint recompute --> live buffers --> EMA copy / sleep backup
-    tied buffer aliases --> same reference clone --> original actor bindings
+    tied buffer aliases --> independent storage on restore --> original graph tensors untouched
     without EMA/offload: actor(base0 + LoRA) --> teacher(base1) --> base reference(base0)
-                         shared base skips copies; base-only tags leave LoRA resident
+                         shared base skips copies; buffers rebind; base-only tags leave LoRA resident
                          with/without buffers --> restore actor --> same optimizer bindings
     grad=0 --> AdamW decay; grad=None --> unchanged; restore one --> peer unchanged
     backuper: parameter gradients / registered buffers --> updated tensor groups
@@ -158,7 +158,7 @@ def test_lora_base_restores_shared_base_after_dense_teacher_without_ema_or_offlo
 
     backuper._get_active_model_local_tensors = read_tensors
     harness._switch_model("lora_base")
-    assert not reads
+    assert set(reads) == buffer_names
     harness._switch_model("actor")
     harness._switch_model("teacher")
     torch.testing.assert_close(model(inputs, adapter_enabled=False), F.linear(inputs, teacher_base))

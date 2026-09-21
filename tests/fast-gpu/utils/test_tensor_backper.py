@@ -5,12 +5,13 @@
          |
     failed submission --> drain pending copies --> propagate fatal error
 
-Each backuper binds a model; the live tensors share its parameter/buffer storage.
+Each backuper binds a model; restores preserve Parameter objects and rebind buffers.
 CPU EMA keeps an independent copy intact and uses one tensor of CUDA scratch.
-EMA averages parameters but copies float/int/bool buffers across CPU/CUDA;
-buffer restore reverses the transfer without changing snapshot pinning/storage.
+EMA averages parameters but copies float/int/bool buffers across CPU/CUDA.
+Buffer restore rebinds independent live storage with the original pinning policy;
+the snapshot allocation stays unchanged and saved graph buffers remain untouched.
 Backup and restore wait once on the current GPU after copying tensors.
-Unchanged snapshots and EMA without device moves do not wait.
+Unchanged parameter-only snapshots and EMA without device moves do not wait.
 Delayed work runs on a non-default stream so an early return is observable.
 """
 
@@ -237,7 +238,10 @@ def test_ema_buffer_copies_finish_both_transfer_directions(ema_device):
     }.items():
         torch.testing.assert_close(shadows[name].cpu(), expected, rtol=0, atol=0)
         if name in groups["buffers"]:
-            torch.testing.assert_close(live[name].cpu(), expected, rtol=0, atol=0)
+            restored = model.get_buffer(name)
+            assert restored is not live[name]
+            assert restored.is_pinned() == live[name].is_pinned()
+            torch.testing.assert_close(restored.cpu(), expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])

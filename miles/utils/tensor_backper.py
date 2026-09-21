@@ -1,7 +1,6 @@
 """Named tensor snapshots: share fixed groups and own mutable storage."""
 
 from collections.abc import Iterable, Mapping
-from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import count
 
@@ -41,6 +40,7 @@ class _EmaState:
 class TensorBackuper:
     """Keep fixed tensor schemas and CUDA tensors on the worker's current device.
 
+    Restores preserve Parameter objects and give buffers independent storage.
     Callers mark external writes and abort the owning worker after a copy failure.
     Host transfers finish before returning; same-device EMA stays stream-ordered.
     """
@@ -266,14 +266,37 @@ class TensorBackuper:
         groups_to_restore = tuple(
             group_name
             for group_name in target_groups
-            if self._active_model_group_versions[group_name] != target_snapshot_groups[group_name].version
+            if group_name in self.buffer_groups
+            or self._active_model_group_versions[group_name] != target_snapshot_groups[group_name].version
         )
+        # PEFT can leave the registered FSDP shards frozen after re-enabling adapters.
+        trainable_parameter_names = set(self.trainable_parameter_names)
+        for name, parameter in self.active_model_parameters.items():
+            parameter.requires_grad_(name in trainable_parameter_names)
         if not groups_to_restore:
             return ()
-        active_model_tensors = self._get_active_model_local_tensors(
+        tensor_names_to_restore = tuple(
             tensor_name for group_name in groups_to_restore for tensor_name in self._tensor_groups[group_name]
         )
+        active_model_buffers = {
+            name: owner.get_buffer(buffer_name) for name, (owner, buffer_name) in self._active_model_buffers.items()
+        }
+        restored_buffers = {}
+        # Rebind buffers so reference forward cannot mutate tensors saved for backward.
+        for name in tensor_names_to_restore:
+            if name in active_model_buffers:
+                buffer = active_model_buffers[name]
+                if id(buffer) not in restored_buffers:
+                    restored_buffers[id(buffer)] = torch.empty_like(buffer, pin_memory=buffer.is_pinned())
+        for name, buffer in active_model_buffers.items():
+            if id(buffer) in restored_buffers:
+                owner, buffer_name = self._active_model_buffers[name]
+                module_path, _, local_buffer_name = buffer_name.rpartition(".")
+                setattr(owner.get_submodule(module_path), local_buffer_name, restored_buffers[id(buffer)])
+        active_model_tensors = self._get_active_model_local_tensors(tensor_names_to_restore)
         self.mark_weights_updated(groups_to_restore)
+        if restored_buffers:
+            self.mark_buffers_updated()
         try:
             for group_name in groups_to_restore:
                 for tensor_name, snapshot_tensor in target_snapshot_groups[group_name].tensors.items():
@@ -303,32 +326,6 @@ class TensorBackuper:
 
     def mark_buffers_updated(self):
         self.mark_weights_updated(self.buffer_groups)
-
-    def restore_trainable_parameter_flags(self):
-        # PEFT may re-enable gathered parameters while leaving their shards frozen.
-        trainable_parameter_names = set(self.trainable_parameter_names)
-        for name, parameter in self.active_model_parameters.items():
-            parameter.requires_grad_(name in trainable_parameter_names)
-
-    @contextmanager
-    def use_temporary_buffers(self):
-        buffer_bindings = [
-            (module, buffer_name, buffer)
-            for model in self._active_models.values()
-            for module in model.modules()
-            for buffer_name, buffer in module.named_buffers(recurse=False, remove_duplicate=False)
-        ]
-        # Reference writes must not change buffers saved by the pending backward.
-        unique_buffers = {id(buffer): buffer for _, _, buffer in buffer_bindings}
-        buffer_copies = {buffer_id: buffer.detach().clone() for buffer_id, buffer in unique_buffers.items()}
-        try:
-            for module, buffer_name, buffer in buffer_bindings:
-                setattr(module, buffer_name, buffer_copies[id(buffer)])
-            yield
-        finally:
-            for module, buffer_name, buffer in buffer_bindings:
-                setattr(module, buffer_name, buffer)
-            self.mark_buffers_updated()
 
     def bind_active_model_to_cpu_snapshot(self, tag):
         cpu_snapshot_tensors = self.get(tag)

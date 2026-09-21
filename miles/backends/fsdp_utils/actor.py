@@ -314,16 +314,13 @@ class FSDPTrainRayActor(TrainRayActor):
         for module in self.model.modules():
             if isinstance(module, FSDPModule):
                 module.reshard()
-        if target_tag == "actor":
-            self.tensor_backuper.restore_trainable_parameter_flags()
 
     @contextmanager
     def _use_model(self, target_tag: str):
         self.tensor_backuper.backup_active_model("actor")
         try:
-            with self.tensor_backuper.use_temporary_buffers():
-                self._switch_model(target_tag)
-                yield
+            self._switch_model(target_tag)
+            yield
         finally:
             self._switch_model("actor")
 
