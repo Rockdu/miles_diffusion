@@ -121,8 +121,8 @@ def _trial(mesh, args):
     with torch.no_grad():
         for name, param in trainable.items():
             _local(param).copy_(_local(expected_params[name]))
-    backuper.mark_weights_updated(harness._trainable_weight_groups)
-    backuper.backup("actor", device="cpu", pin_memory=True, fixed_groups=harness._fixed_weight_groups)
+    backuper.mark_weights_updated(harness.tensor_backuper.trainable_tensor_groups)
+    backuper.backup("actor", device="cpu", pin_memory=True, fixed_groups=harness.tensor_backuper.frozen_tensor_groups)
     live = {name: _local(param.detach()).clone() for name, param in params.items()}
     optimizers = [
         torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=1e-2, foreach=False)

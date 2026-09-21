@@ -5,25 +5,42 @@
     optimizer + graph      dense    dense    LoRA-only      same bindings
                                               average      and optimizer step
 
-    actor.train: optimizer steps --> local EMA update --> return
-                                     fast + slow clocks     |
-    driver: wait for train ---------------------------> save --> publication
-                                                                  read-only retries
+    actor.train: optimizer steps --> backuper.update_ema(tag) --> return
+                                      fast + slow clocks
+    driver: wait for train --> save --> offload --> publication
+                                                   parameters + copied buffers
+                                                   read-only retries
     failed training / rollout-only debugging --> no EMA update
+    no backuper / no configured EMA tags --> training still completes
     transformer.{base,lora}   -- AdamW --> refresh only this component's groups
     transformer_2.{base,lora} -- idle  --> keep its snapshot identity and storage
+    component models --> backuper resolves requested component tensors only
     both components -------- round end --> one shared EMA clock
-    real training loop: [two microbatches --> AdamW --> actor backup] x 3
-                        next reference restore retains the preceding update
+    real training loop: [two microbatches --> AdamW --> mark changed] x 3
+                        reference entry --> refresh actor backup --> switch/restore
+                        no reference --> no backups between optimizer steps
+                        EMA reads live weights --> sleep refreshes actor backup
+    float / integer / nonpersistent buffers --> actor forward --> snapshot
+                     reference mutation --> restore actor --> pending backward
+                     checkpoint recompute --> live buffers --> EMA copy / sleep backup
+    tied buffer aliases --> same reference clone --> original actor bindings
+    without EMA/offload: actor(base0 + LoRA) --> teacher(base1) --> base reference(base0)
+                         shared base skips copies; base-only tags leave LoRA resident
+                         with/without buffers --> restore actor --> same optimizer bindings
     grad=0 --> AdamW decay; grad=None --> unchanged; restore one --> peer unchanged
+    backuper: parameter gradients / registered buffers --> updated tensor groups
+    backuper: backup_active_model("actor") --> copy updated groups into the CPU actor snapshot
 
 The dense-reference oracle includes a frozen base in the switching domain while
 EMA tracks only the adapter matrices. Adapter execution is explicit in the toy
 forward; real PEFT enable/disable and checkpoint loading belong to later tests.
+The LoRA-base loop probe uses an empty adapter context to isolate buffer ownership;
+test_fsdp_weight_switch.py covers actual PEFT adapter switching.
 Production actor methods run without Ray or diffusion dependencies. Independent
 models check restored values and optimizer state. Training owns the EMA update;
 the driver waits for training before saving and publication. Train-only updates
 need no publisher, while failed training and rollout-only debugging leave EMA unchanged.
+The CPU sleep probe stubs the CUDA fence; GPU lifecycle tests cover transfers.
 """
 
 from tests.ci.ci_register import register_cpu_ci
@@ -47,6 +64,7 @@ from tests.fast.backends.fsdp_utils._weight_test_utils import (
 )
 from torch import nn
 from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 class _LoRAModel(nn.Module):
@@ -61,6 +79,27 @@ class _LoRAModel(nn.Module):
         return F.linear(inputs, weight)
 
 
+class _BufferedLinear(nn.Linear):
+    def __init__(self, *, checkpointing):
+        super().__init__(2, 2, dtype=torch.float64)
+        self.register_buffer("scale", torch.tensor(1.0, dtype=torch.float64))
+        self.register_buffer("forward_count", torch.tensor(0))
+        self.register_buffer("scratch", torch.tensor(0.0, dtype=torch.float64), persistent=False)
+        self.alias = nn.Module()
+        self.alias.register_buffer("scale", self.scale)
+        self.checkpointing = checkpointing
+
+    def _forward(self, inputs):
+        assert self.scale is self.alias.scale
+        self.scale.add_(0.25)
+        self.forward_count.add_(1)
+        self.scratch.add_(0.5)
+        return super().forward(inputs) * self.scale + self.scratch
+
+    def forward(self, inputs):
+        return checkpoint(self._forward, inputs, use_reentrant=False) if self.checkpointing else self._forward(inputs)
+
+
 def _load_actor_train():
     train = load_actor_method("train")
     train.__globals__.update(
@@ -71,6 +110,78 @@ def _load_actor_train():
         train_metric_utils=SimpleNamespace(log_perf_data_raw=lambda **kwargs: None),
     )
     return train
+
+
+@pytest.mark.parametrize("with_buffers", [False, True], ids=["bufferless", "buffered"])
+def test_lora_base_restores_shared_base_after_dense_teacher_without_ema_or_offload(with_buffers):
+    model = _LoRAModel()
+    if with_buffers:
+        model.register_buffer("count", torch.tensor(0))
+    harness = make_weight_actor(model)
+    harness.args.use_ema = False
+    harness.args.ref_mode = "lora_base"
+    harness._init_weight_backups()
+    backuper = harness.tensor_backuper
+    parameters = dict(model.named_parameters())
+    trainable = {name: parameter for name, parameter in parameters.items() if parameter.requires_grad}
+    optimizer = torch.optim.AdamW(trainable.values(), lr=0.01)
+    buffer_names = {"count"} if with_buffers else set()
+    assert harness.tensor_backuper.active_model_parameters.keys() == parameters.keys()
+    assert backuper.backup_tags == ("actor", "lora_base")
+    assert not backuper.ema_states
+    assert set(backuper.get("actor")) == parameters.keys() | buffer_names
+    assert set(backuper.get("lora_base")) == {"base"} | buffer_names
+    assert backuper._snapshots["lora_base"]["base"] is backuper._snapshots["actor"]["base"]
+
+    # A different checkpoint must not erase the base reference's provenance.
+    actor_base = model.base.detach().clone()
+    teacher_base = actor_base + 2
+    model.base.data.copy_(teacher_base)
+    if with_buffers:
+        model.count.fill_(7)
+    backuper.mark_weights_updated(("base", *harness.tensor_backuper.buffer_groups))
+    backuper.backup("teacher", groups=("base", *harness.tensor_backuper.buffer_groups), fixed_groups=("base",))
+    harness._switch_model("actor")
+    model.lora_A["default"].data.add_(0.25)
+    backuper.mark_weights_updated(("lora",))
+    backup_actor_weights(harness)
+    actor_adapter = {name: parameter.detach().clone() for name, parameter in trainable.items()}
+    inputs = torch.tensor([[1.0, 0.25], [-0.5, 2.0]], dtype=torch.float64)
+    pending_loss = model(inputs).square().mean()
+    reads = []
+    original_getter = backuper._get_active_model_local_tensors
+
+    def read_tensors(names):
+        names = tuple(names)
+        reads.extend(names)
+        return original_getter(names)
+
+    backuper._get_active_model_local_tensors = read_tensors
+    harness._switch_model("lora_base")
+    assert not reads
+    harness._switch_model("actor")
+    harness._switch_model("teacher")
+    torch.testing.assert_close(model(inputs, adapter_enabled=False), F.linear(inputs, teacher_base))
+    reads.clear()
+    harness._switch_model("lora_base")
+    assert set(reads) == {"base"} | buffer_names
+    torch.testing.assert_close(model(inputs, adapter_enabled=False), F.linear(inputs, actor_base))
+    harness._switch_model("actor")
+    for name, parameter in model.named_parameters():
+        assert parameter is parameters[name]
+        assert parameter.requires_grad == (name in trainable)
+        torch.testing.assert_close(parameter, actor_base if name == "base" else actor_adapter[name])
+    assert all(
+        actual is expected
+        for actual, expected in zip(optimizer.param_groups[0]["params"], trainable.values(), strict=True)
+    )
+    if with_buffers:
+        assert model.count.item() == 0
+
+    pending_loss.backward()
+    optimizer.step()
+    assert any(not torch.equal(parameter, actor_adapter[name]) for name, parameter in trainable.items())
+    torch.testing.assert_close(model.base, actor_base)
 
 
 @pytest.mark.parametrize("use_lora", [False, True], ids=["full", "lora"])
@@ -100,14 +211,14 @@ def test_component_groups_keep_independent_backups_and_one_ema_clock(use_lora):
     optimizer = torch.optim.AdamW((p for p in parameters.values() if p.requires_grad), lr=0.01, weight_decay=0.1)
     inputs = torch.tensor([[1.0, 0.25], [-0.5, 2.0]], dtype=torch.float64)
     reads = []
-    original_getter = backuper._get_named_tensors
+    original_getter = backuper._get_active_model_local_tensors
 
     def read_tensors(names):
         names = tuple(names)
         reads.extend(names)
         return original_getter(names)
 
-    backuper._get_named_tensors = read_tensors
+    backuper._get_active_model_local_tensors = read_tensors
     for round_index, component in enumerate(components, start=1):
         saved_groups = dict(backuper._snapshots["actor"])
         optimizer.zero_grad(set_to_none=True)
@@ -115,11 +226,7 @@ def test_component_groups_keep_independent_backups_and_one_ema_clock(use_lora):
         # Zero gradients still allow AdamW decay; the idle component has grad=None.
         (loss if round_index == 1 else loss * 0).backward()
         optimizer.step()
-        backuper.mark_weights_updated(
-            group
-            for group, names in harness._trainable_weight_groups.items()
-            if any(parameters[name].grad is not None for name in names)
-        )
+        backuper.mark_parameters_with_grad_updated()
         reads.clear()
         backup_actor_weights(harness)
         changed_group = f"{component}.{'lora' if use_lora else 'base'}"
@@ -137,7 +244,7 @@ def test_component_groups_keep_independent_backups_and_one_ema_clock(use_lora):
 
         # Every round advances the whole policy EMA, including the idle component.
         backuper.update_ema("ema")
-        for name in harness._trainable_weight_names:
+        for name in harness.tensor_backuper.trainable_parameter_names:
             expected_ema[name] = (expected_ema[name] + live[name]) * 0.5
         for name in parameters:
             torch.testing.assert_close(backuper.get("ema")[name], expected_ema[name], rtol=0, atol=0)
@@ -246,14 +353,22 @@ def test_dense_references_restore_frozen_base_and_actor_optimizer(raise_in_forwa
 @pytest.mark.parametrize("rollout_policy", ["live", "ema"])
 def test_training_updates_ema_once_per_round_independently_of_publication(rollout_policy):
     model = nn.Linear(2, 2, bias=False, dtype=torch.float64)
+    model.register_buffer("forward_count", torch.tensor(0))
     with torch.no_grad():
         model.weight.fill_(0.5)
     harness = make_weight_actor(model, initial_decay=0.25, flat_steps=10)
     backuper = harness.tensor_backuper
     backuper.copy(src_tag="ema", dst_tag="slow_policy")
-    backuper.configure_ema("slow_policy", initial_decay=0.75, flat_steps=10)
+    backuper.configure_ema(
+        "slow_policy",
+        tensor_names=harness.tensor_backuper.trainable_parameter_names,
+        copy_tensor_names=harness.tensor_backuper.buffer_names,
+        initial_decay=0.75,
+        flat_steps=10,
+    )
     initial = model.weight.detach().clone()
     published = []
+    published_buffers = []
     harness.args = SimpleNamespace(
         fsdp_cpu_offload=False,
         offload_train=False,
@@ -265,6 +380,8 @@ def test_training_updates_ema_once_per_round_independently_of_publication(rollou
     def publish(*, weight_overrides=None):
         weights = model.weight if weight_overrides is None else weight_overrides["weight"]
         published.append(weights.detach().clone())
+        buffer = model.forward_count if weight_overrides is None else weight_overrides["forward_count"]
+        published_buffers.append(buffer.detach().clone())
 
     harness.weight_updater = SimpleNamespace(update_weights=publish)
     harness.rollout_manager = SimpleNamespace(
@@ -277,13 +394,11 @@ def test_training_updates_ema_once_per_round_independently_of_publication(rollou
         clear_memory=lambda: None,
         nullcontext=nullcontext,
     )
-    update_ema = load_actor_method("update_ema")
-    update_ema.__globals__["dist"] = SimpleNamespace(get_rank=lambda: 1)
-    harness.update_ema = update_ema.__get__(harness)
     harness.parallel_state = SimpleNamespace(get_mesh=lambda name: SimpleNamespace(get_local_rank=lambda: 0))
     train = _load_actor_train()
     update(harness)
     torch.testing.assert_close(published[0], initial, rtol=0, atol=0)
+    assert published_buffers[0].item() == 0
     assert [state.update_count for state in backuper.ema_states.values()] == [0, 0]
 
     expected_fast, expected_slow = initial.clone(), initial.clone()
@@ -293,7 +408,9 @@ def test_training_updates_ema_once_per_round_independently_of_publication(rollou
         for increment in (1.0, 1.0, 2.0):
             with torch.no_grad():
                 model.weight.add_(increment)
-            backuper.mark_weights_updated(harness._trainable_weight_groups)
+                model.forward_count.add_(1)
+            backuper.mark_weights_updated(harness.tensor_backuper.trainable_tensor_groups)
+            backuper.mark_weights_updated(harness.tensor_backuper.buffer_groups)
             torch.testing.assert_close(backuper.get("ema")["weight"], expected_fast, rtol=0, atol=0)
 
     harness._train_core = train_core
@@ -307,34 +424,40 @@ def test_training_updates_ema_once_per_round_independently_of_publication(rollou
             torch.testing.assert_close(
                 published[-1], expected_fast if rollout_policy == "ema" else live, rtol=0, atol=0
             )
+            assert published_buffers[-1].item() == 3 * (round_index + 1)
+            assert published_buffers[-1].dtype == torch.int64
         torch.testing.assert_close(backuper.get("ema")["weight"], expected_fast, rtol=0, atol=0)
         torch.testing.assert_close(backuper.get("slow_policy")["weight"], expected_slow, rtol=0, atol=0)
         torch.testing.assert_close(model.weight, live, rtol=0, atol=0)
         assert [state.update_count for state in backuper.ema_states.values()] == [round_index + 1] * 2
 
 
-def test_explicit_ema_update_without_rollout_publication():
+def test_train_only_updates_ema_without_rollout_publication():
     model = nn.Linear(2, 2, bias=False, dtype=torch.float64)
     harness = make_weight_actor(model, initial_decay=0.5, flat_steps=10)
-    harness.args = SimpleNamespace(train_only=True, debug_rollout_only=False)
+    harness.args = SimpleNamespace(train_only=True, debug_rollout_only=False, offload_train=False)
     harness.weight_updater = None
+    harness.parallel_state = SimpleNamespace(get_mesh=lambda name: SimpleNamespace(get_local_rank=lambda: 0))
     initial = model.weight.detach().clone()
-    with torch.no_grad():
-        model.weight.add_(2.0)
-    harness.tensor_backuper.mark_weights_updated(harness._trainable_weight_groups)
-    update_ema = load_actor_method("update_ema")
-    update_ema.__globals__["dist"] = SimpleNamespace(get_rank=lambda: 1)
-    update_ema(harness)
+
+    def train_core(**kwargs):
+        with torch.no_grad():
+            model.weight.add_(2.0)
+        harness.tensor_backuper.mark_weights_updated(harness.tensor_backuper.trainable_tensor_groups)
+
+    harness._train_core = train_core
+    train = _load_actor_train()
+    train(harness, 0, [SimpleNamespace(inner={})])
     torch.testing.assert_close(harness.tensor_backuper.get("ema")["weight"], initial + 1.0)
     assert harness.tensor_backuper.ema_states["ema"].update_count == 1
 
     harness.args.debug_rollout_only = True
-    update_ema(harness)
+    train(harness, 1, [SimpleNamespace(inner={})])
+    torch.testing.assert_close(model.weight, initial + 2.0)
     assert harness.tensor_backuper.ema_states["ema"].update_count == 1
-    update_ema(SimpleNamespace(args=SimpleNamespace(debug_rollout_only=True)))
 
 
-@pytest.mark.parametrize("training_outcome", ["success", "failure", "rollout-only"])
+@pytest.mark.parametrize("training_outcome", ["success", "failure", "rollout-only", "no-backuper", "no-ema"])
 def test_actor_owns_ema_update_before_driver_save_offload_and_publication(training_outcome):
     path = Path(__file__).resolve().parents[4] / "train_diffusion.py"
     source = ast.parse(path.read_text())
@@ -350,8 +473,15 @@ def test_actor_owns_ema_update_before_driver_save_offload_and_publication(traini
         args=SimpleNamespace(offload_train=False, debug_rollout_only=training_outcome == "rollout-only"),
         parallel_state=SimpleNamespace(get_mesh=lambda name: SimpleNamespace(get_local_rank=lambda: 0)),
         _train_core=train_core,
-        update_ema=lambda: events.append("EMA updated"),
+        tensor_backuper=SimpleNamespace(
+            ema_states={"ema": None},
+            update_ema=lambda tag: events.append(f"EMA updated: {tag}"),
+        ),
     )
+    if training_outcome == "no-backuper":
+        worker.tensor_backuper = None
+    elif training_outcome == "no-ema":
+        worker.tensor_backuper.ema_states.clear()
     actor_train = _load_actor_train()
     actor = SimpleNamespace(
         async_train=lambda *args: lambda: actor_train(worker, *args),
@@ -390,7 +520,9 @@ def test_actor_owns_ema_update_before_driver_save_offload_and_publication(traini
     if training_outcome == "failure":
         assert events == ["weights published"]
     else:
-        training_events = ["optimizer steps completed", "EMA updated"] if training_outcome == "success" else []
+        training_events = [] if training_outcome == "rollout-only" else ["optimizer steps completed"]
+        if training_outcome == "success":
+            training_events.append("EMA updated: ema")
         assert (
             events
             == ["weights published"]
@@ -398,23 +530,40 @@ def test_actor_owns_ema_update_before_driver_save_offload_and_publication(traini
         )
 
 
-def test_training_loop_refreshes_actor_snapshot_after_each_optimizer_step():
+@pytest.mark.parametrize(
+    ("checkpointing", "ref_mode", "with_buffers"),
+    [
+        (False, "ema", True),
+        (True, "ema", True),
+        (False, "lora_base", True),
+        (False, "ema", False),
+        (False, "none", True),
+    ],
+    ids=["ordinary", "checkpointed", "lora-base", "bufferless", "no-reference"],
+)
+def test_training_refreshes_actor_backup_only_before_reference_or_sleep(
+    monkeypatch, checkpointing, ref_mode, with_buffers
+):
     torch.manual_seed(41)
-    model = nn.Linear(2, 2, dtype=torch.float64)
+    model = _BufferedLinear(checkpointing=checkpointing) if with_buffers else nn.Linear(2, 2, dtype=torch.float64)
     reference = copy.deepcopy(model).requires_grad_(False)
-    harness = make_weight_actor(model, initial_decay=0.5, flat_steps=10)
+    harness = make_weight_actor(model, initial_decay=0.5, flat_steps=10, ref_mode=ref_mode)
+    if ref_mode == "lora_base":
+        harness.args.use_ema = False
+        harness._init_weight_backups()
+        model.disable_adapter = nullcontext
     with torch.no_grad():
         for parameter in model.parameters():
             parameter.add_(0.2)
-    harness.tensor_backuper.mark_weights_updated(harness._trainable_weight_groups)
-    backup_actor_weights(harness)
+    harness.tensor_backuper.mark_weights_updated(harness.tensor_backuper.trainable_tensor_groups)
     control = copy.deepcopy(model)
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
     control_optimizer = torch.optim.AdamW(control.parameters(), lr=0.01)
     parameters = dict(model.named_parameters())
     control_parameters = dict(control.named_parameters())
+    initial_buffers = {name: buffer.clone() for name, buffer in reference.named_buffers()}
     vars(harness.args).update(
-        ref_mode="ema",
+        ref_mode=ref_mode,
         num_steps_per_rollout=3,
         micro_batch_size=1,
         loss_type="grpo",
@@ -431,6 +580,18 @@ def test_training_loop_refreshes_actor_snapshot_after_each_optimizer_step():
     harness.sde_backend = None
     harness._forward_dtype = torch.float32
     harness.global_step = 0
+    backuper = harness.tensor_backuper
+    backup_steps = []
+    last_actor_backup = {name: tensor.clone() for name, tensor in backuper.get("actor").items()}
+    backup_active_model = backuper.backup_active_model
+
+    def record_backup(tag):
+        nonlocal last_actor_backup
+        backup_active_model(tag)
+        backup_steps.append(harness.global_step)
+        last_actor_backup = {name: tensor.clone() for name, tensor in backuper.get(tag).items()}
+
+    backuper.backup_active_model = record_backup
     harness._maybe_legacy_window_pad_len = lambda *args: None
     harness.train_pipeline_config = SimpleNamespace(
         input_dtype_policy=None,
@@ -454,15 +615,27 @@ def test_training_loop_refreshes_actor_snapshot_after_each_optimizer_step():
         if ctx.microbatch_id % 2 == 0:
             control_optimizer.zero_grad(set_to_none=True)
         expected = control(batch[0])
-        with torch.no_grad():
-            expected_reference = reference(batch[0])
+        if ref_mode == "none":
+            assert ref_pred is None
+            expected_reference = 0
+        else:
+            with torch.no_grad():
+                # Each reference forward starts from the unchanged named snapshot.
+                if ref_mode == "lora_base":
+                    for name, parameter in reference.named_parameters():
+                        parameter.copy_(control_parameters[name])
+                expected_reference = copy.deepcopy(reference)(batch[0])
+            torch.testing.assert_close(ref_pred, expected_reference, rtol=0, atol=0)
         torch.testing.assert_close(new_pred, expected, rtol=0, atol=0)
-        torch.testing.assert_close(ref_pred, expected_reference, rtol=0, atol=0)
         for name, parameter in model.named_parameters():
             torch.testing.assert_close(parameter, control_parameters[name], rtol=0, atol=0)
+        for name, buffer in model.named_buffers():
+            torch.testing.assert_close(buffer, control.get_buffer(name), rtol=0, atol=0)
+            if ref_mode != "none":
+                torch.testing.assert_close(backuper.get(ref_mode)[name], initial_buffers[name], rtol=0, atol=0)
         expected_loss = (expected - expected_reference - 0.5).square().mean()
         (expected_loss / 2).backward()
-        return (new_pred - ref_pred - 0.5).square().mean()
+        return (new_pred - (0 if ref_pred is None else ref_pred) - 0.5).square().mean()
 
     harness.custom_loss_formula_func = compare_loss
 
@@ -474,10 +647,16 @@ def test_training_loop_refreshes_actor_snapshot_after_each_optimizer_step():
             assert parameter is parameters[name]
             torch.testing.assert_close(parameter, other, rtol=0, atol=0)
             torch.testing.assert_close(parameter.grad, other.grad, rtol=0, atol=0)
-            torch.testing.assert_close(harness.tensor_backuper.get("actor")[name], other, rtol=0, atol=0)
             for key in ("step", "exp_avg", "exp_avg_sq"):
                 torch.testing.assert_close(optimizer.state[parameter][key], control_optimizer.state[other][key])
-        assert harness.tensor_backuper.ema_states["ema"].update_count == 0
+        if harness.args.use_ema:
+            assert backuper.ema_states["ema"].update_count == 0
+        for name, buffer in model.named_buffers():
+            torch.testing.assert_close(buffer, control.get_buffer(name), rtol=0, atol=0)
+        # Optimizer and checkpoint recomputation leave the snapshot untouched.
+        for name, tensor in backuper.get("actor").items():
+            torch.testing.assert_close(tensor, last_actor_backup[name], rtol=0, atol=0)
+        assert backup_steps == ([] if ref_mode == "none" else [index for index in range(step) for _ in range(2)])
         completed_steps.append(step)
 
     harness._log_metrics = compare_completed_step
@@ -515,3 +694,33 @@ def test_training_loop_refreshes_actor_snapshot_after_each_optimizer_step():
         },
     )
     assert completed_steps == [1, 2, 3]
+    if with_buffers:
+        assert model.forward_count.item() == (12 if checkpointing else 6)
+    if harness.args.use_ema:
+        previous_ema = {name: tensor.clone() for name, tensor in backuper.get("ema").items()}
+        backuper.update_ema("ema")
+        for name, parameter in model.named_parameters():
+            torch.testing.assert_close(backuper.get("ema")[name], (previous_ema[name] + parameter) * 0.5)
+        for name, buffer in model.named_buffers():
+            copied = backuper.get("ema")[name]
+            torch.testing.assert_close(copied, buffer, rtol=0, atol=0)
+            assert copied.dtype == buffer.dtype
+    harness.args.offload_train = True
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    sleep = load_actor_method("sleep")
+    sleep.__globals__.update(
+        print_memory=lambda message: None,
+        clear_memory=lambda: None,
+        get_gloo_group=lambda: None,
+        dist=SimpleNamespace(barrier=lambda **kwargs: None),
+    )
+    sleep(harness)
+    sleep(harness)
+    assert backup_steps == ([3] if ref_mode == "none" else [0, 0, 1, 1, 2, 2, 3])
+    for name, parameter in model.named_parameters():
+        assert parameter is parameters[name]
+        torch.testing.assert_close(parameter, control_parameters[name], rtol=0, atol=0)
+        torch.testing.assert_close(backuper.get("actor")[name], control_parameters[name], rtol=0, atol=0)
+    for name, buffer in model.named_buffers():
+        torch.testing.assert_close(buffer, control.get_buffer(name), rtol=0, atol=0)
+        torch.testing.assert_close(backuper.get("actor")[name], buffer, rtol=0, atol=0)

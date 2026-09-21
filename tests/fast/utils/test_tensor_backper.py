@@ -9,11 +9,18 @@
     Snapshot tests: fixed-base reuse, partial restores, independent mutable copies
     Storage tests:  reusable mutable buffers; fresh storage for changed fixed groups
     EMA tests:      independent clocks/domains; updates keep snapshot allocations
+                    parameters average; float/int/bool buffers copy without averaging
+                    explicit split / default / all-tensor selection obey the same rule
+    Buffer tests:   selected live backups bypass stale snapshots; copies isolate buffers
+                    default restore copies only the target snapshot's groups
+    Binding tests:  model registration infers per-component base/LoRA/buffer groups
+                    component names resolve changed parameter storage and buffer objects
     Model oracle:   switched dense/TinyLoRA == independent actor/reference + AdamW
 
-Callers keep schemas fixed and mark external writes. Getters expose storage views
-without replacing Parameter objects. PEFT switches and FSDP caches are outside
-this tensor-only suite. An incomplete copy is fatal to the training operation.
+Callers bind model containers, keep schemas fixed, and mark external writes.
+The backuper resolves fresh local views without replacing Parameters.
+PEFT switches and FSDP caches are outside this tensor-only suite.
+An incomplete copy is fatal to the training operation.
 """
 
 from tests.ci.ci_register import register_cpu_ci
@@ -52,13 +59,20 @@ def _make_grouped_weights(*, requests=None):
     }
     groups = {"base": ["transformer.weight"], "lora": ["transformer.lora_A", "transformer.lora_B"]}
 
-    def get_named_tensors(names):
-        selected = None if names is None else tuple(names)
-        if requests is not None:
-            requests.append(selected)
-        return _select_tensors(live, selected)
+    model = nn.ParameterDict(
+        {name.removeprefix("transformer."): nn.Parameter(tensor) for name, tensor in live.items()}
+    )
+    backuper = TensorBackuper({"transformer": model}, groups=groups)
+    if requests is not None:
+        get_local_tensors = backuper._get_active_model_local_tensors
 
-    return live, groups, TensorBackuper.create(source_getter=get_named_tensors, groups=groups)
+        def record_tensor_access(names):
+            selected = None if names is None else tuple(names)
+            requests.append(selected)
+            return get_local_tensors(selected)
+
+        backuper._get_active_model_local_tensors = record_tensor_access
+    return live, groups, backuper
 
 
 def test_shared_fixed_base_reads_only_changed_adapter_and_copied_versions_skip_restore():
@@ -157,13 +171,40 @@ def test_empty_groups_and_component_names_are_supported(empty_group):
     live = {"audio.weight": torch.tensor([1.0]), "video.weight": torch.tensor([2.0])}
     nonempty_group = "lora" if empty_group == "base" else "base"
     groups = {empty_group: [], nonempty_group: list(live)}
-    backuper = TensorBackuper(lambda names: _select_tensors(live, names), groups=groups)
+    models = {
+        component: nn.ParameterDict({"weight": nn.Parameter(live[f"{component}.weight"])})
+        for component in ("audio", "video")
+    }
+    backuper = TensorBackuper(models, groups=groups)
     backuper.backup("original")
     live["audio.weight"].add_(7)
     backuper.mark_weights_updated(groups=[nonempty_group])
     assert backuper.restore("original") == (nonempty_group,)
     assert live["audio.weight"].item() == 1
     assert live["video.weight"].item() == 2
+
+
+def test_model_binding_resolves_changed_parameter_storage_and_replaced_buffers():
+    model = nn.Module()
+    model.weight = nn.Parameter(torch.tensor([1.0]))
+    model.register_buffer("running", torch.tensor([2.0]))
+    original_parameter = model.weight
+    backuper = TensorBackuper({"transformer": model})
+    backuper.backup("original")
+
+    # Offload can replace parameter storage and the registered buffer object.
+    model.weight.data = torch.tensor([3.0])
+    model.running = torch.tensor([4.0])
+    backuper.mark_weights_updated()
+    backuper.backup("trained")
+    backuper.restore("original")
+    assert model.weight is original_parameter
+    assert model.weight.item() == 1
+    assert model.running.item() == 2
+
+    backuper.restore("trained")
+    assert model.weight.item() == 3
+    assert model.running.item() == 4
 
 
 def test_ema_updates_keep_allocations_and_copies_independent():
@@ -239,6 +280,96 @@ def test_ema_tags_keep_independent_schedules_and_parameter_domains():
         backuper.configure_ema("fixed")
 
 
+def test_selected_backup_reads_live_buffers_and_preserves_parameter_versions():
+    model = nn.Linear(2, 2)
+    model.register_buffer("running", torch.tensor([2.0]))
+    groups = {"parameters": list(dict(model.named_parameters())), "buffers": ["running"]}
+    backuper = TensorBackuper({"": model}, groups=groups)
+    backuper.backup("actor", device="cpu")
+    parameter_version = backuper._active_model_group_versions["parameters"]
+
+    # The actor snapshot is stale; reference must capture the live buffer instead.
+    model.running.fill_(7.0)
+    backuper.mark_weights_updated(["buffers"])
+    backuper.backup("reference", groups=["buffers"])
+    reference = backuper.get("reference")
+    assert set(reference) == {"running"}
+    assert reference["running"].item() == 7.0
+    assert reference["running"].data_ptr() != model.running.data_ptr()
+    assert backuper.get("actor")["running"].item() == 2.0
+    assert backuper._active_model_group_versions["parameters"] == parameter_version
+
+    model.running.fill_(9.0)
+    backuper.mark_weights_updated(["buffers"])
+    assert reference["running"].item() == 7.0
+    assert backuper.restore("reference") == ("buffers",)
+    assert model.running.item() == 7.0
+    assert backuper.restore("actor", groups=["parameters"]) == ()
+
+
+@pytest.mark.parametrize("ema_selection", ["explicit-split", "default", "all-tensors"])
+def test_ema_copies_buffer_values_and_selective_snapshots_keep_reference_state(ema_selection):
+    live = {
+        "weight": torch.tensor([1.0]),
+        "running": torch.tensor([2.0]),
+        "count": torch.tensor(0),
+        "enabled": torch.tensor(False),
+    }
+    groups = {"parameters": ["weight"], "buffers": ["running", "count", "enabled"]}
+    model = nn.Module()
+    model.weight = nn.Parameter(live["weight"])
+    for name in groups["buffers"]:
+        model.register_buffer(name, live[name])
+    backuper = TensorBackuper({"": model}, groups=groups)
+    initial = _clone_tensor_mapping(live)
+    backuper.backup("reference")
+    backuper.copy(src_tag="reference", dst_tag="buffer_reference", groups=["buffers"])
+    buffer_reference = backuper.get("buffer_reference")
+    assert set(buffer_reference) == set(groups["buffers"])
+    assert (
+        backuper._snapshots["buffer_reference"]["buffers"].version
+        == backuper._snapshots["reference"]["buffers"].version
+    )
+    for name in groups["buffers"]:
+        assert buffer_reference[name].data_ptr() != backuper.get("reference")[name].data_ptr()
+
+    backuper.copy(src_tag="reference", dst_tag="ema")
+    selection = {}
+    if ema_selection == "explicit-split":
+        selection = {"tensor_names": groups["parameters"], "copy_tensor_names": groups["buffers"]}
+    elif ema_selection == "all-tensors":
+        selection = {"tensor_names": tuple(live)}
+    backuper.configure_ema("ema", **selection, initial_decay=0.5, flat_steps=10)
+    pointers = {name: tensor.data_ptr() for name, tensor in backuper.get("ema").items()}
+    expected_weight = initial["weight"].clone()
+    for step in range(1, 3):
+        versions = {group: snapshot.version for group, snapshot in backuper._snapshots["ema"].items()}
+        live["weight"].add_(4)
+        live["running"].fill_(2 + 10 * step)
+        live["count"].fill_(step)
+        live["enabled"].fill_(step % 2 == 1)
+        backuper.mark_weights_updated()
+        expected_weight.mul_(0.5).add_(live["weight"], alpha=0.5)
+        expected = _clone_tensor_mapping(live)
+        expected["weight"] = expected_weight.clone()
+
+        backuper.update_ema("ema")
+        _assert_tensor_mapping(backuper.get("ema"), expected)
+        _assert_tensor_mapping(backuper.get("reference"), initial)
+        assert backuper.ema_states["ema"].update_count == step
+        assert {name: tensor.data_ptr() for name, tensor in backuper.get("ema").items()} == pointers
+        assert all(backuper._snapshots["ema"][group].version != version for group, version in versions.items())
+
+        for name in groups["buffers"]:
+            live[name].zero_()
+        backuper.mark_weights_updated(["buffers"])
+        assert backuper.restore("ema", groups=["buffers"]) == ("buffers",)
+        _assert_tensor_mapping(_select_tensors(live, groups["buffers"]), _select_tensors(expected, groups["buffers"]))
+        assert backuper.restore("buffer_reference", groups=["buffers"]) == ("buffers",)
+        _assert_tensor_mapping(_select_tensors(live, groups["buffers"]), _select_tensors(initial, groups["buffers"]))
+        torch.testing.assert_close(live["weight"], initial["weight"] + 4 * step, rtol=0, atol=0)
+
+
 def test_failed_ema_update_does_not_advance_clock(monkeypatch):
     _, _, backuper = _make_grouped_weights()
     backuper.backup("ema")
@@ -284,13 +415,7 @@ def test_restore_preserves_pending_backward_and_adam_against_independent_model(l
         if lora
         else {"base": names}
     )
-    named_parameters = dict(actor.named_parameters())
-
-    def get_named_tensors(names):
-        selected = named_parameters if names is None else names
-        return {name: named_parameters[name].data for name in selected}
-
-    backuper = TensorBackuper(get_named_tensors, groups=groups)
+    backuper = TensorBackuper({"": actor}, groups=groups)
     backuper.backup("reference", fixed_groups=["base"] if lora else [])
     with torch.no_grad():
         for parameter in actor.parameters():

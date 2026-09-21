@@ -87,7 +87,11 @@ def check_case(mesh, replicated, use_lora):
     backuper = harness.tensor_backuper
     backuper.copy(src_tag="ema", dst_tag="ema_slow")
     backuper.configure_ema(
-        "ema_slow", tensor_names=harness._trainable_weight_names, initial_decay=0.8, max_decay=0.8, flat_steps=10
+        "ema_slow",
+        tensor_names=harness.tensor_backuper.trainable_parameter_names,
+        initial_decay=0.8,
+        max_decay=0.8,
+        flat_steps=10,
     )
     backuper.copy(src_tag="actor", dst_tag="reference")
     backuper.copy(src_tag="reference", dst_tag="base")
@@ -165,7 +169,7 @@ def check_case(mesh, replicated, use_lora):
                 assert parameter.grad is other.grad is None
         optimizer.step()
         control_optimizer.step()
-        backuper.mark_weights_updated(harness._trainable_weight_groups)
+        backuper.mark_weights_updated(harness.tensor_backuper.trainable_tensor_groups)
         backup_actor_weights(harness)
         for tag, decay in (("ema", 0.5), ("ema_slow", 0.8)):
             if tag == "ema_slow" and step == 1:

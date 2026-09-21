@@ -5,7 +5,10 @@
          |
     failed submission --> drain pending copies --> propagate fatal error
 
+Each backuper binds a model; the live tensors share its parameter/buffer storage.
 CPU EMA keeps an independent copy intact and uses one tensor of CUDA scratch.
+EMA averages parameters but copies float/int/bool buffers across CPU/CUDA;
+buffer restore reverses the transfer without changing snapshot pinning/storage.
 Backup and restore wait once on the current GPU after copying tensors.
 Unchanged snapshots and EMA without device moves do not wait.
 Delayed work runs on a non-default stream so an early return is observable.
@@ -17,16 +20,19 @@ register_cuda_ci(est_time=15, suite="stage-b-5-gpu-h200", labels=["fsdp"])
 
 import pytest
 import torch
+from torch import nn
 
 from miles.utils.tensor_backper import TensorBackuper
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA copies require a GPU")
 
 
-def _make_backuper(device="cuda", numel=4096):
+def _make_backuper(device="cuda", numel=4096, *, pin_memory=False):
     live = {str(index): torch.full((numel,), float(index + 1), device=device) for index in range(3)}
-    backuper = TensorBackuper(lambda names: live if names is None else {name: live[name] for name in names})
-    return live, backuper
+    if pin_memory:
+        live = {name: tensor.pin_memory() for name, tensor in live.items()}
+    model = nn.ParameterDict({name: nn.Parameter(tensor) for name, tensor in live.items()})
+    return live, TensorBackuper({"": model})
 
 
 def _assert_values(tensors, increment=0):
@@ -118,9 +124,7 @@ def test_restore_releases_pinned_sources_before_return(monkeypatch):
     ids=["d2h-backup", "h2d-restore", "d2h-restore"],
 )
 def test_failed_submission_drains_pending_copies(monkeypatch, operation, device):
-    live, backuper = _make_backuper(device)
-    if device == "cpu":
-        live.update({name: tensor.pin_memory() for name, tensor in live.items()})
+    live, backuper = _make_backuper(device, pin_memory=device == "cpu")
     reference_device = "cpu" if device == "cuda" else "cuda"
     backuper.backup("reference", device=reference_device, pin_memory=reference_device == "cpu")
     for tensor in live.values():
@@ -128,7 +132,7 @@ def test_failed_submission_drains_pending_copies(monkeypatch, operation, device)
     backuper.mark_weights_updated()
     if operation == "restore":
         backuper.backup("actor")
-        assert backuper._active_weight_versions["base"] is not None
+        assert backuper._active_model_group_versions["base"] is not None
     stream = _side_stream()
     original_copy = torch.Tensor.copy_
     submissions = 0
@@ -151,7 +155,7 @@ def test_failed_submission_drains_pending_copies(monkeypatch, operation, device)
                 backuper.restore("reference")
         assert stream.query(), "Failure must drain outstanding transfers before buffers can be released"
     assert submissions == 2
-    assert backuper._active_weight_versions["base"] is None
+    assert backuper._active_model_group_versions["base"] is None
 
 
 def test_cpu_ema_preserves_independent_copy_and_bounds_cuda_scratch():
@@ -181,6 +185,59 @@ def test_cpu_ema_preserves_independent_copy_and_bounds_cuda_scratch():
         assert current_pointers == pointers
         _assert_values(shadows, increment=(1.0, 2.5)[cycle])
         _assert_values(fixed)
+
+
+@pytest.mark.parametrize("ema_device", ["cpu", "cuda"])
+def test_ema_buffer_copies_finish_both_transfer_directions(ema_device):
+    source_device = "cuda" if ema_device == "cpu" else "cpu"
+    live = {
+        "weight": torch.tensor([1.0], device=source_device),
+        "running": torch.tensor([2.0], device=source_device),
+        "count": torch.tensor(0, device=source_device),
+        "enabled": torch.tensor(False, device=source_device),
+    }
+    if source_device == "cpu":
+        live = {name: tensor.pin_memory() for name, tensor in live.items()}
+    groups = {"parameters": ["weight"], "buffers": ["running", "count", "enabled"]}
+    model = nn.Module()
+    model.weight = nn.Parameter(live["weight"])
+    for name in groups["buffers"]:
+        model.register_buffer(name, live[name])
+    backuper = TensorBackuper({"": model}, groups=groups)
+    backuper.backup("ema", device=ema_device, pin_memory=ema_device == "cpu")
+    backuper.configure_ema(
+        "ema", tensor_names=groups["parameters"], copy_tensor_names=groups["buffers"], initial_decay=0.5, flat_steps=10
+    )
+    shadows = backuper.get("ema")
+    pointers = {name: tensor.data_ptr() for name, tensor in shadows.items()}
+    stream = _side_stream()
+    with torch.cuda.stream(stream):
+        torch.cuda._sleep(50_000_000)
+        live["weight"].add_(4)
+        live["running"].add_(10)
+        live["count"].add_(3)
+        live["enabled"].fill_(True)
+        backuper.mark_weights_updated()
+        backuper.update_ema("ema")
+        assert stream.query(), "Copied EMA buffers must be complete at return"
+        for name in groups["buffers"]:
+            live[name].zero_()
+        backuper.mark_weights_updated(["buffers"])
+        assert backuper.restore("ema", groups=["buffers"]) == ("buffers",)
+        assert stream.query(), "Restored buffers must finish before their source storage is reused"
+
+    assert backuper.ema_states["ema"].update_count == 1
+    assert {name: tensor.data_ptr() for name, tensor in shadows.items()} == pointers
+    assert all(tensor.is_pinned() for tensor in (shadows if ema_device == "cpu" else live).values())
+    for name, expected in {
+        "weight": torch.tensor([3.0]),
+        "running": torch.tensor([12.0]),
+        "count": torch.tensor(3),
+        "enabled": torch.tensor(True),
+    }.items():
+        torch.testing.assert_close(shadows[name].cpu(), expected, rtol=0, atol=0)
+        if name in groups["buffers"]:
+            torch.testing.assert_close(live[name].cpu(), expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])

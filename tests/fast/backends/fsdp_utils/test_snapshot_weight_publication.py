@@ -1,9 +1,11 @@
 """Publish CPU snapshots without switching or waking the live actor.
 
     CPU local snapshot + live DTensor metadata --> per-weight gather --> bucket
-    live frozen weights + buffers -------------> same export mapping
+    persistent float/int buffer snapshots -----> same export mapping
+    omitted overrides -------------------------> live tensors
+    nonpersistent buffers ---------------------> excluded from publication
     LoRA snapshot A/B --------------------------> merge or paired IPC bucket
-    canonical snapshot --> every tied alias --> tied rollout load + forward
+    canonical snapshot --> every tied parameter/buffer alias --> rollout load
 
 CPU tests replace CUDA staging and capture the transport boundary. The real
 one-rank DTensor path and an uneven hybrid-shard spec exercise reconstruction;
@@ -129,6 +131,38 @@ def test_dense_snapshot_keeps_live_frozen_weights_buffers_and_component_names(cp
         for name, tensor in bucket.items():
             torch.testing.assert_close(tensor, before[name][1])
     assert updater.weight_version == 2
+
+
+@pytest.mark.parametrize("sharded", [False, True])
+def test_buffer_snapshots_publish_persistent_aliases_without_changing_live_state(cpu_staging, cpu_mesh, sharded):
+    model = nn.Linear(3, 2, bias=False)
+    running = torch.tensor([11.0, 13.0])
+    if sharded:
+        running = DTensor.from_local(running, cpu_mesh, [Replicate()])
+    model.register_buffer("running", running)
+    model.register_buffer("running_alias", running)
+    model.register_buffer("count", torch.tensor(7))
+    model.register_buffer("cache", torch.tensor([17.0]), persistent=False)
+    before = _live_state(model)
+    cache_storage, cache_before = model.cache.data_ptr(), model.cache.clone()
+    overrides = {
+        "transformer.running": torch.tensor([2.0, 3.0]),
+        "transformer.count": torch.tensor(5),
+        "transformer.cache": torch.tensor([19.0]),
+    }
+
+    updater = _capture(UPDATERS.DiffusionUpdateWeightFromTensor, {"transformer": model})
+    updater.update_weights(weight_overrides=overrides)
+    published = {name: tensor for _, _, bucket in updater.buckets for name, tensor in bucket.items()}
+
+    assert set(published) == {"weight", "running", "running_alias", "count"}
+    torch.testing.assert_close(published["weight"], model.weight)
+    for name in ("running", "running_alias"):
+        torch.testing.assert_close(published[name], overrides["transformer.running"], rtol=0, atol=0)
+    torch.testing.assert_close(published["count"], overrides["transformer.count"], rtol=0, atol=0)
+    _assert_live_unchanged(model, before)
+    assert model.cache.data_ptr() == cache_storage
+    torch.testing.assert_close(model.cache, cache_before, rtol=0, atol=0)
 
 
 def test_cpu_snapshot_keeps_cuda_mesh_and_uneven_shard_metadata(monkeypatch):

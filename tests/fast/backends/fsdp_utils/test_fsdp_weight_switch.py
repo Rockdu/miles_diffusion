@@ -22,12 +22,14 @@ The PEFT case adds a nonzero initial LoRA and a base-only reference:
 The initial policy includes the existing adapter, and switching must preserve the
 active adapter and trainable mask before the pending actor backward completes.
 Outputs, input/parameter gradients, optimizer state, and
-parameter bindings must match independent models. A fake one-rank CPU process
+parameter bindings must match independent models. Buffer counters remain local
+to each role, and the actor graph reads its original scale buffer. A fake one-rank CPU process
 group exercises real local FSDP cache behavior; it does not prove GPU collectives
 or DMA completion. Mocked CUDA synchronization checks that both reference entry
 and normal/error exit wait before writing CPU shards. Cache refresh failures
 must be retried even when the weight versions already match the requested tag.
-Failed reference entry propagates immediately; an explicit retry refreshes the FSDP cache.
+Reference cleanup restores actor state even when entry fails; the original error
+still propagates. Direct switch retries must refresh the FSDP cache again.
 """
 
 from tests.ci.ci_register import register_cpu_ci
@@ -60,11 +62,15 @@ class _Model(nn.Module):
         self.weight = nn.Parameter(torch.arange(16, dtype=torch.float32).reshape(4, 4) / 32)
         self.block = nn.Linear(4, 3, bias=False)
         self.block.weight.data.copy_(torch.arange(12, dtype=torch.float32).reshape(3, 4) / 64)
+        self.register_buffer("scale", torch.tensor(1.25))
+        self.register_buffer("forward_count", torch.tensor(0))
         self.checkpointing = checkpointing
 
     def forward(self, inputs):
+        self.forward_count.add_(1)
         hidden = functional.linear(inputs, self.weight).tanh()
-        return checkpoint(self.block, hidden, use_reentrant=False) if self.checkpointing else self.block(hidden)
+        output = checkpoint(self.block, hidden, use_reentrant=False) if self.checkpointing else self.block(hidden)
+        return output * self.scale
 
 
 @pytest.fixture(scope="module")
@@ -136,7 +142,7 @@ def test_reference_switch_clears_fsdp_cache_and_preserves_training(
         for name, parameter in trainable_parameters.items():
             parameter.add_(0.5)
             control_parameters[name].add_(0.5)
-    harness.tensor_backuper.mark_weights_updated(harness._trainable_weight_groups)
+    harness.tensor_backuper.mark_weights_updated(harness.tensor_backuper.trainable_tensor_groups)
     backup_actor_weights(harness)
     optimizer = torch.optim.AdamW(trainable_parameters.values(), lr=0.01)
     control_optimizer = torch.optim.AdamW([p for p in control.parameters() if p.requires_grad], lr=0.01)
@@ -176,6 +182,8 @@ def test_reference_switch_clears_fsdp_cache_and_preserves_training(
         ema_snapshot = harness.tensor_backuper.get("ema")
         for name in parameters.keys() - trainable_parameters.keys():
             assert actor_snapshot[name] is ema_snapshot[name]
+    for name, buffer in actor.named_buffers():
+        torch.testing.assert_close(buffer, control.get_buffer(name), rtol=0, atol=0)
     for name, parameter in parameters.items():
         torch.testing.assert_close(_local(parameter), control_parameters[name], rtol=0, atol=0)
         if cpu_offload:
@@ -219,7 +227,7 @@ def test_failed_cache_refresh_retries_same_tag(cpu_mesh, monkeypatch, reference_
     with torch.no_grad():
         for parameter in actor.parameters():
             parameter.add_(0.5)
-    harness.tensor_backuper.mark_weights_updated(harness._trainable_weight_groups)
+    harness.tensor_backuper.mark_weights_updated(harness.tensor_backuper.trainable_tensor_groups)
     backup_actor_weights(harness)
     inputs = torch.ones(1, 4)
     before_switch = actor(inputs)
@@ -240,9 +248,13 @@ def test_failed_cache_refresh_retries_same_tag(cpu_mesh, monkeypatch, reference_
                 pytest.fail("a failed cache refresh must not enter the reference context")
         else:
             harness._switch_model("ema")
-    assert refresh_calls == 1, "failed reference entry must not automatically restore actor weights"
+    expected_calls = 2 if reference_context else 1
+    assert refresh_calls == expected_calls
+    if reference_context:
+        for name, parameter in actor.named_parameters():
+            torch.testing.assert_close(_local(parameter), harness.tensor_backuper.get("actor")[name], rtol=0, atol=0)
     harness._switch_model("ema")
-    assert refresh_calls == 2
+    assert refresh_calls == expected_calls + 1
     with torch.no_grad():
         actual = actor(inputs)
         expected = reference(inputs)

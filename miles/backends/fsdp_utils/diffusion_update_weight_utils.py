@@ -151,32 +151,32 @@ def _component_state_dict(
     state_dict = model.state_dict()
     if weight_overrides is None:
         return state_dict
-    parameters = dict(model.named_parameters(remove_duplicate=False))
-    parameter_overrides = {}
-    for name, parameter in parameters.items():
-        snapshot = weight_overrides.get(f"{target_module}.{name}")
-        if snapshot is not None:
-            parameter_overrides.setdefault(id(parameter), snapshot)
-    for name, parameter in state_dict.items():
-        # A canonical snapshot must replace every state-dict alias of a tied Parameter.
-        snapshot = (
-            parameter_overrides.get(id(parameters[name]))
-            if name in parameters
-            else weight_overrides.get(f"{target_module}.{name}")
-        )
-        if snapshot is None:
+    model_tensors = dict(model.named_parameters(remove_duplicate=False))
+    model_tensors.update(model.named_buffers(remove_duplicate=False))
+    snapshot_by_tensor_identity = {}
+    for name, model_tensor in model_tensors.items():
+        snapshot_tensor = weight_overrides.get(f"{target_module}.{name}")
+        if snapshot_tensor is not None:
+            snapshot_by_tensor_identity.setdefault(id(model_tensor), snapshot_tensor)
+    for name, state_tensor in state_dict.items():
+        # A canonical snapshot must replace every state-dict alias of a tied tensor.
+        if name in model_tensors:
+            snapshot_tensor = snapshot_by_tensor_identity.get(id(model_tensors[name]))
+        else:
+            snapshot_tensor = weight_overrides.get(f"{target_module}.{name}")
+        if snapshot_tensor is None:
             continue
-        local_parameter = parameter.to_local() if isinstance(parameter, DTensor) else parameter
+        local_state_tensor = state_tensor.to_local() if isinstance(state_tensor, DTensor) else state_tensor
         if (
-            isinstance(snapshot, DTensor)
-            or snapshot.shape != local_parameter.shape
-            or snapshot.dtype != parameter.dtype
+            isinstance(snapshot_tensor, DTensor)
+            or snapshot_tensor.shape != local_state_tensor.shape
+            or snapshot_tensor.dtype != state_tensor.dtype
         ):
             raise ValueError(f"Weight override must match the local tensor schema: {target_module}.{name}")
-        if isinstance(parameter, DTensor):
+        if isinstance(state_tensor, DTensor):
             # from_local() would eagerly move CPU snapshots to the CUDA mesh device.
-            snapshot = DTensor(snapshot, parameter._spec, requires_grad=False)
-        state_dict[name] = snapshot
+            snapshot_tensor = DTensor(snapshot_tensor, state_tensor._spec, requires_grad=False)
+        state_dict[name] = snapshot_tensor
     return state_dict
 
 

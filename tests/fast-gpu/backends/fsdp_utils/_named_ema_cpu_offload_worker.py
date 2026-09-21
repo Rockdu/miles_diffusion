@@ -1,5 +1,7 @@
 """Two-rank native CPU offload with independent training and reference oracles.
 
+EMA updates call TensorBackuper directly after each training cycle.
+
     CPU actor shards --> delayed H2D --> pending forward --> ref / teacher / EMA
            |                                               |
     distinct actor snapshot <--------- restore ------------+
@@ -118,7 +120,7 @@ def _trial(mesh, args):
                 saved = initial_ema_tensors[name]
                 assert saved.data_ptr() != tensor.data_ptr(), name
                 assert saved.device == tensor.device and saved.is_pinned() == tensor.is_pinned(), name
-    for method_name in ("sleep", "wake_up", "update_ema"):
+    for method_name in ("sleep", "wake_up"):
         method = load_actor_method(method_name)
         method.__globals__.update(dist=dist, logger=logging.getLogger(__name__))
         setattr(harness, method_name, method.__get__(harness))
@@ -156,8 +158,8 @@ def _trial(mesh, args):
         for name, parameter in trainable.items():
             _local(parameter).add_(0.15)
             _local(control_parameters[name]).add_(0.15)
-    backuper.mark_weights_updated(harness._trainable_weight_groups)
-    backuper.backup("actor", device="cpu", pin_memory=True, fixed_groups=harness._fixed_weight_groups)
+    backuper.mark_weights_updated(harness.tensor_backuper.trainable_tensor_groups)
+    backuper.backup("actor", device="cpu", pin_memory=True, fixed_groups=harness.tensor_backuper.frozen_tensor_groups)
     fixed = {
         tag: {name: tensor.clone() for name, tensor in backuper.get(tag).items()}
         for tag in ("ref", "teacher", "initial_ema")
@@ -217,8 +219,10 @@ def _trial(mesh, args):
                 assert parameter.grad is None
         for optimizer in optimizers:
             optimizer.step()
-        backuper.mark_weights_updated(harness._trainable_weight_groups)
-        backuper.backup("actor", device="cpu", pin_memory=True, fixed_groups=harness._fixed_weight_groups)
+        backuper.mark_weights_updated(harness.tensor_backuper.trainable_tensor_groups)
+        backuper.backup(
+            "actor", device="cpu", pin_memory=True, fixed_groups=harness.tensor_backuper.frozen_tensor_groups
+        )
         assert any(not torch.equal(_local(parameters[name]), live[name]) for name in trainable)
         for name, parameter in parameters.items():
             _check_close(_local(parameter), _local(control_parameters[name]), f"AdamW parameter {name}", args)
@@ -229,11 +233,11 @@ def _trial(mesh, args):
                     _check_close(_local(value), _local(expected), f"AdamW {name}/{key}", args)
 
         before_ema_versions = {group: snapshot.version for group, snapshot in backuper._snapshots["ema"].items()}
-        harness.update_ema()
+        backuper.update_ema("ema")
         update_weights(harness)
         assert backuper.ema_states["ema"].update_count == cycle + 1
         for group, snapshot in backuper._snapshots["ema"].items():
-            if group in harness._trainable_weight_groups:
+            if group in harness.tensor_backuper.trainable_tensor_groups:
                 assert snapshot.version != before_ema_versions[group]
             else:
                 assert snapshot.version == before_ema_versions[group]

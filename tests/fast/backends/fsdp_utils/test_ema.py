@@ -4,9 +4,12 @@
          |                    |                              |          |
     control actor       independent reference          gradient     optimizer
          +--------------------+------------------------------+----------+
+    actor buffers --> saved before reference --> restored on error
+    reference buffers --> mutate under no_grad --> discarded after reference
 
 The oracle owns separate models and computes EMA values independently. Production
-FSDP switching runs through the production actor; only trainable weights enter EMA.
+FSDP switching runs through the production actor; trainable parameters are averaged
+and buffers are copied into EMA. Reference mutations never change its snapshot.
 Both checkpointed and ordinary backward must match the untouched control model.
 The caller refreshes actor snapshots after optimizer updates. Forward exceptions restore actor weights.
 """
@@ -47,7 +50,7 @@ def test_snapshot_and_update():
     initial = model.weight.detach().clone()
     with torch.no_grad():
         model.weight.add_(1.0)
-    harness.tensor_backuper.mark_weights_updated(harness._trainable_weight_groups)
+    harness.tensor_backuper.mark_weights_updated(harness.tensor_backuper.trainable_tensor_groups)
     backup_actor_weights(harness)
     assert harness.tensor_backuper.update_ema("ema") == 0.5
     torch.testing.assert_close(harness.tensor_backuper.get("ema")["weight"], initial + 0.5)
@@ -59,7 +62,7 @@ def test_reference_context_restores_actor_weights_exactly():
     initial = model.weight.detach().clone()
     with torch.no_grad():
         model.weight.add_(2.0)
-    harness.tensor_backuper.mark_weights_updated(harness._trainable_weight_groups)
+    harness.tensor_backuper.mark_weights_updated(harness.tensor_backuper.trainable_tensor_groups)
     backup_actor_weights(harness)
     with reference_weights(harness, "ema"):
         assert torch.equal(model.weight.detach(), initial)
@@ -76,7 +79,7 @@ def test_pending_backward_matches_independent_reference(checkpointing):
         for param in actor.parameters():
             if param.requires_grad:
                 param.add_(0.2)
-    harness.tensor_backuper.mark_weights_updated(harness._trainable_weight_groups)
+    harness.tensor_backuper.mark_weights_updated(harness.tensor_backuper.trainable_tensor_groups)
     backup_actor_weights(harness)
     control = copy.deepcopy(actor)
     optimizer = torch.optim.AdamW(actor.parameters(), lr=0.01)
@@ -115,7 +118,7 @@ def test_pending_backward_matches_independent_reference(checkpointing):
             else:
                 assert param.grad is None
         optimizer.step()
-        harness.tensor_backuper.mark_weights_updated(harness._trainable_weight_groups)
+        harness.tensor_backuper.mark_weights_updated(harness.tensor_backuper.trainable_tensor_groups)
         backup_actor_weights(harness)
         control_optimizer.step()
         for param, other in zip(actor.parameters(), control.parameters(), strict=True):
@@ -146,15 +149,16 @@ def test_exception_restores_weights_and_allows_next_update():
             if param.requires_grad:
                 param.add_(1.0)
         model.scale.add_(1.0)
-    backuper.mark_weights_updated(harness._trainable_weight_groups)
+    backuper.mark_weights_updated(harness.tensor_backuper.trainable_tensor_groups)
     backup_actor_weights(harness)
     saved = {name: value.detach().clone() for name, value in model.state_dict().items()}
     shadow = {name: value.clone() for name, value in backuper.get("ema").items()}
 
     with pytest.raises(RuntimeError, match="ref forward failed"), reference_weights(harness, "ema"):
-        # EMA leaves the frozen parameters and buffers unchanged.
+        # Fixed parameters are shared; each role owns independent buffers.
         assert torch.equal(model.offset, saved["offset"])
-        assert torch.equal(model.scale, saved["scale"])
+        assert torch.equal(model.scale, shadow["scale"])
+        model.scale.add_(10.0)
         raise RuntimeError("ref forward failed")
 
     for name, value in model.state_dict().items():
@@ -164,3 +168,4 @@ def test_exception_restores_weights_and_allows_next_update():
     assert backuper.ema_states["ema"].update_count == 0
     backuper.update_ema("ema")
     assert backuper.ema_states["ema"].update_count == 1
+    assert torch.equal(backuper.get("ema")["scale"], saved["scale"])

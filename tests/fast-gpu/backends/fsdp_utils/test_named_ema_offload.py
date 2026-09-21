@@ -6,6 +6,9 @@
                        |            |           |
                 CPU actor storage   |       same bindings
                   == snapshot     read EMA
+    GPU actor buffers -- direct backup --> independent GPU lora_base buffers
+    actor fixed base -------------------> shared CPU lora_base snapshot
+                       without EMA or train offload
     CPUOffloadPolicy: pending actor --> ref --> teacher --> EMA --> backward
                      CPU/GPU EMA snapshots           CPU AdamW + EMA update
     Pinned CPU EMA --> temporary CUDA EMA + actor --> same pinned CPU EMA
@@ -13,7 +16,7 @@
       fixed copy stays unchanged                 later updates reuse storage
 
 The actor explicitly backs up after optimizer steps, switches references, and
-coordinates sleep/wake. TensorBackuper only copies tensors. Publication reads
+coordinates sleep/wake. EMA updates call TensorBackuper directly. Publication reads
 CPU or GPU shadows while the sleeping actor remains unchanged.
 Two cycles check that the persistent CPU buffer is reused across reference
 captures, offload, and later optimizer updates. A separate two-rank worker checks
@@ -66,6 +69,32 @@ def cuda_mesh(tmp_path):
         dist.destroy_process_group()
 
 
+def test_lora_base_buffers_are_backed_up_directly_on_cuda(cuda_mesh):
+    mesh, _ = cuda_mesh
+    model = nn.Linear(2, 2).cuda().requires_grad_(False)
+    model.register_buffer("running", torch.tensor([3.0], device="cuda"))
+    fully_shard(model, mesh=mesh)
+    harness = make_weight_actor(model, device="cpu", ref_mode="lora_base")
+    harness.args.use_ema = False
+    harness._init_weight_backups()
+    backuper = harness.tensor_backuper
+    reference = backuper.get("lora_base")
+    assert set(reference) == {"weight", "bias", "running"}
+    assert backuper._snapshots["lora_base"]["base"] is backuper._snapshots["actor"]["base"]
+    assert backuper.get("actor")["running"].device.type == "cpu"
+    assert reference["running"].device == model.running.device
+    assert reference["running"].data_ptr() != model.running.data_ptr()
+
+    model.running.fill_(5.0)
+    backuper.mark_weights_updated(harness.tensor_backuper.buffer_groups)
+    backuper.backup("actor", device="cpu", pin_memory=True, fixed_groups=harness.tensor_backuper.frozen_tensor_groups)
+    assert reference["running"].item() == 3.0
+    harness._switch_model("lora_base")
+    assert model.running.item() == 3.0
+    harness._switch_model("actor")
+    assert model.running.item() == 5.0
+
+
 def test_cpu_ema_uses_cuda_arithmetic_and_returns_completed_pinned_snapshots(cuda_mesh, monkeypatch):
     mesh, _ = cuda_mesh
     torch.manual_seed(73)
@@ -101,19 +130,21 @@ def test_cpu_ema_uses_cuda_arithmetic_and_returns_completed_pinned_snapshots(cud
         before = backuper.get("ema")
         before_pointers = {name: tensor.data_ptr() for name, tensor in before.items()}
         before_versions = {group: snapshot.version for group, snapshot in backuper._snapshots["ema"].items()}
-        for name in harness._trainable_weight_names:
+        for name in harness.tensor_backuper.trainable_parameter_names:
             expected_actor[name] += 0.25
             expected_ema[name] = expected_ema[name] * 0.5 + expected_actor[name] * 0.5
         with torch.no_grad(), torch.cuda.stream(stream):
             # Pending source writes make an unsynchronized D2H return observable.
             torch.cuda._sleep(50_000_000)
-            for name in harness._trainable_weight_names:
+            for name in harness.tensor_backuper.trainable_parameter_names:
                 _local(parameters[name].data).add_(0.25)
-            backuper.mark_weights_updated(harness._trainable_weight_groups)
+            backuper.mark_weights_updated(harness.tensor_backuper.trainable_tensor_groups)
             assert backuper.update_ema("ema") == 0.5
             assert stream.query(), "CPU EMA must be ready when update_ema returns"
 
-        assert arithmetic_devices == [("cuda", "cuda")] * ((cycle + 1) * len(harness._trainable_weight_names))
+        assert arithmetic_devices == [("cuda", "cuda")] * (
+            (cycle + 1) * len(harness.tensor_backuper.trainable_parameter_names)
+        )
         assert backuper.ema_states["ema"].update_count == cycle + 1
         shadows = backuper.get("ema")
         for name, shadow in shadows.items():
@@ -124,7 +155,7 @@ def test_cpu_ema_uses_cuda_arithmetic_and_returns_completed_pinned_snapshots(cud
             torch.testing.assert_close(shadow, expected_ema[name], rtol=0, atol=0)
             assert backuper.get("initial_ema")[name] is fixed_tensors[name]
             torch.testing.assert_close(fixed_tensors[name], fixed_values[name], rtol=0, atol=0)
-        for group in harness._trainable_weight_groups:
+        for group in harness.tensor_backuper.trainable_tensor_groups:
             snapshot = backuper._snapshots["ema"][group]
             assert snapshot.version != before_versions[group]
         for group, version in fixed_versions.items():
@@ -161,11 +192,13 @@ def test_fsdp_sleep_wake_reuses_actor_storage_and_publishes_ema_without_switchin
     )
     backuper = harness.tensor_backuper
     actor_pointers = {name: tensor.data_ptr() for name, tensor in backuper.get("actor").items()}
-    ema_pointers = {name: backuper.get("ema")[name].data_ptr() for name in harness._trainable_weight_names}
+    ema_pointers = {
+        name: backuper.get("ema")[name].data_ptr() for name in harness.tensor_backuper.trainable_parameter_names
+    }
     expected_ema = {name: tensor.detach().cpu().clone() for name, tensor in backuper.get("ema").items()}
 
     def assert_ema_storage():
-        for name in harness._trainable_weight_names:
+        for name in harness.tensor_backuper.trainable_parameter_names:
             shadow = backuper.get("ema")[name]
             assert shadow.device == ema_device
             assert shadow.is_pinned() == ema_offload
@@ -179,7 +212,7 @@ def test_fsdp_sleep_wake_reuses_actor_storage_and_publishes_ema_without_switchin
         "get_gloo_group": lambda: gloo_group,
         "logger": logging.getLogger(__name__),
     }
-    for name in ("sleep", "wake_up", "update_ema"):
+    for name in ("sleep", "wake_up"):
         method = load_actor_method(name)
         method.__globals__.update(dependencies)
         setattr(harness, name, method.__get__(harness))
@@ -199,7 +232,7 @@ def test_fsdp_sleep_wake_reuses_actor_storage_and_publishes_ema_without_switchin
         assert harness._asleep
         assert all(parameter.device.type == "cpu" for parameter in parameters.values())
         assert_ema_storage()
-        assert set(weight_overrides) == set(harness._trainable_weight_names)
+        assert set(weight_overrides) == set(harness.tensor_backuper.trainable_parameter_names)
         assert all(tensor.data_ptr() == ema_pointers[name] for name, tensor in weight_overrides.items())
         published.append({name: tensor.detach().cpu().clone() for name, tensor in weight_overrides.items()})
 
@@ -215,13 +248,15 @@ def test_fsdp_sleep_wake_reuses_actor_storage_and_publishes_ema_without_switchin
 
     for cycle in range(2):
         torch.testing.assert_close(step(model, optimizer), step(control, control_optimizer), rtol=1e-12, atol=1e-12)
-        backuper.mark_weights_updated(harness._trainable_weight_groups)
-        backuper.backup("actor", device="cpu", pin_memory=True, fixed_groups=harness._fixed_weight_groups)
+        backuper.mark_weights_updated(harness.tensor_backuper.trainable_tensor_groups)
+        backuper.backup(
+            "actor", device="cpu", pin_memory=True, fixed_groups=harness.tensor_backuper.frozen_tensor_groups
+        )
         live = {name: _local(parameter.data).cpu().clone() for name, parameter in parameters.items()}
         reference.load_state_dict({**expected_ema, "marker": control.marker})
         with reference_weights(harness, "ema"):
             torch.testing.assert_close(model(inputs), reference(inputs), rtol=1e-12, atol=1e-12)
-        harness.update_ema()
+        backuper.update_ema("ema")
         assert_ema_storage()
         state_before_sleep = {
             parameter: {key: _local(value).cpu().clone() for key, value in state.items()}
