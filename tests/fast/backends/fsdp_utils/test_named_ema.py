@@ -17,7 +17,7 @@
     component models --> backuper resolves requested component tensors only
     both components -------- round end --> one shared EMA clock
     real training loop: [two microbatches --> AdamW --> mark changed] x 3
-                        reference entry --> refresh actor backup --> switch/restore
+                        _use_model(reference) --> backup + isolated buffers + switch/restore
                         no reference --> no backups between optimizer steps
                         EMA reads live weights --> sleep refreshes actor backup
     float / integer / nonpersistent buffers --> actor forward --> snapshot

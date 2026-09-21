@@ -317,6 +317,16 @@ class FSDPTrainRayActor(TrainRayActor):
         if target_tag == "actor":
             self.tensor_backuper.restore_trainable_parameter_flags()
 
+    @contextmanager
+    def _use_model(self, target_tag: str):
+        self.tensor_backuper.backup_active_model("actor")
+        try:
+            with self.tensor_backuper.use_temporary_buffers():
+                self._switch_model(target_tag)
+                yield
+        finally:
+            self._switch_model("actor")
+
     @timer
     def update_weights(self) -> None:  # type: ignore[override]
         if self.args.train_only or self.args.debug_rollout_only:
@@ -593,17 +603,10 @@ class FSDPTrainRayActor(TrainRayActor):
         ref_pred = None
         ref_mode = self.args.ref_mode
         if ref_mode != "none":
-            self.tensor_backuper.backup_active_model("actor")
-            try:
-                with self.tensor_backuper.use_temporary_buffers():
-                    self._switch_model(ref_mode)
-                    reference_adapter_context = (
-                        nullcontext() if ref_mode == "ema" else prepared.model.disable_adapter()
-                    )
-                    with torch.no_grad(), reference_adapter_context:
-                        ref_pred = _compute_noise_pred().detach()
-            finally:
-                self._switch_model("actor")
+            with self._use_model(ref_mode):
+                reference_adapter_context = nullcontext() if ref_mode == "ema" else prepared.model.disable_adapter()
+                with torch.no_grad(), reference_adapter_context:
+                    ref_pred = _compute_noise_pred().detach()
 
         if self.custom_loss_formula_func is not None:
             return self.custom_loss_formula_func(
