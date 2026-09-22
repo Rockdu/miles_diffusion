@@ -40,7 +40,7 @@ Production actor methods run without Ray or diffusion dependencies. Independent
 models check restored values and optimizer state. Training owns the EMA update;
 the driver waits for training before saving and publication. Train-only updates
 need no publisher, while failed training and rollout-only debugging leave EMA unchanged.
-The CPU sleep probe stubs the CUDA fence; GPU lifecycle tests cover transfers.
+The CPU probe calls sleep once after training; GPU lifecycle tests alternate sleep and wake.
 Snapshot selection uses tensor_groups; fixed_tensor_groups allows sharing fixed snapshot storage.
 """
 
@@ -717,7 +717,6 @@ def test_training_refreshes_actor_backup_only_before_reference_or_sleep(
         get_gloo_group=lambda: None,
         dist=SimpleNamespace(barrier=lambda **kwargs: None),
     )
-    sleep(harness)
     sleep(harness)
     assert backup_steps == ([3] if ref_mode == "none" else [0, 0, 1, 1, 2, 2, 3])
     for name, parameter in model.named_parameters():

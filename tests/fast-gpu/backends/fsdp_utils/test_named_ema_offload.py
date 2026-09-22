@@ -18,8 +18,8 @@
 The actor explicitly backs up after optimizer steps, switches references, and
 coordinates sleep/wake. EMA updates call TensorBackuper directly. Publication reads
 CPU or GPU shadows while the sleeping actor remains unchanged.
-Two cycles check that the persistent CPU buffer is reused across reference
-captures, offload, and later optimizer updates. A separate two-rank worker checks
+Two alternating sleep/wake cycles check devices, bindings, and CPU buffer reuse
+across reference captures, offload, and later optimizer updates. A two-rank worker checks
 native CPUOffloadPolicy with full and LoRA training, delayed H2D, and three tags.
 A focused update test checks CUDA arithmetic, completed CPU results, and pinned
 snapshots with independent copies and stable storage across in-place updates.
@@ -232,7 +232,6 @@ def test_fsdp_sleep_wake_reuses_actor_storage_and_publishes_ema_without_switchin
     published = []
 
     def publish(*, weight_overrides):
-        assert harness._asleep
         assert all(parameter.device.type == "cpu" for parameter in parameters.values())
         assert_ema_storage()
         assert set(weight_overrides) == set(harness.tensor_backuper.trainable_parameter_names)
@@ -266,9 +265,7 @@ def test_fsdp_sleep_wake_reuses_actor_storage_and_publishes_ema_without_switchin
             for parameter, state in optimizer.state.items()
         }
         harness.sleep()
-        harness.sleep()
         assert_ema_storage()
-        assert harness._asleep
         assert model.marker.device.type == "cpu"
         for name, parameter in model.named_parameters():
             assert parameter is parameters[name]
@@ -290,9 +287,7 @@ def test_fsdp_sleep_wake_reuses_actor_storage_and_publishes_ema_without_switchin
             torch.testing.assert_close(_local(parameter), live[name], rtol=0, atol=0)
 
         harness.wake_up()
-        harness.wake_up()
         assert_ema_storage()
-        assert not harness._asleep
         assert model.marker.device.type == "cuda"
         for name, parameter in model.named_parameters():
             assert parameter is parameters[name]

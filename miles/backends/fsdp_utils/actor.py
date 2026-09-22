@@ -233,7 +233,6 @@ class FSDPTrainRayActor(TrainRayActor):
         return self.args.start_rollout_id
 
     def _init_weight_backups(self):
-        self._asleep = False
         self.tensor_backuper = None
         # List any usecase that requires weight backups here.
         requires_weight_backups = self.args.use_ema or self.args.offload_train or self.args.ref_mode != "none"
@@ -279,25 +278,23 @@ class FSDPTrainRayActor(TrainRayActor):
 
     @timer
     def sleep(self) -> None:
-        if not self.args.offload_train or self._asleep:
+        if not self.args.offload_train:
             return
         print_memory("before offload DiT")
         self.tensor_backuper.backup_active_model("actor")
         self.tensor_backuper.bind_active_model_to_cpu_snapshot("actor")
         move_torch_optimizer(self.optimizer, "cpu")
-        self._asleep = True
         clear_memory()
         dist.barrier(group=get_gloo_group())
         print_memory("after sleep DiT")
 
     @timer
     def wake_up(self) -> None:
-        if not self.args.offload_train or not self._asleep:
+        if not self.args.offload_train:
             return
         print_memory("before wake_up DiT")
         self.model.cuda()
         move_torch_optimizer(self.optimizer, "cuda")
-        self._asleep = False
         dist.barrier(group=get_gloo_group())
         print_memory("after wake_up DiT")
 

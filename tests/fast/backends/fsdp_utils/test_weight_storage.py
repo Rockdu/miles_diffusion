@@ -12,6 +12,7 @@
 The actor selects a snapshot tag; TensorBackuper binds each component to it.
 Its binder resolves tensor identities and delegates resharding and padding to FSDP's _apply.
 The real sleep entry refreshes and binds two components with identical local names independently.
+Checks use tensor values and storage pointers to verify the completed transition.
 The model-bound backuper resolves the current buffers after wake replaces them.
 A CPU clone models wake's allocation of independent storage. Actual CUDA moves
 and pinned allocations require the GPU lifecycle regression.
@@ -177,7 +178,6 @@ def test_sleep_refreshes_and_binds_component_weights_and_buffer_aliases(cpu_mesh
 
     sleep(harness)
 
-    assert harness._asleep
     snapshots = harness.tensor_backuper.get("actor")
     for component, model in components.items():
         for name, parameter in model.named_parameters():

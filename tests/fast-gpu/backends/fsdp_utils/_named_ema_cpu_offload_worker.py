@@ -15,7 +15,8 @@ weights and unchanged adapters. EMA copies allocate independent mutable storage
 immediately, preserve device and CPU pinning, and keep their initial values across
 in-place EMA updates. Only frozen base storage is shared. The actor explicitly
 refreshes its snapshot after every optimizer step and synchronizes reference
-switches; TensorBackuper only copies tensors. Manual sleep/wake remains disabled.
+switches; TensorBackuper only copies tensors. Disabled manual sleep/wake calls
+leave CPU parameter storage and optimizer bindings unchanged.
 The public EMA entry updates CPU or GPU shadows after training. This checks weight
 switching, not adapter enable/disable or checkpoint loading.
 Snapshot selection uses tensor_groups; fixed_tensor_groups allows sharing fixed snapshot storage.
@@ -137,7 +138,6 @@ def _trial(mesh, args):
     published = []
 
     def publish(*, weight_overrides):
-        assert not harness._asleep
         assert all(_local(parameter).device.type == "cpu" for parameter in parameters.values())
         assert set(weight_overrides) == set(trainable)
         for name, shadow in weight_overrides.items():
@@ -269,7 +269,6 @@ def _trial(mesh, args):
         before_noop = {name: _local(parameter).data_ptr() for name, parameter in parameters.items()}
         harness.sleep()
         harness.wake_up()
-        assert not harness._asleep
         assert before_noop == {name: _local(parameter).data_ptr() for name, parameter in parameters.items()}
         _assert_cpu_storage(harness, parameters, optimizers[0], state_pointers)
 
