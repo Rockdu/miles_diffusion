@@ -72,10 +72,20 @@ def load_fsdp_models(
                 model_backend.sequence_parallel_plan(model),
                 model_backend.install_sequence_parallel_attention,
             )
+        finish_fsdp_lazy_init(model)
         if args.offload_train:
             offload_model(model)
         models[component] = model
     return models
+
+
+def finish_fsdp_lazy_init(model: torch.nn.Module) -> None:
+    """Run FSDP's one-time lazy init now instead of at the first forward.
+
+    It fixes each group's gradient dtype from the parameters that require grad at that moment;
+    a first forward with PEFT adapters disabled would see nothing trainable and leave it unset.
+    """
+    model._get_fsdp_state()._lazy_init()
 
 
 @contextmanager
