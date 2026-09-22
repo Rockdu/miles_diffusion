@@ -23,6 +23,7 @@ captures, offload, and later optimizer updates. A separate two-rank worker check
 native CPUOffloadPolicy with full and LoRA training, delayed H2D, and three tags.
 A focused update test checks CUDA arithmetic, completed CPU results, and pinned
 snapshots with independent copies and stable storage across in-place updates.
+Snapshot selection uses tensor_groups; fixed_tensor_groups allows sharing fixed snapshot storage.
 """
 
 from tests.ci.ci_register import register_cuda_ci
@@ -87,7 +88,9 @@ def test_lora_base_buffers_are_backed_up_directly_on_cuda(cuda_mesh):
 
     model.running.fill_(5.0)
     backuper.mark_weights_updated(harness.tensor_backuper.buffer_groups)
-    backuper.backup("actor", device="cpu", pin_memory=True, fixed_groups=harness.tensor_backuper.frozen_tensor_groups)
+    backuper.backup(
+        "actor", device="cpu", pin_memory=True, fixed_tensor_groups=harness.tensor_backuper.frozen_tensor_groups
+    )
     assert reference["running"].item() == 3.0
     harness._switch_model("lora_base")
     assert model.running.item() == 3.0
@@ -250,7 +253,7 @@ def test_fsdp_sleep_wake_reuses_actor_storage_and_publishes_ema_without_switchin
         torch.testing.assert_close(step(model, optimizer), step(control, control_optimizer), rtol=1e-12, atol=1e-12)
         backuper.mark_weights_updated(harness.tensor_backuper.trainable_tensor_groups)
         backuper.backup(
-            "actor", device="cpu", pin_memory=True, fixed_groups=harness.tensor_backuper.frozen_tensor_groups
+            "actor", device="cpu", pin_memory=True, fixed_tensor_groups=harness.tensor_backuper.frozen_tensor_groups
         )
         live = {name: _local(parameter.data).cpu().clone() for name, parameter in parameters.items()}
         reference.load_state_dict({**expected_ema, "marker": control.marker})

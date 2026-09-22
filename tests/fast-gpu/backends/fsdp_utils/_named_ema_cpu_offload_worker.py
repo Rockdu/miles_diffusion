@@ -18,6 +18,7 @@ refreshes its snapshot after every optimizer step and synchronizes reference
 switches; TensorBackuper only copies tensors. Manual sleep/wake remains disabled.
 The public EMA entry updates CPU or GPU shadows after training. This checks weight
 switching, not adapter enable/disable or checkpoint loading.
+Snapshot selection uses tensor_groups; fixed_tensor_groups allows sharing fixed snapshot storage.
 """
 
 import argparse
@@ -159,7 +160,9 @@ def _trial(mesh, args):
             _local(parameter).add_(0.15)
             _local(control_parameters[name]).add_(0.15)
     backuper.mark_weights_updated(harness.tensor_backuper.trainable_tensor_groups)
-    backuper.backup("actor", device="cpu", pin_memory=True, fixed_groups=harness.tensor_backuper.frozen_tensor_groups)
+    backuper.backup(
+        "actor", device="cpu", pin_memory=True, fixed_tensor_groups=harness.tensor_backuper.frozen_tensor_groups
+    )
     fixed = {
         tag: {name: tensor.clone() for name, tensor in backuper.get(tag).items()}
         for tag in ("ref", "teacher", "initial_ema")
@@ -221,7 +224,7 @@ def _trial(mesh, args):
             optimizer.step()
         backuper.mark_weights_updated(harness.tensor_backuper.trainable_tensor_groups)
         backuper.backup(
-            "actor", device="cpu", pin_memory=True, fixed_groups=harness.tensor_backuper.frozen_tensor_groups
+            "actor", device="cpu", pin_memory=True, fixed_tensor_groups=harness.tensor_backuper.frozen_tensor_groups
         )
         assert any(not torch.equal(_local(parameters[name]), live[name]) for name in trainable)
         for name, parameter in parameters.items():

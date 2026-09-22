@@ -9,6 +9,7 @@ only copies local shards. Independent models check outputs, gradients, updates,
 and Parameter identity.
 Root/child FSDP, checkpointing, mixed precision, offload, and LoRA share this oracle.
 CPU offload synchronizes pending H2D reads before overwriting pinned actor shards.
+Snapshot selection uses tensor_groups; fixed_tensor_groups allows sharing fixed snapshot storage.
 """
 
 import argparse
@@ -122,7 +123,9 @@ def _trial(mesh, args):
         for name, param in trainable.items():
             _local(param).copy_(_local(expected_params[name]))
     backuper.mark_weights_updated(harness.tensor_backuper.trainable_tensor_groups)
-    backuper.backup("actor", device="cpu", pin_memory=True, fixed_groups=harness.tensor_backuper.frozen_tensor_groups)
+    backuper.backup(
+        "actor", device="cpu", pin_memory=True, fixed_tensor_groups=harness.tensor_backuper.frozen_tensor_groups
+    )
     live = {name: _local(param.detach()).clone() for name, param in params.items()}
     optimizers = [
         torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=1e-2, foreach=False)

@@ -49,7 +49,7 @@ class TensorBackuper:
         self,
         active_models: Mapping[str, torch.nn.Module],
         *,
-        groups: Mapping[str, Iterable[str]] | None = None,
+        tensor_groups: Mapping[str, Iterable[str]] | None = None,
     ):
         self._active_models = active_models
         self.active_model_parameters = {}
@@ -77,7 +77,7 @@ class TensorBackuper:
                 model_tensor_groups.setdefault(f"{component_prefix}buffers", []).append(qualified_name)
         self._tensor_groups = {
             group_name: tuple(tensor_names)
-            for group_name, tensor_names in (model_tensor_groups if groups is None else groups).items()
+            for group_name, tensor_names in (model_tensor_groups if tensor_groups is None else tensor_groups).items()
         }
         self.buffer_names = tuple(self._active_model_buffers)
         self.buffer_groups = tuple(
@@ -131,12 +131,12 @@ class TensorBackuper:
         )
 
     @torch.no_grad()
-    def backup(self, tag, *, groups=None, device=None, pin_memory=False, fixed_groups=(), reuse=None):
+    def backup(self, tag, *, tensor_groups=None, device=None, pin_memory=False, fixed_tensor_groups=(), reuse=None):
         """Copy selected live groups and reuse requested fixed snapshots."""
         if tag in self.ema_states:
             raise ValueError(f"Cannot overwrite EMA tag {tag!r}")
         device = torch.device(device) if device is not None else None
-        fixed_groups = set(fixed_groups)
+        fixed_tensor_groups = set(fixed_tensor_groups)
         snapshot_groups = {
             group_name: self._snapshots[source_tag][group_name] for group_name, source_tag in (reuse or {}).items()
         }
@@ -146,16 +146,16 @@ class TensorBackuper:
             if self._active_model_group_versions[group_name] != group_snapshot.version:
                 raise ValueError(f"Live weights changed: {group_name}")
         previous_snapshot_groups = self._snapshots.get(tag, {})
-        selected_groups = self._tensor_groups if groups is None else groups
+        selected_tensor_groups = self._tensor_groups if tensor_groups is None else tensor_groups
         needs_copy_synchronization = False
         try:
-            for group_name in selected_groups:
+            for group_name in selected_tensor_groups:
                 tensor_names = self._tensor_groups[group_name]
                 if group_name in snapshot_groups:
                     continue
                 group_snapshot = previous_snapshot_groups.get(group_name)
                 active_group_version = self._active_model_group_versions[group_name]
-                group_is_fixed = group_name in fixed_groups
+                group_is_fixed = group_name in fixed_tensor_groups
                 storage_matches_request = group_snapshot is not None and self._storage_matches_request(
                     group_snapshot, device, pin_memory
                 )
@@ -197,13 +197,14 @@ class TensorBackuper:
             {group_name: group_snapshot.version for group_name, group_snapshot in snapshot_groups.items()}
         )
 
-    def backup_active_model(self, tag, *, device="cpu"):
+    def backup_active_model(self, tag, *, device="cpu", reuse=None):
         self.mark_buffers_updated()
         self.backup(
             tag,
             device=device,
             pin_memory=torch.device(device).type == "cpu" and torch.cuda.is_available(),
-            fixed_groups=self.frozen_tensor_groups,
+            fixed_tensor_groups=self.frozen_tensor_groups,
+            reuse=reuse,
         )
 
     def initialize_ema(
@@ -217,12 +218,10 @@ class TensorBackuper:
         max_decay,
         flat_steps,
     ):
-        self.backup(
+        self.backup_active_model(
             tag,
             device=device,
-            pin_memory=torch.device(device).type == "cpu" and torch.cuda.is_available(),
             reuse={group_name: share_frozen_from for group_name in self.frozen_tensor_groups},
-            fixed_groups=self.frozen_tensor_groups,
         )
         self.configure_ema(
             tag,
@@ -234,22 +233,24 @@ class TensorBackuper:
             flat_steps=flat_steps,
         )
 
-    def get(self, tag):
-        """Borrow read-only tensors; copy a tag to retain its mutable weights."""
+    def get(self, tag, *, tensor_groups=None):
+        """Borrow selected tensors read-only; copy a tag to retain its mutable weights."""
+        snapshot_groups = self._snapshots[tag]
+        selected_tensor_groups = snapshot_groups if tensor_groups is None else tensor_groups
         return {
             tensor_name: snapshot_tensor
-            for group_snapshot in self._snapshots[tag].values()
-            for tensor_name, snapshot_tensor in group_snapshot.tensors.items()
+            for group_name in selected_tensor_groups
+            for tensor_name, snapshot_tensor in snapshot_groups[group_name].tensors.items()
         }
 
     @torch.no_grad()
-    def copy(self, *, src_tag, dst_tag, groups=None):
+    def copy(self, *, src_tag, dst_tag, tensor_groups=None):
         if dst_tag in self.ema_states:
             raise ValueError(f"Cannot overwrite EMA tag {dst_tag!r}")
         destination_snapshot_groups = {}
         source_snapshot_groups = self._snapshots[src_tag]
-        selected_groups = source_snapshot_groups if groups is None else groups
-        for group_name in selected_groups:
+        selected_tensor_groups = source_snapshot_groups if tensor_groups is None else tensor_groups
+        for group_name in selected_tensor_groups:
             source_snapshot = source_snapshot_groups[group_name]
             if source_snapshot.fixed:
                 destination_snapshot_groups[group_name] = source_snapshot
@@ -264,12 +265,12 @@ class TensorBackuper:
         self._snapshots[dst_tag] = destination_snapshot_groups
 
     @torch.no_grad()
-    def restore(self, tag, *, groups=None):
+    def restore(self, tag, *, tensor_groups=None):
         target_snapshot_groups = self._snapshots[tag]
-        target_groups = target_snapshot_groups if groups is None else groups
-        groups_to_restore = tuple(
+        target_tensor_groups = target_snapshot_groups if tensor_groups is None else tensor_groups
+        tensor_groups_to_restore = tuple(
             group_name
-            for group_name in target_groups
+            for group_name in target_tensor_groups
             if group_name in self.buffer_groups
             or self._active_model_group_versions[group_name] != target_snapshot_groups[group_name].version
         )
@@ -277,16 +278,12 @@ class TensorBackuper:
         trainable_parameter_names = set(self.trainable_parameter_names)
         for name, parameter in self.active_model_parameters.items():
             parameter.requires_grad_(name in trainable_parameter_names)
-        if not groups_to_restore:
+        if not tensor_groups_to_restore:
             return ()
-        tensors_to_restore = {
-            tensor_name: snapshot_tensor
-            for group_name in groups_to_restore
-            for tensor_name, snapshot_tensor in target_snapshot_groups[group_name].tensors.items()
-        }
+        tensors_to_restore = self.get(tag, tensor_groups=tensor_groups_to_restore)
         active_model_tensors = self._get_active_model_local_tensors(tensors_to_restore)
         buffer_replacements = {}
-        self.mark_weights_updated(groups_to_restore)
+        self.mark_weights_updated(tensor_groups_to_restore)
         try:
             for tensor_name, snapshot_tensor in tensors_to_restore.items():
                 destination = active_model_tensors[tensor_name]
@@ -310,13 +307,13 @@ class TensorBackuper:
         if buffer_replacements:
             self.mark_buffers_updated()
         self._active_model_group_versions.update(
-            {group_name: target_snapshot_groups[group_name].version for group_name in groups_to_restore}
+            {group_name: target_snapshot_groups[group_name].version for group_name in tensor_groups_to_restore}
         )
-        return groups_to_restore
+        return tensor_groups_to_restore
 
-    def mark_weights_updated(self, groups=None):
-        selected_groups = self._tensor_groups if groups is None else groups
-        for group_name in selected_groups:
+    def mark_weights_updated(self, tensor_groups=None):
+        selected_tensor_groups = self._tensor_groups if tensor_groups is None else tensor_groups
+        for group_name in selected_tensor_groups:
             self._active_model_group_versions[group_name] = None
 
     def mark_parameters_with_grad_updated(self):
@@ -343,15 +340,17 @@ class TensorBackuper:
             )
         self.active_model_cpu_storage_as_snapshot(
             tag,
-            groups=tuple(group_name for group_name in self._snapshots[tag] if group_name not in self.buffer_groups),
+            tensor_groups=tuple(
+                group_name for group_name in self._snapshots[tag] if group_name not in self.buffer_groups
+            ),
         )
 
-    def active_model_cpu_storage_as_snapshot(self, tag, *, groups=None):
+    def active_model_cpu_storage_as_snapshot(self, tag, *, tensor_groups=None):
         """Call after the active model has been bound to CPU storage."""
         active_model_tensors = self._get_active_model_local_tensors(None)
         snapshot_groups = self._snapshots[tag]
-        selected_groups = snapshot_groups if groups is None else groups
-        for group_name in selected_groups:
+        selected_tensor_groups = snapshot_groups if tensor_groups is None else tensor_groups
+        for group_name in selected_tensor_groups:
             group_snapshot = snapshot_groups[group_name]
             group_snapshot.replace_storage(
                 {

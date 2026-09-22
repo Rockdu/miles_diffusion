@@ -13,6 +13,7 @@ the snapshot allocation stays unchanged and saved graph buffers remain untouched
 Backup and restore wait once on the current GPU after copying tensors.
 Unchanged parameter-only snapshots and EMA without device moves do not wait.
 Delayed work runs on a non-default stream so an early return is observable.
+Snapshot selection uses tensor_groups; fixed_tensor_groups allows sharing fixed snapshot storage.
 """
 
 from tests.ci.ci_register import register_cuda_ci
@@ -199,15 +200,19 @@ def test_ema_buffer_copies_finish_both_transfer_directions(ema_device):
     }
     if source_device == "cpu":
         live = {name: tensor.pin_memory() for name, tensor in live.items()}
-    groups = {"parameters": ["weight"], "buffers": ["running", "count", "enabled"]}
+    tensor_groups = {"parameters": ["weight"], "buffers": ["running", "count", "enabled"]}
     model = nn.Module()
     model.weight = nn.Parameter(live["weight"])
-    for name in groups["buffers"]:
+    for name in tensor_groups["buffers"]:
         model.register_buffer(name, live[name])
-    backuper = TensorBackuper({"": model}, groups=groups)
+    backuper = TensorBackuper({"": model}, tensor_groups=tensor_groups)
     backuper.backup("ema", device=ema_device, pin_memory=ema_device == "cpu")
     backuper.configure_ema(
-        "ema", tensor_names=groups["parameters"], copy_tensor_names=groups["buffers"], initial_decay=0.5, flat_steps=10
+        "ema",
+        tensor_names=tensor_groups["parameters"],
+        copy_tensor_names=tensor_groups["buffers"],
+        initial_decay=0.5,
+        flat_steps=10,
     )
     shadows = backuper.get("ema")
     pointers = {name: tensor.data_ptr() for name, tensor in shadows.items()}
@@ -221,10 +226,10 @@ def test_ema_buffer_copies_finish_both_transfer_directions(ema_device):
         backuper.mark_weights_updated()
         backuper.update_ema("ema")
         assert stream.query(), "Copied EMA buffers must be complete at return"
-        for name in groups["buffers"]:
+        for name in tensor_groups["buffers"]:
             live[name].zero_()
         backuper.mark_weights_updated(["buffers"])
-        assert backuper.restore("ema", groups=["buffers"]) == ("buffers",)
+        assert backuper.restore("ema", tensor_groups=["buffers"]) == ("buffers",)
         assert stream.query(), "Restored buffers must finish before their source storage is reused"
 
     assert backuper.ema_states["ema"].update_count == 1
@@ -237,7 +242,7 @@ def test_ema_buffer_copies_finish_both_transfer_directions(ema_device):
         "enabled": torch.tensor(True),
     }.items():
         torch.testing.assert_close(shadows[name].cpu(), expected, rtol=0, atol=0)
-        if name in groups["buffers"]:
+        if name in tensor_groups["buffers"]:
             restored = model.get_buffer(name)
             assert restored is not live[name]
             assert restored.is_pinned() == live[name].is_pinned()
@@ -247,13 +252,13 @@ def test_ema_buffer_copies_finish_both_transfer_directions(ema_device):
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_unchanged_snapshots_do_not_wait(monkeypatch, device):
     _, backuper = _make_backuper(device)
-    backuper.backup("cpu_snapshot", device="cpu", pin_memory=True, fixed_groups=["base"])
+    backuper.backup("cpu_snapshot", device="cpu", pin_memory=True, fixed_tensor_groups=["base"])
 
     def unexpected_wait(*args, **kwargs):
         raise AssertionError("Unchanged snapshots require no CUDA wait")
 
     monkeypatch.setattr(torch.cuda, "synchronize", unexpected_wait)
-    backuper.backup("cpu_snapshot", device="cpu", pin_memory=True, fixed_groups=["base"])
+    backuper.backup("cpu_snapshot", device="cpu", pin_memory=True, fixed_tensor_groups=["base"])
     assert backuper.restore("cpu_snapshot") == ()
     backuper.backup("reused", reuse={"base": "cpu_snapshot"})
     assert backuper.restore("reused") == ()

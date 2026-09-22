@@ -6,7 +6,7 @@
                                          |                      + same version
                                   shared fixed base
 
-    Snapshot tests: fixed-base reuse, partial restores, independent mutable copies
+    Snapshot tests: fixed-base reuse, selected reads/restores, independent mutable copies
     Storage tests:  reusable mutable buffers; fresh storage for changed fixed groups
     EMA tests:      independent clocks/domains; updates keep snapshot allocations
                     parameters average; float/int/bool buffers copy without averaging
@@ -25,6 +25,7 @@ Callers bind model containers, keep schemas fixed, and mark external writes.
 The backuper resolves fresh local views without replacing Parameters.
 PEFT switches and FSDP caches are outside this tensor-only suite.
 An incomplete copy is fatal to the training operation.
+Snapshot selection uses tensor_groups; fixed_tensor_groups allows sharing fixed snapshot storage.
 """
 
 from tests.ci.ci_register import register_cpu_ci
@@ -61,12 +62,12 @@ def _make_grouped_weights(*, requests=None):
         "transformer.lora_A": torch.tensor([[0.5, 1.0]], dtype=torch.float64),
         "transformer.lora_B": torch.tensor([[1.5], [2.0]], dtype=torch.float64),
     }
-    groups = {"base": ["transformer.weight"], "lora": ["transformer.lora_A", "transformer.lora_B"]}
+    tensor_groups = {"base": ["transformer.weight"], "lora": ["transformer.lora_A", "transformer.lora_B"]}
 
     model = nn.ParameterDict(
         {name.removeprefix("transformer."): nn.Parameter(tensor) for name, tensor in live.items()}
     )
-    backuper = TensorBackuper({"transformer": model}, groups=groups)
+    backuper = TensorBackuper({"transformer": model}, tensor_groups=tensor_groups)
     if requests is not None:
         get_local_tensors = backuper._get_active_model_local_tensors
 
@@ -76,17 +77,17 @@ def _make_grouped_weights(*, requests=None):
             return get_local_tensors(selected)
 
         backuper._get_active_model_local_tensors = record_tensor_access
-    return live, groups, backuper
+    return live, tensor_groups, backuper
 
 
 def test_shared_fixed_base_reads_only_changed_adapter_and_copied_versions_skip_restore():
     requests = []
-    live, groups, backuper = _make_grouped_weights(requests=requests)
+    live, tensor_groups, backuper = _make_grouped_weights(requests=requests)
     initial = _clone_tensor_mapping(live)
-    backuper.backup("initial", fixed_groups=["base"])
-    for name in groups["lora"]:
+    backuper.backup("initial", fixed_tensor_groups=["base"])
+    for name in tensor_groups["lora"]:
         live[name].add_(2)
-    backuper.mark_weights_updated(groups=["lora"])
+    backuper.mark_weights_updated(tensor_groups=["lora"])
     trained = _clone_tensor_mapping(live)
     requests.clear()
     backuper.backup("actor", reuse={"base": "initial"})
@@ -94,7 +95,7 @@ def test_shared_fixed_base_reads_only_changed_adapter_and_copied_versions_skip_r
     _assert_tensor_mapping(live, initial)
     assert backuper.restore("actor") == ("lora",)
     _assert_tensor_mapping(live, trained)
-    assert requests == [tuple(groups["lora"])] * 3
+    assert requests == [tuple(tensor_groups["lora"])] * 3
 
     requests.clear()
     backuper.copy(src_tag="actor", dst_tag="same_weights")
@@ -106,63 +107,66 @@ def test_shared_fixed_base_reads_only_changed_adapter_and_copied_versions_skip_r
 
 
 def test_reuse_requires_fixed_group_with_current_live_version():
-    live, groups, backuper = _make_grouped_weights()
-    backuper.backup("initial", fixed_groups=["base"])
+    live, tensor_groups, backuper = _make_grouped_weights()
+    backuper.backup("initial", fixed_tensor_groups=["base"])
     with pytest.raises(ValueError):
         backuper.backup("invalid", reuse={"lora": "initial"})
-    live[groups["base"][0]].add_(10)
+    live[tensor_groups["base"][0]].add_(10)
     backuper.mark_weights_updated(["base"])
     with pytest.raises(ValueError):
         backuper.backup("invalid", reuse={"base": "initial"})
-    backuper.backup("teacher", fixed_groups=["base"])
+    backuper.backup("teacher", fixed_tensor_groups=["base"])
     assert backuper._snapshots["initial"]["base"].version != backuper._snapshots["teacher"]["base"].version
-    assert backuper.restore("initial", groups=["base"]) == ("base",)
-    assert backuper.restore("teacher", groups=["lora"]) == ()
-    assert backuper.restore("teacher", groups=["base"]) == ("base",)
+    assert backuper.restore("initial", tensor_groups=["base"]) == ("base",)
+    assert backuper.restore("teacher", tensor_groups=["lora"]) == ()
+    assert backuper.restore("teacher", tensor_groups=["base"]) == ("base",)
     assert backuper.restore("teacher") == ()
 
 
 def test_partial_restore_preserves_resident_adapter():
-    live, groups, backuper = _make_grouped_weights()
-    backuper.backup("actor", fixed_groups=["base"])
+    live, tensor_groups, backuper = _make_grouped_weights()
+    backuper.backup("actor", fixed_tensor_groups=["base"])
     for value in live.values():
         value.add_(10)
     backuper.mark_weights_updated()
-    backuper.backup("teacher", fixed_groups=["base"])
-    adapter = {name: live[name].clone() for name in groups["lora"]}
-    assert backuper.restore("actor", groups=["base"]) == ("base",)
-    _assert_tensor_mapping({name: live[name] for name in groups["lora"]}, adapter)
-    assert backuper.restore("teacher", groups=["lora"]) == ()
-    assert backuper.restore("actor", groups=["lora"]) == ("lora",)
+    backuper.backup("teacher", fixed_tensor_groups=["base"])
+    selected = backuper.get("teacher", tensor_groups=["base"])
+    assert set(selected) == set(tensor_groups["base"])
+    assert all(tensor is backuper.get("teacher")[name] for name, tensor in selected.items())
+    adapter = {name: live[name].clone() for name in tensor_groups["lora"]}
+    assert backuper.restore("actor", tensor_groups=["base"]) == ("base",)
+    _assert_tensor_mapping({name: live[name] for name in tensor_groups["lora"]}, adapter)
+    assert backuper.restore("teacher", tensor_groups=["lora"]) == ()
+    assert backuper.restore("actor", tensor_groups=["lora"]) == ("lora",)
     assert backuper.restore("actor") == ()
 
 
 def test_mutable_copies_are_immediately_independent_and_refresh_reuses_buffers():
     requests = []
-    live, groups, backuper = _make_grouped_weights(requests=requests)
-    backuper.backup("actor", device="cpu", fixed_groups=["base"])
+    live, tensor_groups, backuper = _make_grouped_weights(requests=requests)
+    backuper.backup("actor", device="cpu", fixed_tensor_groups=["base"])
     backuper.copy(src_tag="actor", dst_tag="reference")
     reference = _clone_tensor_mapping(backuper.get("reference"))
     pointers = {name: tensor.data_ptr() for name, tensor in backuper.get("actor").items()}
-    for name in groups["lora"]:
+    for name in tensor_groups["lora"]:
         assert pointers[name] != backuper.get("reference")[name].data_ptr()
     requests.clear()
-    backuper.backup("actor", device="cpu", fixed_groups=["base"])
+    backuper.backup("actor", device="cpu", fixed_tensor_groups=["base"])
     assert not requests
-    for name in groups["lora"]:
+    for name in tensor_groups["lora"]:
         live[name].add_(3)
     backuper.mark_weights_updated(["lora"])
-    backuper.backup("actor", device="cpu", fixed_groups=["base"])
-    assert requests == [tuple(groups["lora"])]
+    backuper.backup("actor", device="cpu", fixed_tensor_groups=["base"])
+    assert requests == [tuple(tensor_groups["lora"])]
     assert {name: tensor.data_ptr() for name, tensor in backuper.get("actor").items()} == pointers
     _assert_tensor_mapping(backuper.get("reference"), reference)
     _assert_tensor_mapping(backuper.get("actor"), live)
 
     # Updating a formerly fixed group allocates storage without changing its copies.
-    live[groups["base"][0]].add_(5)
+    live[tensor_groups["base"][0]].add_(5)
     backuper.mark_weights_updated(["base"])
-    backuper.backup("actor", device="cpu", fixed_groups=["base"])
-    assert backuper.get("actor")[groups["base"][0]].data_ptr() != pointers[groups["base"][0]]
+    backuper.backup("actor", device="cpu", fixed_tensor_groups=["base"])
+    assert backuper.get("actor")[tensor_groups["base"][0]].data_ptr() != pointers[tensor_groups["base"][0]]
     _assert_tensor_mapping(backuper.get("reference"), reference)
     backuper.release("actor")
     assert backuper.backup_tags == ("reference",)
@@ -174,15 +178,15 @@ def test_mutable_copies_are_immediately_independent_and_refresh_reuses_buffers()
 def test_empty_groups_and_component_names_are_supported(empty_group):
     live = {"audio.weight": torch.tensor([1.0]), "video.weight": torch.tensor([2.0])}
     nonempty_group = "lora" if empty_group == "base" else "base"
-    groups = {empty_group: [], nonempty_group: list(live)}
+    tensor_groups = {empty_group: [], nonempty_group: list(live)}
     models = {
         component: nn.ParameterDict({"weight": nn.Parameter(live[f"{component}.weight"])})
         for component in ("audio", "video")
     }
-    backuper = TensorBackuper(models, groups=groups)
+    backuper = TensorBackuper(models, tensor_groups=tensor_groups)
     backuper.backup("original")
     live["audio.weight"].add_(7)
-    backuper.mark_weights_updated(groups=[nonempty_group])
+    backuper.mark_weights_updated(tensor_groups=[nonempty_group])
     assert backuper.restore("original") == (nonempty_group,)
     assert live["audio.weight"].item() == 1
     assert live["video.weight"].item() == 2
@@ -212,22 +216,22 @@ def test_model_binding_resolves_changed_parameter_storage_and_replaced_buffers()
 
 
 def test_ema_updates_keep_allocations_and_copies_independent():
-    live, groups, backuper = _make_grouped_weights()
-    backuper.backup("actor", fixed_groups=["base"])
+    live, tensor_groups, backuper = _make_grouped_weights()
+    backuper.backup("actor", fixed_tensor_groups=["base"])
     backuper.copy(src_tag="actor", dst_tag="ema")
-    backuper.configure_ema("ema", tensor_names=groups["lora"], decay_ramp=0.5, max_decay=0.5)
+    backuper.configure_ema("ema", tensor_names=tensor_groups["lora"], decay_ramp=0.5, max_decay=0.5)
     backuper.copy(src_tag="ema", dst_tag="reference")
     assert "reference" not in backuper.ema_states
     initial = _clone_tensor_mapping(live)
     pointers = {name: tensor.data_ptr() for name, tensor in backuper.get("ema").items()}
-    for name in groups["lora"]:
+    for name in tensor_groups["lora"]:
         assert pointers[name] != backuper.get("reference")[name].data_ptr()
         live[name].add_(4)
     backuper.mark_weights_updated(["lora"])
     backuper.backup("actor", reuse={"base": "reference"})
     trained = _clone_tensor_mapping(live)
     backuper.update_ema("ema")
-    expected = {name: initial[name] + (2 if name in groups["lora"] else 0) for name in live}
+    expected = {name: initial[name] + (2 if name in tensor_groups["lora"] else 0) for name in live}
     assert backuper.restore("ema") == ("lora",)
     _assert_tensor_mapping(live, expected)
     # EMA mutation makes a previously resident version stale, even at equal values.
@@ -248,13 +252,18 @@ def test_ema_updates_keep_allocations_and_copies_independent():
 
 def test_ema_tags_keep_independent_schedules_and_parameter_domains():
     requests = []
-    live, groups, backuper = _make_grouped_weights(requests=requests)
+    live, tensor_groups, backuper = _make_grouped_weights(requests=requests)
     initial = _clone_tensor_mapping(live)
     backuper.backup("reference")
     backuper.copy(src_tag="reference", dst_tag="adapter_average")
     backuper.copy(src_tag="reference", dst_tag="full_average")
     backuper.configure_ema(
-        "adapter_average", tensor_names=groups["lora"], initial_decay=0.25, decay_ramp=0.2, max_decay=0.5, flat_steps=2
+        "adapter_average",
+        tensor_names=tensor_groups["lora"],
+        initial_decay=0.25,
+        decay_ramp=0.2,
+        max_decay=0.5,
+        flat_steps=2,
     )
     backuper.configure_ema("full_average", decay_ramp=0.75, max_decay=0.75)
     expected_adapter = _clone_tensor_mapping(initial)
@@ -265,8 +274,8 @@ def test_ema_tags_keep_independent_schedules_and_parameter_domains():
         backuper.mark_weights_updated()
         requests.clear()
         assert backuper.update_ema("adapter_average") == expected_decay
-        assert requests == [tuple(groups["lora"])]
-        for name in groups["lora"]:
+        assert requests == [tuple(tensor_groups["lora"])]
+        for name in tensor_groups["lora"]:
             expected_adapter[name].mul_(expected_decay).add_(live[name], alpha=1.0 - expected_decay)
         if step == 3:
             assert backuper.update_ema("full_average") == 0.75
@@ -279,7 +288,7 @@ def test_ema_tags_keep_independent_schedules_and_parameter_domains():
     _assert_tensor_mapping(backuper.get("reference"), initial)
     with pytest.raises(ValueError, match="already configured"):
         backuper.configure_ema("adapter_average")
-    backuper.backup("fixed", fixed_groups=["base"])
+    backuper.backup("fixed", fixed_tensor_groups=["base"])
     with pytest.raises(ValueError, match="[Ff]ixed"):
         backuper.configure_ema("fixed")
 
@@ -290,19 +299,19 @@ def test_buffer_restore_preserves_pending_backward_aliases_and_parameter_version
     model.register_buffer("running", torch.tensor([2.0]))
     model.alias = nn.Module()
     model.alias.register_buffer("running", model.running, persistent=False)
-    groups = {"parameters": list(dict(model.named_parameters())), "buffers": buffer_names}
-    backuper = TensorBackuper({"": model}, groups=groups)
+    tensor_groups = {"parameters": list(dict(model.named_parameters())), "buffers": buffer_names}
+    backuper = TensorBackuper({"": model}, tensor_groups=tensor_groups)
     backuper.backup("actor", device="cpu")
     parameter_version = backuper._active_model_group_versions["parameters"]
     original_buffer = model.running
-    assert backuper.restore("actor", groups=["buffers"]) == ("buffers",)
+    assert backuper.restore("actor", tensor_groups=["buffers"]) == ("buffers",)
     assert model.running is model.alias.running
     assert model.running is not original_buffer
 
     # The actor snapshot is stale; reference must capture the live buffer instead.
     model.running.fill_(7.0)
     backuper.mark_weights_updated(["buffers"])
-    backuper.backup("reference", groups=["buffers"])
+    backuper.backup("reference", tensor_groups=["buffers"])
     reference = backuper.get("reference")
     assert set(reference) == set(buffer_names)
     assert reference["running"].item() == 7.0
@@ -322,13 +331,13 @@ def test_buffer_restore_preserves_pending_backward_aliases_and_parameter_version
     model.running.add_(10.0)
     assert original_buffer.item() == 9.0
     assert reference["running"].item() == 7.0
-    assert backuper.restore("actor", groups=["buffers"]) == ("buffers",)
+    assert backuper.restore("actor", tensor_groups=["buffers"]) == ("buffers",)
     assert model.running is model.alias.running
     assert model.running.item() == 2.0
     assert "running" not in model.alias.state_dict()
     assert original_buffer.item() == 9.0
     model.weight.requires_grad_(False)
-    assert backuper.restore("actor", groups=["parameters"]) == ()
+    assert backuper.restore("actor", tensor_groups=["parameters"]) == ()
     assert model.weight.requires_grad
     pending_loss.backward()
     torch.testing.assert_close(model.weight.grad, torch.full_like(model.weight, 9.0))
@@ -343,28 +352,28 @@ def test_ema_copies_buffer_values_and_selective_snapshots_keep_reference_state(e
         "count": torch.tensor(0),
         "enabled": torch.tensor(False),
     }
-    groups = {"parameters": ["weight"], "buffers": ["running", "count", "enabled"]}
+    tensor_groups = {"parameters": ["weight"], "buffers": ["running", "count", "enabled"]}
     model = nn.Module()
     model.weight = nn.Parameter(live["weight"])
-    for name in groups["buffers"]:
+    for name in tensor_groups["buffers"]:
         model.register_buffer(name, live[name])
-    backuper = TensorBackuper({"": model}, groups=groups)
+    backuper = TensorBackuper({"": model}, tensor_groups=tensor_groups)
     initial = _clone_tensor_mapping(live)
     backuper.backup("reference")
-    backuper.copy(src_tag="reference", dst_tag="buffer_reference", groups=["buffers"])
+    backuper.copy(src_tag="reference", dst_tag="buffer_reference", tensor_groups=["buffers"])
     buffer_reference = backuper.get("buffer_reference")
-    assert set(buffer_reference) == set(groups["buffers"])
+    assert set(buffer_reference) == set(tensor_groups["buffers"])
     assert (
         backuper._snapshots["buffer_reference"]["buffers"].version
         == backuper._snapshots["reference"]["buffers"].version
     )
-    for name in groups["buffers"]:
+    for name in tensor_groups["buffers"]:
         assert buffer_reference[name].data_ptr() != backuper.get("reference")[name].data_ptr()
 
     backuper.copy(src_tag="reference", dst_tag="ema")
     selection = {}
     if ema_selection == "explicit-split":
-        selection = {"tensor_names": groups["parameters"], "copy_tensor_names": groups["buffers"]}
+        selection = {"tensor_names": tensor_groups["parameters"], "copy_tensor_names": tensor_groups["buffers"]}
     elif ema_selection == "all-tensors":
         selection = {"tensor_names": tuple(live)}
     backuper.configure_ema("ema", **selection, initial_decay=0.5, flat_steps=10)
@@ -391,10 +400,10 @@ def test_ema_copies_buffer_values_and_selective_snapshots_keep_reference_state(e
         for buffer in model.buffers():
             buffer.zero_()
         backuper.mark_weights_updated(["buffers"])
-        assert backuper.restore("ema", groups=["buffers"]) == ("buffers",)
-        _assert_tensor_mapping(dict(model.named_buffers()), _select_tensors(expected, groups["buffers"]))
-        assert backuper.restore("buffer_reference", groups=["buffers"]) == ("buffers",)
-        _assert_tensor_mapping(dict(model.named_buffers()), _select_tensors(initial, groups["buffers"]))
+        assert backuper.restore("ema", tensor_groups=["buffers"]) == ("buffers",)
+        _assert_tensor_mapping(dict(model.named_buffers()), _select_tensors(expected, tensor_groups["buffers"]))
+        assert backuper.restore("buffer_reference", tensor_groups=["buffers"]) == ("buffers",)
+        _assert_tensor_mapping(dict(model.named_buffers()), _select_tensors(initial, tensor_groups["buffers"]))
         torch.testing.assert_close(live["weight"], initial["weight"] + 4 * step, rtol=0, atol=0)
 
 
@@ -435,7 +444,7 @@ def test_restore_preserves_pending_backward_and_adam_against_independent_model(l
     actor = _TinyLoRA() if lora else nn.Sequential(nn.Linear(4, 5), nn.Tanh(), nn.Linear(5, 3)).double()
     reference = copy.deepcopy(actor).requires_grad_(False)
     names = [name for name, _ in actor.named_parameters()]
-    groups = (
+    tensor_groups = (
         {
             "base": [name for name in names if not name.startswith("lora_")],
             "lora": [name for name in names if name.startswith("lora_")],
@@ -443,8 +452,8 @@ def test_restore_preserves_pending_backward_and_adam_against_independent_model(l
         if lora
         else {"base": names}
     )
-    backuper = TensorBackuper({"": actor}, groups=groups)
-    backuper.backup("reference", fixed_groups=["base"] if lora else [])
+    backuper = TensorBackuper({"": actor}, tensor_groups=tensor_groups)
+    backuper.backup("reference", fixed_tensor_groups=["base"] if lora else [])
     with torch.no_grad():
         for parameter in actor.parameters():
             if parameter.requires_grad:

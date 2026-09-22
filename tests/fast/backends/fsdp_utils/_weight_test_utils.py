@@ -1,6 +1,7 @@
 """Load production actor operations without importing Ray or diffusion pipelines.
 
 Reference helpers enter the production _use_model scope; they do not implement switching.
+Snapshot selection uses tensor_groups; fixed_tensor_groups allows sharing fixed snapshot storage.
 """
 
 import ast
@@ -85,7 +86,7 @@ def backup_actor_weights(actor):
         "actor",
         device="cpu",
         pin_memory=torch.cuda.is_available(),
-        fixed_groups=actor.tensor_backuper.frozen_tensor_groups,
+        fixed_tensor_groups=actor.tensor_backuper.frozen_tensor_groups,
     )
 
 

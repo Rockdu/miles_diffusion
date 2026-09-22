@@ -245,7 +245,7 @@ class FSDPTrainRayActor(TrainRayActor):
         if self.args.ref_mode == "lora_base":
             self.tensor_backuper.backup(
                 "lora_base",
-                groups=self.tensor_backuper.buffer_groups,
+                tensor_groups=self.tensor_backuper.buffer_groups,
                 reuse={group: "actor" for group in self.tensor_backuper.frozen_tensor_groups},
             )
         if self.args.use_ema:

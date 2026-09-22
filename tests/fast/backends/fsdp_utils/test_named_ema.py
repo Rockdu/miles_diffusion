@@ -41,6 +41,7 @@ models check restored values and optimizer state. Training owns the EMA update;
 the driver waits for training before saving and publication. Train-only updates
 need no publisher, while failed training and rollout-only debugging leave EMA unchanged.
 The CPU sleep probe stubs the CUDA fence; GPU lifecycle tests cover transfers.
+Snapshot selection uses tensor_groups; fixed_tensor_groups allows sharing fixed snapshot storage.
 """
 
 from tests.ci.ci_register import register_cpu_ci
@@ -140,7 +141,9 @@ def test_lora_base_restores_shared_base_after_dense_teacher_without_ema_or_offlo
     if with_buffers:
         model.count.fill_(7)
     backuper.mark_weights_updated(("base", *harness.tensor_backuper.buffer_groups))
-    backuper.backup("teacher", groups=("base", *harness.tensor_backuper.buffer_groups), fixed_groups=("base",))
+    backuper.backup(
+        "teacher", tensor_groups=("base", *harness.tensor_backuper.buffer_groups), fixed_tensor_groups=("base",)
+    )
     harness._switch_model("actor")
     model.lora_A["default"].data.add_(0.25)
     backuper.mark_weights_updated(("lora",))
@@ -255,12 +258,12 @@ def test_component_groups_keep_independent_backups_and_one_ema_clock(use_lora):
                 assert backuper._snapshots["actor"][f"{name}.base"] is backuper._snapshots["ema"][f"{name}.base"]
 
         # The tensor layer can restore one component without changing its peer.
-        component_groups = (f"{component}.base", f"{component}.lora")
-        backuper.restore("ref", groups=component_groups)
+        component_tensor_groups = (f"{component}.base", f"{component}.lora")
+        backuper.restore("ref", tensor_groups=component_tensor_groups)
         for name, parameter in parameters.items():
             expected = initial[name] if name.startswith(f"{component}.") else live[name]
             torch.testing.assert_close(parameter, expected, rtol=0, atol=0)
-        backuper.restore("actor", groups=component_groups)
+        backuper.restore("actor", tensor_groups=component_tensor_groups)
         for name, parameter in components.named_parameters():
             assert parameter is parameters[name]
             torch.testing.assert_close(parameter, live[name], rtol=0, atol=0)

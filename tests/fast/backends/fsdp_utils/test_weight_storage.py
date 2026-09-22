@@ -15,6 +15,7 @@ The real sleep entry refreshes and binds two components with identical local nam
 The model-bound backuper resolves the current buffers after wake replaces them.
 A CPU clone models wake's allocation of independent storage. Actual CUDA moves
 and pinned allocations require the GPU lifecycle regression.
+Snapshot selection uses tensor_groups; fixed_tensor_groups allows sharing fixed snapshot storage.
 """
 
 from tests.ci.ci_register import register_cpu_ci
@@ -87,7 +88,10 @@ def test_sleep_preserves_parameters_gradients_optimizer_and_actor_snapshot(cpu_m
     bind_fsdp_model_to_cpu_snapshot(model, snapshots, pin_memory=False)
     harness.tensor_backuper.active_model_cpu_storage_as_snapshot(
         "actor",
-        groups=(*harness.tensor_backuper.trainable_tensor_groups, *harness.tensor_backuper.frozen_tensor_groups),
+        tensor_groups=(
+            *harness.tensor_backuper.trainable_tensor_groups,
+            *harness.tensor_backuper.frozen_tensor_groups,
+        ),
     )
     snapshots = harness.tensor_backuper.get("actor")
 
