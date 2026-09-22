@@ -40,6 +40,7 @@ from .lr_scheduler import get_lr_scheduler
 from .metrics import new_metric_buffer
 from .mixed_precision import parse_dtype_from_str
 from .model_loader import load_fsdp_models
+from .offload import move_optimizer, offload_model, onload_model
 from .parallel import create_fsdp_parallel_state
 
 logger = logging.getLogger(__name__)
@@ -83,9 +84,6 @@ class FSDPTrainRayActor(TrainRayActor):
 
         if self.args.debug_rollout_only:
             return 0
-
-        if self.args.offload_train and self.args.fsdp_cpu_offload:
-            self.args.offload_train = False
 
         if dist.get_rank() == 0:
             init_tracking(args, primary=False)
@@ -195,9 +193,11 @@ class FSDPTrainRayActor(TrainRayActor):
             return
 
         print_memory("before offload DiT")
+        self.optimizer.zero_grad(set_to_none=True)
 
-        self.model.cpu()
-        move_torch_optimizer(self.optimizer, "cpu")
+        for model in self.models.values():
+            offload_model(model)
+        move_optimizer(self.optimizer, "cpu")
         clear_memory()
         dist.barrier(group=get_gloo_group())
         print_memory("after sleep DiT")
@@ -207,8 +207,10 @@ class FSDPTrainRayActor(TrainRayActor):
         if not self.args.offload_train:
             return
 
-        self.model.cuda()
-        move_torch_optimizer(self.optimizer, "cuda")
+        for model in self.models.values():
+            onload_model(model, cpu_offload=self.args.fsdp_cpu_offload)
+        if not self.args.fsdp_cpu_offload:
+            move_optimizer(self.optimizer, "cuda")
         dist.barrier(group=get_gloo_group())
         print_memory("after wake_up DiT")
 
@@ -514,19 +516,3 @@ class FSDPTrainRayActor(TrainRayActor):
             write_old_log_prob=write_old_log_prob,
             old_log_prob_from_new=old_log_prob_from_new,
         )
-
-
-@torch.no_grad()
-def move_torch_optimizer(optimizer, device):
-    """ref: https://github.com/volcengine/verl/blob/main/verl/utils/fsdp_utils.py"""
-    if not optimizer.state:
-        return
-
-    for param_group in optimizer.param_groups:
-        for param in param_group["params"]:
-            state = optimizer.state[param]
-            for key, value in state.items():
-                if isinstance(value, torch.Tensor):
-                    state[key] = value.to(device, non_blocking=True)
-
-    torch.cuda.synchronize()
