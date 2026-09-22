@@ -311,6 +311,7 @@ class FSDPTrainRayActor(TrainRayActor):
             # CPU shards may still be read by asynchronous FSDP H2D copies.
             torch.cuda.synchronize()
         self.tensor_backuper.restore(target_tag)
+        # Discard cached all-gathered parameters so the next forward uses the restored shards.
         for module in self.model.modules():
             if isinstance(module, FSDPModule):
                 module.reshard()
