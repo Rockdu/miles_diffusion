@@ -1127,10 +1127,11 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "--ema-rollout-policy",
                 type=str,
                 choices=["live", "ema"],
-                default="live",
+                default=None,
                 help=(
                     "Which trainable weights to push to rollout after each rollout_end when "
-                    "--use-ema is set: live weights, or the EMA copy (pi_old)."
+                    "--use-ema is set: live weights, or the EMA copy (pi_old). Defaults to ema "
+                    "with --use-ema and live otherwise."
                 ),
             )
             parser.add_argument(
@@ -1589,6 +1590,9 @@ def set_default_diffusion_args(args) -> None:
             args.ref_mode = "lora_base"
         else:
             args.ref_mode = "none"
+
+    if args.ema_rollout_policy is None:
+        args.ema_rollout_policy = "ema" if args.use_ema else "live"
 
 
 def validate_reference_model_args(args) -> None:

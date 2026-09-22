@@ -8,6 +8,7 @@
 
 This default once lived on a renamed argparse dest and silently stopped applying, which
 flipped multi-GPU engines to SP+CFG and degraded sampling; these tests pin the semantics.
+Fixtures leave EMA disabled while the shared diffusion defaults are resolved.
 """
 
 from tests.ci.ci_register import register_cpu_ci
@@ -33,6 +34,8 @@ def _args(**overrides):
         custom_loss_function_path=None,
         ref_mode="none",
         diffusion_kl_beta=0.0,
+        use_ema=False,
+        ema_rollout_policy=None,
     )
     base.update(overrides)
     return Namespace(**base)

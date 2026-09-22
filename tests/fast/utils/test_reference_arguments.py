@@ -2,6 +2,7 @@
 
     actor: full / LoRA ---> ref: base / base + LoRA, teacher: base / base + LoRA
     actor: LoRA        ---> lora_base: reuse actor with its adapter disabled
+    use_ema            ---> default EMA rollout; explicit live remains live
     actor LoRA enabled --> adapter config --> checkpoint A/B support + uniform IPC scaling + CLI r/alpha match
 
 Validation rejects incomplete role sources and unused options without changing args.
@@ -16,7 +17,11 @@ from argparse import Namespace
 import pytest
 from peft import LoraConfig
 
-from miles.utils.arguments import validate_actor_lora_adapter, validate_reference_model_args
+from miles.utils.arguments import (
+    set_default_diffusion_args,
+    validate_actor_lora_adapter,
+    validate_reference_model_args,
+)
 
 
 def _args(**overrides):
@@ -90,6 +95,16 @@ def test_incomplete_model_roles_are_rejected(overrides, message):
     with pytest.raises(ValueError, match=message):
         validate_reference_model_args(args)
     assert vars(args) == original
+
+
+@pytest.mark.parametrize(
+    ("use_ema", "explicit_policy", "expected_policy"),
+    [(False, None, "live"), (True, None, "ema"), (True, "live", "live"), (True, "ema", "ema")],
+)
+def test_ema_rollout_defaults_preserve_explicit_policy(use_ema, explicit_policy, expected_policy):
+    args = _args(use_ema=use_ema, ema_rollout_policy=explicit_policy)
+    set_default_diffusion_args(args)
+    assert args.ema_rollout_policy == expected_policy
 
 
 def test_loaded_adapter_matching_actor_cli_passes_without_changing_args(tmp_path):
