@@ -10,6 +10,7 @@ import torch.distributed as dist
 
 from . import checkpoint
 from .mixed_precision import compile_param_dtype_maps, parse_dtype_from_str
+from .offload import offload_model
 from .sequence_parallel.plan import apply_sequence_parallel
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,8 @@ def load_fsdp_models(
                 model_backend.sequence_parallel_plan(model),
                 model_backend.install_sequence_parallel_attention,
             )
+        if args.offload_train:
+            offload_model(model)
         models[component] = model
     return models
 
