@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import warnings
 from argparse import Namespace
@@ -13,77 +15,71 @@ from .sequence_parallel.plan import apply_sequence_parallel
 logger = logging.getLogger(__name__)
 
 
-def load_fsdp_models(args: Namespace, model_backend, train_pipeline_config, parallel_state, *, master_dtype):
-    rank = dist.get_rank()
-    materialize_weights = rank == 0
-
-    models: dict[str, torch.nn.Module] = {}
+def load_fsdp_models(
+    args: Namespace,
+    model_backend,
+    train_pipeline_config,
+    parallel_state,
+    *,
+    checkpoint_path: str,
+    trainable: bool = False,
+    cpu_offload: bool = False,
+) -> dict[str, torch.nn.Module]:
+    materialize_weights = dist.get_rank() == 0
+    master_dtype = parse_dtype_from_str(args.fsdp_master_dtype)
+    models = {}
     for component in args.update_weight_target_modules:
-        # per raw component (wan2.2 has two transformers), before LoRA/FSDP wrap
         with model_init_context(materialize_weights=materialize_weights):
             model = model_backend.load_component(
                 component,
-                args,
+                checkpoint_path=checkpoint_path,
                 master_dtype=master_dtype,
                 materialize_weights=materialize_weights,
             )
         if args.fsdp_attention_backend is not None:
             model_backend.set_attention_backend(model, args.fsdp_attention_backend)
-
-        # Enable checkpointing on the raw model before PEFT wraps it. The flag
-        # is consumed when transformer blocks run, so LoRA layers inserted
-        # below remain inside the checkpointed block forward.
-        if args.gradient_checkpointing:
+        if trainable and args.gradient_checkpointing:
             model_backend.enable_gradient_checkpointing(model)
-
-        if args.use_lora:
+        if trainable and args.use_lora:
             model = apply_lora(model, args, train_pipeline_config)
+        model.train(trainable)
+        if not trainable:
+            model.requires_grad_(False)
 
-        model.train()
-
-        if rank != 0 and any(not parameter.is_meta for parameter in model.parameters()):
+        if not materialize_weights and any(not parameter.is_meta for parameter in model.parameters()):
             raise RuntimeError(f"{component} did not honor meta initialization")
         checkpoint.sync_model_dtypes(model)
-        full_state = model.state_dict() if rank == 0 else {}
+        full_state = model.state_dict() if materialize_weights else {}
         model = apply_fsdp2(
             model,
             model_backend.fsdp_parallel_plan(model),
             mesh=parallel_state.get_mesh("fsdp"),
-            cpu_offload=args.fsdp_cpu_offload,
+            cpu_offload=cpu_offload,
             args=args,
         )
-        checkpoint.broadcast_full_state_to_fsdp(
-            model,
-            full_state,
-            cpu_offload=args.fsdp_cpu_offload,
-        )
+        checkpoint.broadcast_full_state_to_fsdp(model, full_state, cpu_offload=cpu_offload)
         del full_state
         train_pipeline_config.postprocess_model_after_materialize(model)
-        models[component] = model
-
-    if parallel_state.get_optional_mesh("sp") is not None:
-        for model in models.values():
-            plan = model_backend.sequence_parallel_plan(model)
+        if parallel_state.get_optional_mesh("sp") is not None:
             apply_sequence_parallel(
                 model,
                 parallel_state,
-                plan,
+                model_backend.sequence_parallel_plan(model),
                 model_backend.install_sequence_parallel_attention,
             )
+        models[component] = model
     return models
 
 
 @contextmanager
 def model_init_context(*, materialize_weights: bool):
-    """Build real CPU weights on rank 0 and meta weights elsewhere."""
     if materialize_weights:
         with torch.device("cpu"):
             yield
         return
-
     from accelerate import init_empty_weights
 
-    # Some models compute buffer values during __init__, which cannot run on meta.
+    # Some constructors compute buffer values and cannot initialize them on meta.
     with init_empty_weights(include_buffers=False), warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",

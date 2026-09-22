@@ -93,7 +93,6 @@ class FSDPTrainRayActor(TrainRayActor):
         if self.args.start_rollout_id is None:
             self.args.start_rollout_id = 0
 
-        self._master_dtype = parse_dtype_from_str(args.fsdp_master_dtype)
         self._forward_dtype = parse_dtype_from_str(args.diffusion_forward_dtype)
 
         from miles.utils.misc import load_function
@@ -106,9 +105,14 @@ class FSDPTrainRayActor(TrainRayActor):
             self.model_backend.enable_deterministic_attention(args.fsdp_attention_backend)
         self.scheduler = self.model_backend.load_scheduler(args)
         self.models = load_fsdp_models(
-            args, self.model_backend, self.train_pipeline_config, self.parallel_state, master_dtype=self._master_dtype
+            args,
+            self.model_backend,
+            self.train_pipeline_config,
+            self.parallel_state,
+            checkpoint_path=args.hf_checkpoint,
+            trainable=True,
+            cpu_offload=args.fsdp_cpu_offload,
         )
-
         # Force a sync to ensure sharding is complete and old memory is freed.
         torch.cuda.synchronize()
         clear_memory()
