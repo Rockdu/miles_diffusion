@@ -24,6 +24,7 @@ SUBSET = "flowgrpo_ocr"
 @dataclass
 class ScriptArgs(U.ExecuteTrainConfig):
     mode: str = "async"  # sync | async
+    split: bool = False  # sync on async's separate 6 train + 2 rollout pools (NCCL weight sync)
     tag: str = "run"
     num_rollout: int = 100
     data_dir: str = "/root/datasets"
@@ -63,7 +64,7 @@ def execute(args: ScriptArgs, data_dir: str) -> None:
         "--train-backend fsdp --diffusion-forward-dtype bf16 --deterministic-mode "
         "--rollout-num-gpus-per-engine 1 --num-gpus-per-node 8 "
     )
-    if is_async:
+    if is_async or args.split:
         layout_args = "--actor-num-gpus-per-node 6 --rollout-num-gpus 2 --micro-batch-size 4 "
     else:
         layout_args = (
@@ -82,7 +83,7 @@ def execute(args: ScriptArgs, data_dir: str) -> None:
         config=args,
         extra_env_vars={
             "HF_TOKEN": os.environ.get("HF_TOKEN", ""),
-            **({} if is_async else {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}),
+            **({} if is_async or args.split else {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}),
         },
     )
 
