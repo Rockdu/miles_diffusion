@@ -538,7 +538,9 @@ class FSDPTrainRayActor(TrainRayActor):
         # pi_old: the EMA weights the rollout sampled with.
         old_pred = None
         if self.args.loss_type == "nft":
-            with torch.no_grad(), self.ema_optimizer.use_weights(prepared.model, previous=self.args.train_async):
+            with torch.no_grad(), self.ema_optimizer.use_weights(
+                prepared.model, previous=self.args.train_async and self.args.nft_async_old_ema == "previous"
+            ):
                 old_pred = _compute_noise_pred(prepared.model).detach()
 
         # KL reference.

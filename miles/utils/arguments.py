@@ -1153,6 +1153,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--nft-async-old-ema",
+                type=str,
+                choices=["previous", "current"],
+                default="previous",
+                help=(
+                    "Async NFT pi_old in the loss: the EMA the prefetched batch was sampled with (previous), "
+                    "or the EMA after the latest step (current)."
+                ),
+            )
+            parser.add_argument(
                 "--ema-decay-init",
                 type=float,
                 default=0.001,
@@ -1802,8 +1812,9 @@ def miles_validate_args(args):
 
     validate_lora_weight_sync_args(args)
 
-    if not 0.0 <= args.ema_decay_init <= 1.0:
-        raise ValueError(f"--ema-decay-init must be in [0, 1], got {args.ema_decay_init}")
+    # Negative decay extrapolates the EMA past the actor.
+    if not -1.0 <= args.ema_decay_init <= 1.0:
+        raise ValueError(f"--ema-decay-init must be in [-1, 1], got {args.ema_decay_init}")
     if not math.isfinite(args.ema_decay_ramp) or args.ema_decay_ramp < 0.0:
         raise ValueError(f"--ema-decay-ramp must be finite and non-negative, got {args.ema_decay_ramp}")
     if not 0.0 <= args.ema_decay_max <= 1.0:
