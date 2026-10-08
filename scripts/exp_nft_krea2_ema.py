@@ -21,10 +21,22 @@ DATASET = "rockdu/miles-diffusion-datasets"
 SUBSET = "flowgrpo_ocr"
 
 
+# Throughput sweep presets: (train GPUs, micro-batch size, gradient checkpointing); colocated when train GPUs is 8.
+LAYOUTS = {
+    "colo_mb2_ckpt": (8, 2, True),
+    "colo_mb6": (8, 6, False),
+    "colo_mb3": (8, 3, False),
+    "split62_mb4": (6, 4, False),
+    "split62_mb2": (6, 2, False),
+    "split44_mb6": (4, 6, False),
+}
+
+
 @dataclass
 class ScriptArgs(U.ExecuteTrainConfig):
     mode: str = "async"  # sync | async
     split: bool = False  # sync on async's separate 6 train + 2 rollout pools (NCCL weight sync)
+    layout: str = ""  # a LAYOUTS key; overrides the mode's default GPU layout and micro-batching
     tag: str = "run"
     num_rollout: int = 100
     data_dir: str = "/root/datasets"
@@ -64,7 +76,14 @@ def execute(args: ScriptArgs, data_dir: str) -> None:
         "--train-backend fsdp --diffusion-forward-dtype bf16 --deterministic-mode "
         "--rollout-num-gpus-per-engine 1 --num-gpus-per-node 8 "
     )
-    if is_async or args.split:
+    if args.layout:
+        train_gpus, micro_batch_size, grad_ckpt = LAYOUTS[args.layout]
+        layout_args = (
+            f"--actor-num-gpus-per-node {train_gpus} --micro-batch-size {micro_batch_size} "
+            + ("--gradient-checkpointing " if grad_ckpt else "")
+            + ("--rollout-num-gpus 8 --colocate " if train_gpus == 8 else f"--rollout-num-gpus {8 - train_gpus} ")
+        )
+    elif is_async or args.split:
         layout_args = "--actor-num-gpus-per-node 6 --rollout-num-gpus 2 --micro-batch-size 4 "
     else:
         layout_args = (
@@ -83,7 +102,11 @@ def execute(args: ScriptArgs, data_dir: str) -> None:
         config=args,
         extra_env_vars={
             "HF_TOKEN": os.environ.get("HF_TOKEN", ""),
-            **({} if is_async or args.split else {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}),
+            **(
+                {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
+                if "--colocate" in layout_args
+                else {}
+            ),
         },
     )
 
