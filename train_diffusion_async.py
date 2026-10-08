@@ -58,6 +58,9 @@ def train_loop(args, actor_model, rollout_manager, num_rollout_per_epoch):
         if run_eval or (rollout_id + 1) % args.async_weight_sync_interval == 0:
             actor_model.update_weights()
             pushed_version = rollout_id + 1
+        else:
+            # update_weights() also frees the cached blocks the next train step needs.
+            actor_model.clear_memory()
         if run_eval:
             ray.get(rollout_manager.eval.remote(rollout_id))
         tracking_utils.log(
