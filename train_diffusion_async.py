@@ -22,6 +22,8 @@ def train_loop(args, actor_model, rollout_manager, num_rollout_per_epoch):
     actor_model.update_weights(previous_ema=True)
     current_batch = ray.get(rollout_manager.generate.remote(args.start_rollout_id))
     actor_model.update_weights()
+    # Weight version (optimizer steps) the rollout engines hold, and the one that sampled current_batch.
+    pushed_version = sampled_version = args.start_rollout_id
 
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
         is_last_rollout = rollout_id == args.num_rollout - 1
@@ -33,6 +35,8 @@ def train_loop(args, actor_model, rollout_manager, num_rollout_per_epoch):
             rollout_manager.save.remote(rollout_id) if save_checkpoint and args.rollout_global_dataset else None
         )
         next_batch_future = None if is_last_rollout else rollout_manager.generate.remote(rollout_id + 1)
+        next_sampled_version = pushed_version
+        sample_lag = rollout_id - sampled_version
 
         ray.get(actor_model.async_train(rollout_id, current_batch))
 
@@ -47,13 +51,22 @@ def train_loop(args, actor_model, rollout_manager, num_rollout_per_epoch):
                 ray.get(cursor_save)
             actor_model.save_model(rollout_id, force_sync=is_last_rollout)
 
+        sampled_version = next_sampled_version
+
         # No generation is in flight while the engines install the new weights.
-        actor_model.update_weights()
-        if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
+        run_eval = should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch)
+        if run_eval or (rollout_id + 1) % args.async_weight_sync_interval == 0:
+            actor_model.update_weights()
+            pushed_version = rollout_id + 1
+        if run_eval:
             ray.get(rollout_manager.eval.remote(rollout_id))
         tracking_utils.log(
             args,
-            {"perf/drain_wait_time": drain_wait, "rollout/step": compute_rollout_step(args, rollout_id)},
+            {
+                "perf/drain_wait_time": drain_wait,
+                "async/sample_lag": sample_lag,
+                "rollout/step": compute_rollout_step(args, rollout_id),
+            },
             step_key="rollout/step",
         )
 

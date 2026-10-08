@@ -1153,6 +1153,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--async-weight-sync-interval",
+                type=int,
+                default=1,
+                help="Async training pushes weights to the rollout engines every this many steps (and before eval).",
+            )
+            parser.add_argument(
                 "--nft-async-old-ema",
                 type=str,
                 choices=["previous", "current"],
