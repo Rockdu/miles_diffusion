@@ -29,6 +29,7 @@ LAYOUTS = {
     "split62_mb4": (6, 4, False),
     "split62_mb2": (6, 2, False),
     "split44_mb6": (4, 6, False),
+    "split71_mb4": (7, 4, False),  # needs --rollout-batch-size 7 so the 56 samples split over 7 ranks
 }
 
 
