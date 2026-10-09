@@ -62,7 +62,7 @@ def train_loop(args, actor_model, rollout_manager, num_rollout_per_epoch):
             # update_weights() also frees the cached blocks the next train step needs.
             actor_model.clear_memory()
         if run_eval:
-            ray.get(rollout_manager.eval.remote(rollout_id))
+            tracking_utils.log_eval(args, ray.get(rollout_manager.eval.remote(rollout_id)))
         tracking_utils.log(
             args,
             {
@@ -95,7 +95,7 @@ def train(args):
     eval_before_training = args.start_rollout_id == 0 and not args.skip_eval_before_train
     if args.eval_interval is not None and (eval_only or eval_before_training):
         actor_model.update_weights()
-        ray.get(rollout_manager.eval.remote(rollout_id=0))
+        tracking_utils.log_eval(args, ray.get(rollout_manager.eval.remote(rollout_id=0)))
 
     train_loop(args, actor_model, rollout_manager, num_rollout_per_epoch)
     ray.get(rollout_manager.dispose.remote())

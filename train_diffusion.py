@@ -38,7 +38,7 @@ def train(args):
 
     # special case for eval-only
     if args.num_rollout == 0 and args.eval_interval is not None:
-        ray.get(rollout_manager.eval.remote(rollout_id=0))
+        tracking_utils.log_eval(args, ray.get(rollout_manager.eval.remote(rollout_id=0)))
 
     def offload_train():
         if args.offload_train:
@@ -59,7 +59,7 @@ def train(args):
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
         logger.info(f"train: rollout {rollout_id} generate start")
         if args.eval_interval is not None and rollout_id == 0 and not args.skip_eval_before_train:
-            ray.get(rollout_manager.eval.remote(rollout_id))
+            tracking_utils.log_eval(args, ray.get(rollout_manager.eval.remote(rollout_id)))
 
         # generating rollout data
         rollout_data_ref = ray.get(rollout_manager.generate.remote(rollout_id))
@@ -81,7 +81,7 @@ def train(args):
         actor_model.update_weights()
 
         if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch, args.num_rollout):
-            ray.get(rollout_manager.eval.remote(rollout_id))
+            tracking_utils.log_eval(args, ray.get(rollout_manager.eval.remote(rollout_id)))
 
     ray.get(rollout_manager.dispose.remote())
     tracking_utils.finish_tracking(args)

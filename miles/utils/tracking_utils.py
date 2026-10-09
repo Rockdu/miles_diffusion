@@ -34,3 +34,10 @@ def finish_tracking(args):
     """Flush and close this process's tracking run; shared-mode writers lose queued logs if killed first."""
     if args.use_wandb and wandb.run is not None:
         wandb.finish()
+
+
+def log_eval(args, metrics):
+    """Log eval scalars returned by RolloutManager.eval from the driver."""
+    if metrics:
+        print(f"eval metrics: {json.dumps(metrics)}", flush=True)
+        log(args, metrics, step_key="eval/step")

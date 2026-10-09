@@ -238,6 +238,7 @@ class RolloutManager:
             )
         if self._metric_checker is not None:
             self._metric_checker.on_eval(metrics)
+        return metrics
 
     def save(self, rollout_id):
         self.data_source.save(rollout_id)
@@ -687,10 +688,8 @@ def _log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any]
                     log_dict[f"eval/{key}/{name}"] = sum(values) / len(values)
     logger.info(f"eval {rollout_id}: {log_dict}")
 
-    step = compute_rollout_step(args, rollout_id)
-    log_dict["eval/step"] = step
-    tracking_utils.log(args, log_dict, step_key="eval/step")
-
+    # The driver logs eval scalars: it is the primary wandb writer, so the last point survives shutdown.
+    log_dict["eval/step"] = compute_rollout_step(args, rollout_id)
     return log_dict
 
 
