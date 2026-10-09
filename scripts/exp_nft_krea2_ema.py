@@ -15,13 +15,14 @@ Usage:
     python3 scripts/exp_nft_krea2_ema.py --mode async --tag A1 --extra-args "--nft-async-old-ema current --seed 1234"
     python3 scripts/exp_nft_krea2_ema.py --mode sync --tag S0 --extra-args "--seed 1234"
 
-The eval subset is test.jsonl sampled with random.Random(0).sample(range(1018), 64), sorted, saved
-next to it as test_64.jsonl. Async runs need SGLang with distributed weight updates
+The eval subset (test_64.jsonl) is written next to test.jsonl on first use. Async runs need SGLang with distributed weight updates
 (sgl-project/sglang#42854); sgl-project/sglang#42470 avoids a scheduler port race at startup.
 """
 
 import os
+import random
 from dataclasses import dataclass
+from pathlib import Path
 
 import typer
 
@@ -123,11 +124,22 @@ def execute(args: ScriptArgs, data_dir: str) -> None:
     )
 
 
+def write_eval_subset(data_dir: str, size: int = 64) -> None:
+    subset = Path(data_dir) / f"test_{size}.jsonl"
+    if subset.exists():
+        return
+    lines = (Path(data_dir) / "test.jsonl").read_text().splitlines()
+    picked = sorted(random.Random(0).sample(range(len(lines)), size))
+    subset.write_text("\n".join(lines[i] for i in picked) + "\n")
+
+
 @U.dataclass_cli
 def main(args: ScriptArgs) -> None:
     assert args.mode in ("sync", "async"), args.mode
     local_dir = U.hf_download_dataset(DATASET, include=f"{SUBSET}/**", data_dir=args.data_dir)
-    execute(args, f"{local_dir}/{SUBSET}")
+    data_dir = f"{local_dir}/{SUBSET}"
+    write_eval_subset(data_dir)
+    execute(args, data_dir)
 
 
 if __name__ == "__main__":
