@@ -63,7 +63,7 @@ def execute(args: ScriptArgs, data_dir: str) -> None:
         "--diffusion-height 1024 --diffusion-width 1024 --diffusion-debug-mode "
         "--rollout-microgroup-size 1 --rollout-batch-size 6 --n-samples-per-prompt 8 "
         "--diffusion-eval-num-steps 52 --skip-eval-before-train "
-        f"--eval-prompt-data ocr_test {data_dir}/test.jsonl --eval-interval 50 "
+        f"--eval-prompt-data ocr_test64 {data_dir}/test_64.jsonl --eval-interval 25 "
         "--loss-type nft --diffusion-nft-beta 1.0 --diffusion-nft-timestep-fraction 0.99 "
         "--advantage-estimator grpo --globalize-reward-std "
         "--use-ema --rollout-weights ema "

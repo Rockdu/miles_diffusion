@@ -54,7 +54,7 @@ def train_loop(args, actor_model, rollout_manager, num_rollout_per_epoch):
         sampled_version = next_sampled_version
 
         # No generation is in flight while the engines install the new weights.
-        run_eval = should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch)
+        run_eval = should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch, args.num_rollout)
         if run_eval or (rollout_id + 1) % args.async_weight_sync_interval == 0:
             actor_model.update_weights()
             pushed_version = rollout_id + 1
