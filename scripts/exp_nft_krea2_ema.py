@@ -2,11 +2,22 @@
 
 Both modes share the async recipe's batch (6 prompts x 8 samples) and NFT/optimizer/LoRA
 settings, on one 8-GPU node. sync colocates train+rollout on all 8 GPUs; async uses 6 train +
-2 rollout GPUs as in scripts/run_diffusion_nft_krea2_async.py.
+2 rollout GPUs as in scripts/run_diffusion_nft_krea2_async.py. Eval runs on a fixed 64-prompt
+subset of the OCR test set every 25 steps and at the last step.
+
+Runs:
+    S0  sync, colocated            --mode sync
+    S2  sync, 6 train + 2 rollout  --mode sync --split
+    A0  async, pi_old = previous EMA (PR #232 default)
+    A1  async, pi_old = current EMA  --extra-args "--nft-async-old-ema current"
 
 Usage:
-    python3 scripts/exp_nft_krea2_ema.py --mode async --tag A0
-    python3 scripts/exp_nft_krea2_ema.py --mode async --tag A1 --extra-args "--nft-async-old-ema current"
+    python3 scripts/exp_nft_krea2_ema.py --mode async --tag A1 --extra-args "--nft-async-old-ema current --seed 1234"
+    python3 scripts/exp_nft_krea2_ema.py --mode sync --tag S0 --extra-args "--seed 1234"
+
+The eval subset is test.jsonl sampled with random.Random(0).sample(range(1018), 64), sorted, saved
+next to it as test_64.jsonl. Async runs need SGLang with distributed weight updates
+(sgl-project/sglang#42854); sgl-project/sglang#42470 avoids a scheduler port race at startup.
 """
 
 import os
