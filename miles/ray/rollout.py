@@ -117,6 +117,7 @@ class RolloutManager:
         self.rollout_engine_lock = Lock.options(num_cpus=1, num_gpus=0).remote()
         self.rollout_id = -1
         self._metric_checker = MetricChecker.maybe_create(args)
+        self._image_log_threads: list[threading.Thread] = []
         self._health_monitor = None
         if self.args.use_fault_tolerance:
             self._health_monitor = RolloutHealthMonitor(self, args)
@@ -149,6 +150,9 @@ class RolloutManager:
         from miles.dashboard import hooks
 
         hooks.detach_and_flush()
+        for thread in self._image_log_threads:
+            thread.join(timeout=300)
+        tracking_utils.finish_tracking(self.args)
         if self._metric_checker is not None:
             self._metric_checker.dispose()
         if self._health_monitor is not None:
@@ -432,7 +436,9 @@ class RolloutManager:
 
     def _log_images_async(self, *args, **kwargs) -> None:
         # mp4 encode + wandb upload take ~1min per log round; keep them off the train barrier
-        threading.Thread(target=self._log_images, args=args, kwargs=kwargs, daemon=True).start()
+        thread = threading.Thread(target=self._log_images, args=args, kwargs=kwargs, daemon=True)
+        thread.start()
+        self._image_log_threads = [t for t in self._image_log_threads if t.is_alive()] + [thread]
 
     def _log_images(
         self,

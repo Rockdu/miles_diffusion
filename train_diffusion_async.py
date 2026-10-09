@@ -99,6 +99,7 @@ def train(args):
 
     train_loop(args, actor_model, rollout_manager, num_rollout_per_epoch)
     ray.get(rollout_manager.dispose.remote())
+    tracking_utils.finish_tracking(args)
 
 
 if __name__ == "__main__":

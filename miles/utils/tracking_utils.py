@@ -28,3 +28,9 @@ def log(args, metrics, step_key, is_media=False):
         # No step=: interleaved rollout/train logs aren't globally monotonic; the
         # x-axis comes from per-metric step_metric (wandb_utils._init_wandb_common).
         wandb.log(metrics)
+
+
+def finish_tracking(args):
+    """Flush and close this process's tracking run; shared-mode writers lose queued logs if killed first."""
+    if args.use_wandb and wandb.run is not None:
+        wandb.finish()
