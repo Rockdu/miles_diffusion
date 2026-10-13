@@ -30,7 +30,7 @@ class ScriptArgs(U.ExecuteTrainConfig):
 def execute(args: ScriptArgs, data_dir: str) -> None:
     run_name = f"krea2_grpo_align_{args.tag}_{U.create_run_id()}"
     train_args = (
-        f"--hf-checkpoint {MODEL} --diffusion-task t2i "
+        f"--hf-checkpoint {MODEL} "
         "--rollout-function-path miles.rollout.sglang_diffusion_rollout.generate_rollout "
         f"--prompt-data {data_dir}/train.jsonl --input-key input "
         f"--num-rollout {args.num_rollout} --rollout-batch-size 2 --n-samples-per-prompt 8 --global-batch-size 16 "
